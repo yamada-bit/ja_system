@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}設定メニュー - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-settings" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム</div>
+        <h1>- 設定メニュー画面 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:menu' %}'">メイン画面へ戻る</button>
+
+    <div class="content-container">
+      <div class="settings-menu-container" id="settings-menu-grid">
+        {% if menu_visibility.staff_master %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'accounts:staff_list' %}'">職員マスタ</button>
+        {% endif %}
+        {% if menu_visibility.dept_management %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'organizations:dept_list' %}'">部署管理</button>
+        {% endif %}
+        {% if menu_visibility.authority_management %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'permissions:authority_list' %}'">権限管理</button>
+        {% endif %}
+        {% if menu_visibility.class_management %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'masters:class_list' %}'">分類管理</button>
+        {% endif %}
+        {% if menu_visibility.category_management %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'masters:cat_list' %}'">カテゴリー管理</button>
+        {% endif %}
+        {% if menu_visibility.eapproval_management %}
+        <button type="button" class="settings-btn" onclick="alert('電子決裁管理へ遷移')">電子決裁管理</button>
+        {% endif %}
+        {% if menu_visibility.notice_management %}
+        <button type="button" class="settings-btn" onclick="alert('月末に1回、夜間タスクで<お知らせ>の対象データを\nCSVで規定フォルダへ出力予定')">通知管理</button>
+        {% endif %}
+        {% if menu_visibility.retention_setting %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'masters:retention_list' %}'">保存期間設定</button>
+        {% endif %}
+        {% if menu_visibility.item_management %}
+        <button type="button" class="settings-btn" onclick="alert('※本機能は一旦不要となった')">項目管理</button>
+        {% endif %}
+        {% if menu_visibility.audit_log %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'audit:log_list' %}'">操作履歴ログ</button>
+        {% endif %}
+        {% if menu_visibility.other_settings %}
+        <button type="button" class="settings-btn" onclick="window.location.href='{% url 'core:other_settings' %}'">その他設定</button>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% endblock %}

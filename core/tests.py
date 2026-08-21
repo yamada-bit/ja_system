@@ -1,0 +1,1347 @@
+import datetime
+import os
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from django.conf import settings
+from django.contrib.sessions.backends.db import SessionStore
+from django.core.files.base import ContentFile
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
+from django.db import OperationalError
+from django.test import TestCase, override_settings
+from django.utils import timezone
+from pypdf import PdfReader, PdfWriter
+
+from accounts.models import Employee, Position, Rank
+from audit.models import AuditLog
+from core import ocr_layout_services, pdf_text_embed_services
+from core.file_type_services import is_image_filename
+from core.forms import search_year_choices
+from core.notice_services import get_notice_counts, is_expiring_soon
+from core.ocr_layout_services import OcrDisabledError
+from core.text_extraction_services import is_scanned, try_immediate_text_layer_extraction
+from core.upload_services import (
+    ChunkUploadError,
+    PendingFileStorageError,
+    TMP_UPLOAD_SUBDIR,
+    clear_pending_files,
+    combine_upload_chunks,
+    open_pending_file,
+    save_pending_files,
+    save_upload_chunk,
+)
+from core.widgets import PopupSelectWidget
+from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
+from organizations.models import Department
+from permissions.models import PermissionProfile, PermissionRole
+
+
+class MenuViewNoticeThresholdDisplayTests(TestCase):
+    """screen-menuのお知らせ文言「有効期限切れまでXヶ月以内」「直近Xヶ月内で削除」のX表示。
+
+    原本index.html:121-122は実際にはJSでも一度も置換されない静的モック文言「X ヶ月」だった
+    （原本フィデリティ監査で発見）。件数側は既に実データを表示しているため不整合になっており、
+    実際の設定値（settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/NOTICE_DELETED_THRESHOLD_MONTHS）を
+    表示するよう修正した（2026-08-13ユーザー指摘）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    @override_settings(NOTICE_EXPIRING_THRESHOLD_MONTHS=3, NOTICE_DELETED_THRESHOLD_MONTHS=2)
+    def test_menu_displays_configured_threshold_values(self):
+        response = self.client.get("/")
+        self.assertContains(response, "有効期限切れまで 3 ヶ月以内の文書が")
+        self.assertContains(response, "直近 2 ヶ月内で削除された文書が")
+
+
+class SearchYearChoicesTests(TestCase):
+    """screen-search「年」プルダウン／年選択ポップアップの選択肢（core.forms.search_year_choices、
+    xlsx 検索・閲覧・変更!B137-140「今年～文書が保存されている最古の年」、B499で契約書も同一規則）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+
+    def test_no_documents_returns_current_year_only(self):
+        current = datetime.date.today().year
+        self.assertEqual(search_year_choices("document"), [(current, f"{current} 年")])
+
+    def test_includes_range_down_to_oldest_saved_year(self):
+        from documents.models import Document
+
+        current = datetime.date.today().year
+        oldest_year = current - 5
+        doc = Document(
+            title="古い文書", department=self.department, group=self.group, category=self.category,
+            year=oldest_year, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(current + 10, 1, 1),
+        )
+        doc.file.save("old.pdf", ContentFile(b"dummy"), save=False)
+        doc.save()
+
+        choices = search_year_choices("document")
+        self.assertEqual(choices[0], (current, f"{current} 年"))
+        self.assertEqual(choices[-1], (oldest_year, f"{oldest_year} 年"))
+        self.assertEqual(len(choices), current - oldest_year + 1)
+
+    def test_deleted_documents_do_not_extend_range(self):
+        from documents.models import Document
+
+        current = datetime.date.today().year
+        doc = Document(
+            title="ゴミ箱の古い文書", department=self.department, group=self.group, category=self.category,
+            year=current - 20, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(current + 10, 1, 1), is_deleted=True,
+        )
+        doc.file.save("old.pdf", ContentFile(b"dummy"), save=False)
+        doc.save()
+
+        self.assertEqual(search_year_choices("document"), [(current, f"{current} 年")])
+
+
+class MenuButtonVisibilityTests(TestCase):
+    """screen-menuは原本HTML同様、メニューボタン（検索・閲覧・変更/保管の文書・契約書）を
+    部署設定に関わらず常に表示する静的な画面である（organizations.MenuItemSettingは
+    screen-other-main-editの設定値保持のみに使い、メイン画面の表示制御には連動させない。
+    一度連動させる変更を入れたが、未設定部署でボタンが全て消え原本の見た目から大きく逸脱したため
+    撤回した、2026-08-19ユーザー指摘）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_menu_always_shows_all_search_and_storage_buttons(self):
+        from django.urls import reverse
+
+        response = self.client.get("/")
+        self.assertContains(response, f"window.location.href='{reverse('documents:search')}'")
+        self.assertContains(response, f"window.location.href='{reverse('contracts:search')}'")
+        self.assertContains(response, f"window.location.href='{reverse('documents:upload_step1')}'")
+        self.assertContains(response, f"window.location.href='{reverse('contracts:upload_step1')}'")
+
+
+class SettingsMenuVisibilityTests(TestCase):
+    """screen-settingsのボタン表示/非表示（xlsx 設定メニュー!B31、詳細はB46以降の埋め込み画像の表）。
+    システム権限（管理者/所属長/一般）ごとに表示してよいボタンが異なる。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_admin_sees_all_buttons(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.get("/settings/")
+        for label in ["職員マスタ", "部署管理", "権限管理", "分類管理", "カテゴリー管理",
+                      "電子決裁管理", "通知管理", "保存期間設定", "項目管理", "操作履歴ログ", "その他設定"]:
+            self.assertContains(response, f">{label}<")
+
+    def test_manager_sees_only_manager_level_buttons(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.MANAGER)
+        response = self.client.get("/settings/")
+        for label in ["権限管理", "分類管理", "カテゴリー管理", "その他設定"]:
+            self.assertContains(response, f">{label}<")
+        for label in ["職員マスタ", "部署管理", "電子決裁管理", "通知管理", "保存期間設定", "項目管理", "操作履歴ログ"]:
+            self.assertNotContains(response, f">{label}<")
+
+    def test_staff_sees_only_staff_level_buttons(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        response = self.client.get("/settings/")
+        for label in ["カテゴリー管理", "その他設定"]:
+            self.assertContains(response, f">{label}<")
+        for label in ["職員マスタ", "部署管理", "権限管理", "分類管理",
+                      "電子決裁管理", "通知管理", "保存期間設定", "項目管理", "操作履歴ログ"]:
+            self.assertNotContains(response, f">{label}<")
+
+    def test_no_profile_defaults_to_staff_level(self):
+        """PermissionProfile未作成の職員はget_role()でSTAFF扱いになる（permissions.services.get_role）。"""
+        response = self.client.get("/settings/")
+        self.assertContains(response, ">カテゴリー管理<")
+        self.assertNotContains(response, ">職員マスタ<")
+
+
+class NoticeCountsTests(TestCase):
+    """screen-menuの「お知らせ」3件（xlsx メイン画面!C42-46）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+
+    def _create_document(self, expiry_date, is_deleted=False, deleted_at=None):
+        from documents.models import Document
+
+        doc = Document(
+            title="テスト", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=expiry_date, is_deleted=is_deleted, deleted_at=deleted_at,
+        )
+        doc.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        doc.save()
+        return doc
+
+    def test_expired_document_counted(self):
+        today = timezone.localdate()
+        self._create_document(expiry_date=today - datetime.timedelta(days=1))
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expired, 1)
+        self.assertEqual(counts.expiring_soon, 0)
+
+    def test_expiring_soon_within_threshold_counted(self):
+        today = timezone.localdate()
+        self._create_document(expiry_date=today + datetime.timedelta(days=5))
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expiring_soon, 1)
+
+    def test_expiring_far_in_future_not_counted(self):
+        today = timezone.localdate()
+        self._create_document(expiry_date=today + datetime.timedelta(days=400))
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expiring_soon, 0)
+
+    def test_recently_deleted_counted(self):
+        now = timezone.now()
+        self._create_document(
+            expiry_date=timezone.localdate() + datetime.timedelta(days=100),
+            is_deleted=True,
+            deleted_at=now,
+        )
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.recently_deleted, 1)
+
+    def test_other_department_document_not_counted_for_staff(self):
+        """一般職員（`can_select_department`がFalse）は自部署以外の文書がカウントされない
+        ことを確認する（お知らせのバッジ件数と検索結果件数を一致させるための絞り込み）。"""
+        other_department = Department.objects.create(
+            branch_code="999", branch_name="他支店", section_code="09", section_name="他部署"
+        )
+        today = timezone.localdate()
+        other_doc = self._create_document(expiry_date=today - datetime.timedelta(days=1))
+        other_doc.department = other_department
+        other_doc.save()
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expired, 0)
+
+    @override_settings(NOTICE_EXPIRING_THRESHOLD_MONTHS=6, NOTICE_DELETED_THRESHOLD_MONTHS=1)
+    def test_expiring_and_deleted_thresholds_are_independent(self):
+        """xlsx メイン画面!B36/B38は別々の設定値。2026-08-13以前は`SystemSetting.
+        notice_threshold_months`1つを両方が共有していたため、片方だけ変更する運用に対応できなかった
+        （settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/NOTICE_DELETED_THRESHOLD_MONTHSへ分離）。"""
+        today = timezone.localdate()
+        # 5ヶ月後失効：EXPIRING側のしきい値(6ヶ月)には収まるが、DELETED側のしきい値(1ヶ月)を
+        # そのまま誤って流用していたら収まらないはずの期間。
+        self._create_document(expiry_date=today + datetime.timedelta(days=150))
+        # 3ヶ月前に削除：DELETED側のしきい値(1ヶ月)には収まらないが、EXPIRING側のしきい値(6ヶ月)を
+        # そのまま誤って流用していたら収まってしまうはずの期間。
+        self._create_document(
+            expiry_date=today + datetime.timedelta(days=200),
+            is_deleted=True,
+            deleted_at=timezone.now() - datetime.timedelta(days=90),
+        )
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expiring_soon, 1)
+        self.assertEqual(counts.recently_deleted, 0)
+
+
+class IsExpiringSoonTests(TestCase):
+    """popup-detail「まもなく有効期限（更新月）」バナー用の判定（原本index.html:1146に対応する
+    実データ上の状態。原本フィデリティ監査で発見・新設）。"""
+
+    def test_already_expired_is_not_expiring_soon(self):
+        today = timezone.localdate()
+        self.assertFalse(is_expiring_soon(today - datetime.timedelta(days=1)))
+
+    def test_within_threshold_is_expiring_soon(self):
+        today = timezone.localdate()
+        self.assertTrue(is_expiring_soon(today + datetime.timedelta(days=5)))
+
+    def test_far_future_is_not_expiring_soon(self):
+        today = timezone.localdate()
+        self.assertFalse(is_expiring_soon(today + datetime.timedelta(days=400)))
+
+
+class OtherSettingsRoutingTests(TestCase):
+    """xlsx その他設定シート: 権限（管理者のみ／管理者以外）で表示内容を振り分ける。
+    原本のデモ用ログインID分岐(`login-user`が"2"/"3"か)を実際のPermissionRoleに置き換えている。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_admin_sees_main_settings(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.get("/settings/other/")
+        self.assertContains(response, "メイン画面項目")
+
+    def test_staff_sees_password_change(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        response = self.client.get("/settings/other/")
+        self.assertContains(response, "変更後パスワード")
+
+    def test_no_profile_defaults_to_password_change(self):
+        response = self.client.get("/settings/other/")
+        self.assertContains(response, "変更後パスワード")
+
+    def test_staff_cannot_access_main_edit(self):
+        department2 = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        response = self.client.get(f"/settings/other/main/{department2.pk}/edit/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_cannot_access_logout_edit(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        response = self.client.get("/settings/other/logout/edit/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_password_change_requires_matching_confirmation(self):
+        response = self.client.get("/settings/other/")
+        token = response.context["token"]
+        response2 = self.client.post(
+            "/settings/other/",
+            {"new_password": "newpass1", "new_password_confirm": "different", "token": token},
+        )
+        self.assertContains(response2, "一致しません")
+        self.employee.refresh_from_db()
+        self.assertTrue(self.employee.check_password("pass1234"))
+
+    def test_password_change_rejects_short_or_symbol_password(self):
+        """xlsx その他設定!B152(Rev1.1)「半角英数6桁以上とする。記号、全角文字が含まれる場合は
+        更新時にエラーとする。」"""
+        response = self.client.get("/settings/other/")
+        token = response.context["token"]
+        response2 = self.client.post(
+            "/settings/other/",
+            {"new_password": "ab1", "new_password_confirm": "ab1", "token": token},
+        )
+        self.assertContains(response2, "半角英数6桁以上")
+
+        response = self.client.get("/settings/other/")
+        token = response.context["token"]
+        response3 = self.client.post(
+            "/settings/other/",
+            {"new_password": "abc12!", "new_password_confirm": "abc12!", "token": token},
+        )
+        self.assertContains(response3, "半角英数6桁以上")
+        self.employee.refresh_from_db()
+        self.assertTrue(self.employee.check_password("pass1234"))
+
+    def test_password_change_rejects_same_as_current(self):
+        """xlsx その他設定!B149-150(Rev1.1)「現在のパスワードと同一の場合は更新時にエラーとする」。"""
+        response = self.client.get("/settings/other/")
+        token = response.context["token"]
+        response2 = self.client.post(
+            "/settings/other/",
+            {"new_password": "pass1234", "new_password_confirm": "pass1234", "token": token},
+        )
+        self.assertContains(response2, "現在のパスワードと同じ")
+
+    def test_password_change_creates_audit_log(self):
+        """原本index.html:3225の操作履歴ログサンプル「パスワード　更新」に対応
+        （原本フィデリティ監査で発見：以前は一切記録されていなかった）。"""
+        response = self.client.get("/settings/other/")
+        token = response.context["token"]
+        self.client.post(
+            "/settings/other/",
+            {"new_password": "newpass123", "new_password_confirm": "newpass123", "token": token},
+        )
+        self.assertTrue(AuditLog.objects.filter(action="パスワード 更新", employee_no="1").exists())
+
+
+class OtherMainListPaginationTests(TestCase):
+    """screen-other-main一覧のページャーが実際に機能することを確認（原本フィデリティ監査で発見：
+    以前は部署数に関わらず常に1ページ固定・次へ/前へdisabledの静的ページャーで、Django Paginator
+    が未実装だった。他の一覧画面〈分類管理・カテゴリー管理・操作履歴ログ等〉との一貫性のため
+    PAGE_SIZE=100で追加、Rev1.1で50→100件に変更）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+        # 既存の1件と合わせて101件にし、1ページ100件の境界を超えさせる。
+        for i in range(100):
+            Department.objects.create(
+                branch_code=f"{i:03d}", branch_name=f"支店{i}", section_code="", section_name="",
+            )
+
+    def test_second_page_has_remaining_department(self):
+        response = self.client.get("/settings/other/")
+        self.assertEqual(response.context["page_obj"].paginator.num_pages, 2)
+        response2 = self.client.get("/settings/other/?page=2")
+        self.assertEqual(len(response2.context["page_obj"]), 1)
+
+    def test_row_number_continues_across_pages(self):
+        response2 = self.client.get("/settings/other/?page=2")
+        self.assertIn(">101<", response2.content.decode())
+
+
+class OtherMainEditViewTests(TestCase):
+    """screen-other-main-edit「No.」欄は一覧(other_main.html)と同じ表示順を示す必要がある
+    （原本フィデリティ監査で発見：以前はdepartment.pkをそのまま表示しており、一覧の行番号と
+    食い違っていた）。"""
+
+    def setUp(self):
+        # branch_code降順で作成することで、作成順(pk順)と一覧の並び順(branch_code順)を
+        # わざとずらし、No.計算がpkの丸写しになっていないことを検証できるようにする。
+        self.dept_b = Department.objects.create(
+            branch_code="999", branch_name="Z支店", section_code="", section_name=""
+        )
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_no_reflects_list_display_order_not_pk(self):
+        # dept_aはpkが2番目だが、branch_code順では1番目に表示されるべき。
+        response = self.client.get(f"/settings/other/main/{self.dept_a.pk}/edit/")
+        self.assertEqual(response.context["no"], 1)
+        response2 = self.client.get(f"/settings/other/main/{self.dept_b.pk}/edit/")
+        self.assertEqual(response2.context["no"], 2)
+
+    def test_main_edit_creates_audit_log(self):
+        response = self.client.get(f"/settings/other/main/{self.dept_a.pk}/edit/")
+        token = response.context["token"]
+        self.client.post(f"/settings/other/main/{self.dept_a.pk}/edit/", {"token": token})
+        self.assertTrue(AuditLog.objects.filter(action="メイン画面項目設定 更新").exists())
+
+    def test_logout_edit_creates_audit_log(self):
+        response = self.client.get("/settings/other/logout/edit/")
+        token = response.context["token"]
+        self.client.post("/settings/other/logout/edit/", {"session_idle_timeout_minutes": "30", "token": token})
+        self.assertTrue(AuditLog.objects.filter(action="自動ログアウト時間設定 更新").exists())
+
+
+class UploadServicesErrorHandlingTests(TestCase):
+    """core/upload_services.pyのファイルI/O例外処理（コード監査2026-08-10で指摘・修正）。
+    握りつぶさず`PendingFileStorageError`として意味のある形で伝播すること、複数ファイル
+    ループ途中の失敗で孤児ファイルを残さないことを検証する。
+    """
+
+    SESSION_KEY = "test_pending_files"
+
+    def setUp(self):
+        self.session = SessionStore()
+        self.tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
+
+    def test_mkdir_failure_raises_pending_file_storage_error(self):
+        files = [SimpleUploadedFile("a.pdf", b"dummy")]
+        with patch("pathlib.Path.mkdir", side_effect=OSError("simulated disk error")):
+            with self.assertRaises(PendingFileStorageError):
+                save_pending_files(self.session, self.SESSION_KEY, files)
+
+    def test_write_failure_rolls_back_earlier_files_in_same_batch(self):
+        real_open = open
+
+        files = [
+            SimpleUploadedFile("first.pdf", b"dummy1"),
+            SimpleUploadedFile("second.pdf", b"dummy2"),
+        ]
+
+        # 1件目は成功させ、2件目の書き込みで失敗させることで、1件目として書き込み済みの
+        # 一時ファイルがロールバックされることを確認する
+        # （tmp_uploads配下への書き込み(wb)だけを狙って失敗させ、テストランナー自体の
+        # ログ出力等、他のファイルI/Oを巻き込まないようにする）。
+        call_count = {"n": 0}
+
+        def flaky_open_second_only(file, mode="r", *args, **kwargs):
+            if mode == "wb" and TMP_UPLOAD_SUBDIR in str(file):
+                call_count["n"] += 1
+                if call_count["n"] == 2:
+                    raise OSError("simulated disk error")
+            return real_open(file, mode, *args, **kwargs)
+
+        before = set(self.tmp_dir.glob("*")) if self.tmp_dir.exists() else set()
+        with patch("builtins.open", side_effect=flaky_open_second_only):
+            with self.assertRaises(PendingFileStorageError):
+                save_pending_files(self.session, self.SESSION_KEY, files)
+        after = set(self.tmp_dir.glob("*")) if self.tmp_dir.exists() else set()
+
+        # 失敗後もtmp_uploads/に新規の孤児ファイルが残っていないこと、セッションにも
+        # 部分的な状態が反映されていないことを確認する。
+        self.assertEqual(before, after)
+        self.assertNotIn(self.SESSION_KEY, self.session)
+
+    def test_open_pending_file_missing_file_raises_pending_file_storage_error(self):
+        with self.assertRaises(PendingFileStorageError):
+            open_pending_file("does-not-exist_dummy.pdf")
+
+    def test_clear_pending_files_continues_after_delete_failure(self):
+        files = [SimpleUploadedFile("keep_me.pdf", b"dummy")]
+        pending = save_pending_files(self.session, self.SESSION_KEY, files)
+        temp_name = pending[0]["temp_name"]
+
+        with patch("pathlib.Path.unlink", side_effect=OSError("simulated permission error")):
+            # 削除が失敗しても例外を再送出せず処理を継続し、セッションからは消すことを確認する
+            # （clear_pending_filesのdocstringに明記した意図的な設計判断）。
+            clear_pending_files(self.session, self.SESSION_KEY)
+
+        self.assertNotIn(self.SESSION_KEY, self.session)
+        # 実体は削除に失敗しているため残っている（孤児ファイル）。後片付けする。
+        (self.tmp_dir / temp_name).unlink(missing_ok=True)
+
+
+class ChunkUploadServiceTests(TestCase):
+    """core/upload_services.pyのチャンク分割アップロード（save_upload_chunk/combine_upload_chunks）。
+    documents/contracts.tests.ChunkUploadAPITestsがビュー経由の配線を検証するのに対し、
+    こちらはサービス層のファイル結合・サイズ上限・クリーンアップの挙動そのものを検証する。
+    """
+
+    SESSION_KEY = "test_chunk_pending_files"
+
+    def setUp(self):
+        self.session = SessionStore()
+        self.chunk_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR / "chunks"
+        self.tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
+
+    def test_combine_appends_to_existing_session_pending_list(self):
+        """通常アップロード分（save_pending_files）が既にセッションへ登録済みの状態でも、
+        チャンク経由のファイルが上書きせず追記されること（documents/contracts.UploadStep1View.post
+        の「通常ファイル0件でもチャンク経由の登録済み分で進める」設計の前提）。
+        """
+        existing = save_pending_files(
+            self.session, self.SESSION_KEY, [SimpleUploadedFile("first.pdf", b"dummy")]
+        )
+        save_upload_chunk("upload-1", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        combine_upload_chunks(self.session, self.SESSION_KEY, "upload-1", 1, "second.pdf")
+
+        pending = self.session[self.SESSION_KEY]
+        self.assertEqual(len(pending), 2)
+        self.assertEqual(pending[0]["temp_name"], existing[0]["temp_name"])
+        self.assertTrue(pending[1]["temp_name"].endswith("_second.pdf"))
+        # チャンク断片は結合成功後に削除されていること。
+        self.assertFalse((self.chunk_dir / "upload-1").exists())
+
+    def test_missing_chunk_raises_and_cleans_up_saved_chunks(self):
+        save_upload_chunk("upload-2", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        # チャンク1を保存せずに結合を試みる（total_chunks=2だが実際には1つしか無い）。
+        with self.assertRaises(ChunkUploadError):
+            combine_upload_chunks(self.session, self.SESSION_KEY, "upload-2", 2, "broken.pdf")
+        self.assertNotIn(self.SESSION_KEY, self.session)
+        # 欠落検出時、保存済みだったチャンク0も後片付けされていること（ゴミを残さない設計）。
+        self.assertFalse((self.chunk_dir / "upload-2").exists())
+
+    def test_combined_size_over_limit_raises_and_cleans_up(self):
+        save_upload_chunk("upload-3", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        save_upload_chunk("upload-3", 1, SimpleUploadedFile("chunk", b"B" * 10))
+        with self.settings(CHUNK_UPLOAD_MAX_SIZE_BYTES=15):
+            with self.assertRaises(ChunkUploadError):
+                combine_upload_chunks(self.session, self.SESSION_KEY, "upload-3", 2, "toobig.pdf")
+        self.assertFalse((self.chunk_dir / "upload-3").exists())
+
+    def test_original_filename_path_component_is_stripped(self):
+        """original_filenameはブラウザ側File.nameをそのまま受け取る値のため、万一パス区切り文字が
+        混入していてもtmp_uploads配下に閉じたファイル名として結合すること（ディレクトリ
+        トラバーサル対策）。"""
+        save_upload_chunk("upload-4", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        combine_upload_chunks(self.session, self.SESSION_KEY, "upload-4", 1, "../../evil.pdf")
+
+        pending = self.session[self.SESSION_KEY]
+        temp_name = pending[0]["temp_name"]
+        self.assertNotIn("..", temp_name)
+        self.assertTrue((self.tmp_dir / temp_name).exists())
+        (self.tmp_dir / temp_name).unlink(missing_ok=True)
+
+    def test_save_upload_chunk_io_failure_raises_pending_file_storage_error(self):
+        with patch("pathlib.Path.mkdir", side_effect=OSError("simulated disk error")):
+            with self.assertRaises(PendingFileStorageError):
+                save_upload_chunk("upload-5", 0, SimpleUploadedFile("chunk", b"A"))
+
+
+class CleanupTempUploadsCommandTests(TestCase):
+    """core.management.commands.cleanup_temp_uploads（2026-08-13追加）。
+
+    storage/media/tmp_uploads/にテスト実行やウィザード中断の残骸が無期限に蓄積していた問題
+    （IsolatedMediaTestRunner導入と合わせて対応）への恒久策。settings.STALE_TMP_UPLOAD_
+    THRESHOLD_HOURSより古いものだけを削除し、閾値内（＝進行中の可能性がある）ものは残すこと、
+    chunks/配下は upload_id ディレクトリ単位で削除することを検証する。
+
+    コマンド名は`ja_system/bat/cleanup_temp_uploads.bat`が前提としている名前（Phase1(ja_pj_old)
+    時代の別レイアウト向けコマンドを指したまま移植されていなかった）に合わせている
+    （core.management.commands.cleanup_temp_uploadsのモジュールdocstring参照）。
+    """
+
+    def setUp(self):
+        self.tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
+        self.chunk_dir = self.tmp_dir / "chunks"
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    def _touch(self, path, hours_ago):
+        path.write_bytes(b"dummy")
+        old_time = (timezone.now() - datetime.timedelta(hours=hours_ago)).timestamp()
+        os.utime(path, (old_time, old_time))
+
+    def test_old_loose_file_removed_recent_file_kept(self):
+        old_file = self.tmp_dir / "old_a.pdf"
+        recent_file = self.tmp_dir / "recent_a.pdf"
+        self._touch(old_file, hours_ago=48)
+        self._touch(recent_file, hours_ago=1)
+
+        call_command("cleanup_temp_uploads")
+
+        self.assertFalse(old_file.exists())
+        self.assertTrue(recent_file.exists())
+
+    def test_old_chunk_dir_removed_recent_chunk_dir_kept(self):
+        old_chunk_dir = self.chunk_dir / "old-upload"
+        recent_chunk_dir = self.chunk_dir / "recent-upload"
+        old_chunk_dir.mkdir(parents=True)
+        recent_chunk_dir.mkdir(parents=True)
+        self._touch(old_chunk_dir / "chunk_0000", hours_ago=48)
+        self._touch(recent_chunk_dir / "chunk_0000", hours_ago=1)
+
+        call_command("cleanup_temp_uploads")
+
+        self.assertFalse(old_chunk_dir.exists())
+        self.assertTrue(recent_chunk_dir.exists())
+
+    def test_default_threshold_keeps_files_within_24_hours(self):
+        recent_file = self.tmp_dir / "recent_a.pdf"
+        self._touch(recent_file, hours_ago=23)
+
+        call_command("cleanup_temp_uploads")
+
+        self.assertTrue(recent_file.exists())
+
+    def test_dry_run_lists_targets_without_deleting(self):
+        old_file = self.tmp_dir / "old_a.pdf"
+        self._touch(old_file, hours_ago=48)
+
+        call_command("cleanup_temp_uploads", "--dry-run")
+
+        self.assertTrue(old_file.exists())
+
+
+class PopupSelectWidgetTamperResistanceTests(TestCase):
+    """core/widgets.pyのPopupSelectWidget（コード監査2026-08-10で指摘・修正）。フォーム改ざんで
+    非数値のpk値が混入しても、queryset.filter(pk__in=...)実行時に未処理のValueErrorで
+    500にならず、不正値を無視して描画できることを検証する。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+
+    def test_render_ignores_non_numeric_tampered_pk_without_raising(self):
+        widget = PopupSelectWidget(
+            popup_type="dept", mode="storage", api_url="/core/api/options/",
+            queryset=Department.objects.all(), multi=True,
+        )
+        # "abc"は改ざんされた非数値値。例外を送出せず、有効な値(self.department.pk)だけを
+        # ラベルに反映できることを確認する。
+        html = widget.render("dept", f"abc,{self.department.pk}", attrs={"id": "id_dept"})
+        self.assertIn("id_dept", html)
+        self.assertIn(str(self.department), html)
+
+
+class IsScannedTests(TestCase):
+    """core.text_extraction_services.is_scanned（スキャン文書判定、2026-08-10追加）の単体テスト。
+    元はcore.ocr_servicesにあったが、2026-08-19のOCR関数統合でOCR呼び出し側（現
+    core.ocr_layout_services）に残す理由が無くなり、主な利用者であるcore.text_extraction_services
+    へ移設した。実際のGoogle Cloud Vision呼び出しのテストはOcrLayoutServicesTestsで行う。
+    """
+
+    def test_is_scanned_true_for_empty_or_short_text(self):
+        self.assertTrue(is_scanned(""))
+        self.assertTrue(is_scanned("   "))
+        self.assertTrue(is_scanned("短い"))
+
+    def test_is_scanned_false_for_sufficient_text(self):
+        self.assertFalse(is_scanned("十分な文字数を含むテキスト層です。"))
+
+
+def _make_vertex(x, y):
+    return SimpleNamespace(x=x, y=y)
+
+
+def _make_bbox(x1, y1, x2, y2):
+    """Vision APIのbounding_box相当（頂点4つ、左上→右上→右下→左下の順）を組み立てる。"""
+    return SimpleNamespace(
+        vertices=[_make_vertex(x1, y1), _make_vertex(x2, y1), _make_vertex(x2, y2), _make_vertex(x1, y2)],
+    )
+
+
+def _make_symbol(text, x1, y1, x2, y2):
+    return SimpleNamespace(
+        text=text, bounding_box=_make_bbox(x1, y1, x2, y2),
+        property=SimpleNamespace(detected_break=None),
+    )
+
+
+def _make_word(symbols, x1, y1, x2, y2):
+    return SimpleNamespace(symbols=symbols, bounding_box=_make_bbox(x1, y1, x2, y2))
+
+
+class OcrLayoutServicesTests(TestCase):
+    """core.ocr_layout_services（settings.OCR_EMBED_TEXT_TO_PDFが使う座標付きOCR、2026-08-10追加）
+    の単体テスト。実際のGoogle Cloud Vision API・pdf2image（poppler）は使わず、モックで完結させる。
+    """
+
+    def test_raises_when_ocr_disabled(self):
+        with override_settings(OCR_ENABLED=False):
+            with self.assertRaises(OcrDisabledError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+
+    def test_calls_vision_once_per_page_without_page_limit(self):
+        """1リクエスト最大5ページ制約のある同期API(batch_annotate_files)ではなくページ画像を
+        1ページずつ投入する方式であることの裏付けとして、5ページを超えるページ数でも
+        全ページ分document_text_detectionが呼ばれることを確認する。"""
+        mock_vision = MagicMock()
+        mock_response = MagicMock()
+        mock_response.full_text_annotation.pages = []
+        mock_vision.ImageAnnotatorClient.return_value.document_text_detection.return_value = mock_response
+        fake_images = [MagicMock() for _ in range(7)]
+
+        with override_settings(OCR_ENABLED=True):
+            with patch.dict(
+                "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
+            ):
+                with patch("pdf2image.convert_from_bytes", return_value=fake_images):
+                    text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(
+                        b"%PDF-1.4 dummy", source_name="big.pdf",
+                    )
+        self.assertEqual(
+            mock_vision.ImageAnnotatorClient.return_value.document_text_detection.call_count, 7,
+        )
+        self.assertEqual(text, "\n" * 6)  # 各ページのテキストが空文字のまま改行7個分連結される
+        self.assertEqual(textdatas, [])
+
+    def test_page_error_is_skipped_without_failing_other_pages(self):
+        """1ページのOCR失敗（Vision APIの一時的なエラー等）で他ページの処理を止めない
+        （core.ocr_services.extract_text_via_ocrに同名のテストがあったが、2026-08-19の統合で
+        本モジュールが唯一のOCR呼び出し口になったためこちらに移設）。"""
+        mock_vision = MagicMock()
+        ok_response = MagicMock()
+        ok_response.full_text_annotation.pages = []
+        mock_vision.ImageAnnotatorClient.return_value.document_text_detection.side_effect = [
+            RuntimeError("internal error"), ok_response,
+        ]
+
+        with override_settings(OCR_ENABLED=True):
+            with patch.dict(
+                "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
+            ):
+                with patch("pdf2image.convert_from_bytes", return_value=[MagicMock(), MagicMock()]):
+                    text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+
+        self.assertEqual(text, "")
+        self.assertEqual(textdatas, [])
+
+    def test_get_lines_reconstructs_line_from_word_coordinates(self):
+        """座標ベースの行復元ロジック（_get_lines）が、同じ行にある複数wordのsymbolテキストを
+        1つのTextDataに連結することを検証する（PDF埋め込み時の位置精度の基礎になるロジック）。"""
+        symbol1 = _make_symbol("あ", 10, 10, 30, 40)
+        symbol2 = _make_symbol("い", 40, 10, 60, 40)
+        word1 = _make_word([symbol1], 10, 10, 30, 40)
+        word2 = _make_word([symbol2], 40, 10, 60, 40)
+        paragraph = SimpleNamespace(words=[word1, word2])
+        block = SimpleNamespace(bounding_box=_make_bbox(0, 0, 500, 100), paragraphs=[paragraph])
+        page = SimpleNamespace(width=1000, height=1000, blocks=[block])
+        response = SimpleNamespace(full_text_annotation=SimpleNamespace(pages=[page]))
+
+        result = ocr_layout_services._get_lines(1, response)
+
+        self.assertEqual(len(result), 1)
+        pagedata = result[0]
+        self.assertEqual((pagedata.page_no, pagedata.page_width, pagedata.page_height), (1, 1000, 1000))
+        self.assertEqual(len(pagedata.textdata_list), 1)
+        line = pagedata.textdata_list[0]
+        self.assertEqual(line.text, "あい")
+        self.assertEqual((line.x1, line.y1, line.x2, line.y2), (10, 10, 60, 40))
+
+        textlines = ocr_layout_services._get_textlines(result, 1)
+        self.assertEqual(textlines, ["あい"])
+
+
+class PdfTextEmbedServicesTests(TestCase):
+    """core.pdf_text_embed_services（settings.OCR_EMBED_TEXT_TO_PDF、2026-08-10追加）の単体テスト。"""
+
+    @staticmethod
+    def _make_blank_pdf_bytes(page_count):
+        writer = PdfWriter()
+        for _ in range(page_count):
+            writer.add_blank_page(width=200, height=200)
+        buf = BytesIO()
+        writer.write(buf)
+        writer.close()
+        return buf.getvalue()
+
+    def test_embed_preserves_page_count_and_content(self):
+        original_bytes = self._make_blank_pdf_bytes(2)
+        textdatas = [
+            ocr_layout_services.TextDatas(
+                page_no=1, page_width=1000, page_height=1000,
+                textdata_list=[ocr_layout_services.TextData(10, 10, 100, 40, "テスト")],
+            ),
+        ]
+        result_bytes = pdf_text_embed_services.embed_textdatas_into_pdf(original_bytes, textdatas)
+        reader = PdfReader(BytesIO(result_bytes))
+        self.assertEqual(len(reader.pages), 2)
+
+    def test_embed_skips_page_without_matching_textdatas(self):
+        """textdatasに対応ページが無い場合はそのページをそのまま出力する（例外にならない）。"""
+        original_bytes = self._make_blank_pdf_bytes(1)
+        result_bytes = pdf_text_embed_services.embed_textdatas_into_pdf(original_bytes, textdatas=[])
+        reader = PdfReader(BytesIO(result_bytes))
+        self.assertEqual(len(reader.pages), 1)
+
+    def test_embed_failure_on_one_page_falls_back_to_original_page(self):
+        """page_width/page_height が0（不正な座標データ）でも例外を送出せず、そのページは
+        透明テキスト無しの原本ページのまま出力する（1ページの埋め込み失敗で全体を失敗させない）。"""
+        original_bytes = self._make_blank_pdf_bytes(1)
+        textdatas = [
+            ocr_layout_services.TextDatas(
+                page_no=1, page_width=0, page_height=0,
+                textdata_list=[ocr_layout_services.TextData(10, 10, 100, 40, "テスト")],
+            ),
+        ]
+        result_bytes = pdf_text_embed_services.embed_textdatas_into_pdf(original_bytes, textdatas)
+        reader = PdfReader(BytesIO(result_bytes))
+        self.assertEqual(len(reader.pages), 1)
+
+
+class ExtractPendingPdfTextCommandTests(TestCase):
+    """extract_pending_pdf_textコマンド（全文検索基盤、2026-08-10追加）の単体テスト。
+    実際のPDF解析（pdfplumber）・Google Cloud Vision呼び出しはモック化し、
+    1件の抽出失敗でバッチ全体が止まらないことを重点的に検証する。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+
+    def _make_document(self, title):
+        from documents.models import Document
+
+        doc = Document(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=timezone.localdate(),
+        )
+        doc.file.save(f"{title}.pdf", ContentFile(b"%PDF-1.4 dummy"), save=False)
+        doc.save()
+        return doc
+
+    @staticmethod
+    def _mock_pdfplumber(text):
+        """pdfplumber.open()が返すコンテキストマネージャをモックし、page.extract_text()が
+        textを返すようにする（1ページのみのPDFとして扱う）。"""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = text
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__.return_value = mock_pdf
+        mock_pdf.__exit__.return_value = False
+        return mock_pdf
+
+    def test_text_layer_extraction_updates_extracted_text(self):
+        doc = self._make_document("通常文書")
+        with patch(
+            "core.text_extraction_services.pdfplumber.open",
+            return_value=self._mock_pdfplumber("十分な文字数を含む本文テキストです。"),
+        ):
+            call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "十分な文字数を含む本文テキストです。")
+
+    def test_scanned_document_is_skipped_when_ocr_disabled(self):
+        doc = self._make_document("スキャン文書")
+        with override_settings(OCR_ENABLED=False):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "")
+        # OCR_ENABLED=Falseで呼び出しに至っていないため、有効化後に再試行できるようFalseのまま。
+        self.assertFalse(doc.ocr_attempted)
+
+    def test_scanned_document_uses_ocr_when_enabled(self):
+        doc = self._make_document("スキャン文書2")
+        with override_settings(OCR_ENABLED=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    return_value=("OCRで抽出した本文", []),
+                ) as mock_ocr:
+                    call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "OCRで抽出した本文")
+        self.assertTrue(doc.ocr_attempted)
+        mock_ocr.assert_called_once()
+
+    def test_ocr_result_empty_string_marks_attempted_and_is_excluded_from_next_run(self):
+        """OCR結果が本当に空文字列だった場合（画像に文字が全く無い等）、extracted_text=""の
+        ままでもocr_attempted=Trueになり、次回バッチではOCRが再実行されないことを確認する
+        （documents.Document.ocr_attemptedのフィールドコメント参照。無限リトライ対策）。"""
+        doc = self._make_document("空文字OCR結果文書")
+        with override_settings(OCR_ENABLED=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    return_value=("", []),
+                ) as mock_ocr:
+                    call_command("extract_pending_pdf_text")
+                    self.assertEqual(mock_ocr.call_count, 1)
+
+                    call_command("extract_pending_pdf_text")
+                    # ocr_attempted=Trueによりクエリ対象から外れるため、2回目は呼ばれない。
+                    self.assertEqual(mock_ocr.call_count, 1)
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "")
+        self.assertTrue(doc.ocr_attempted)
+
+    def test_ocr_exception_does_not_mark_attempted_so_it_retries_next_run(self):
+        """OCR呼び出し自体が例外を送出した場合（タイムアウト等の一時的なエラー）は
+        ocr_attemptedをセットせず、次回バッチでも対象のままにする。"""
+        doc = self._make_document("OCR失敗文書")
+        with override_settings(OCR_ENABLED=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    side_effect=TimeoutError("vision api timeout"),
+                ):
+                    call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "")
+        self.assertFalse(doc.ocr_attempted)
+
+    def test_one_failure_does_not_stop_processing_of_other_documents(self):
+        """1件目のpdfplumber解析が例外を送出しても、2件目は正常に処理される
+        （「1件の抽出失敗でバッチ全体を止めない」設計方針）。"""
+        broken_doc = self._make_document("破損文書")
+        healthy_doc = self._make_document("正常文書")
+
+        def selective_open(fileobj):
+            # queryset は core.management.commands.extract_pending_pdf_text._process_model の
+            # order_by("pk")によりpk昇順で処理されるため、1回目=broken_doc、2回目=healthy_doc。
+            selective_open.calls += 1
+            if selective_open.calls == 1:
+                raise ValueError("corrupt pdf")
+            return self._mock_pdfplumber("十分な文字数を含む正常な本文です。")
+
+        selective_open.calls = 0
+
+        with patch("core.text_extraction_services.pdfplumber.open", side_effect=selective_open):
+            call_command("extract_pending_pdf_text")
+
+        broken_doc.refresh_from_db()
+        healthy_doc.refresh_from_db()
+        self.assertEqual(broken_doc.extracted_text, "")
+        self.assertEqual(healthy_doc.extracted_text, "十分な文字数を含む正常な本文です。")
+
+    def test_db_save_failure_does_not_stop_processing_of_other_documents(self):
+        """本文抽出自体は成功しても、その結果をDBへ保存するobj.save(update_fields=...)が
+        DB接続断（OperationalError）で失敗した場合でも、バッチコマンド全体が停止せず後続
+        レコードの処理が継続することを確認する（_process_modelのobj.save呼び出しをtry/exceptで
+        保護したことの回帰確認。保護が無いと、この1件の失敗で例外がhandle()まで伝播し
+        コマンド全体が異常終了してしまう）。"""
+        from documents.models import Document
+
+        failing_doc = self._make_document("DB保存失敗文書")
+        healthy_doc = self._make_document("DB保存成功文書")
+
+        original_save = Document.save
+
+        def selective_save(self, *args, **kwargs):
+            # order_by("pk")によりfailing_docが先に処理されるため、1回目の呼び出しでのみ
+            # 例外を送出する。
+            selective_save.calls += 1
+            if selective_save.calls == 1:
+                raise OperationalError("connection lost")
+            return original_save(self, *args, **kwargs)
+
+        selective_save.calls = 0
+
+        with patch(
+            "core.text_extraction_services.pdfplumber.open",
+            return_value=self._mock_pdfplumber("十分な文字数を含む本文テキストです。"),
+        ):
+            with patch.object(Document, "save", selective_save):
+                call_command("extract_pending_pdf_text")
+
+        failing_doc.refresh_from_db()
+        healthy_doc.refresh_from_db()
+        # 保存自体が失敗したため、抽出結果はDBに反映されないまま（次回バッチで再試行される）。
+        self.assertEqual(failing_doc.extracted_text, "")
+        self.assertEqual(healthy_doc.extracted_text, "十分な文字数を含む本文テキストです。")
+
+
+class ExtractPendingPdfTextEmbedTests(TestCase):
+    """extract_pending_pdf_textコマンドのsettings.OCR_EMBED_TEXT_TO_PDF・
+    _should_embed（documents.Document.privacy_flag連動、2026-08-19追加）分岐の単体テスト。
+    core.ocr_layout_services・core.pdf_text_embed_services自体の単体テストは
+    OcrLayoutServicesTests・PdfTextEmbedServicesTestsで別途行うため、ここではコマンドの
+    分岐・DB更新の結果のみを検証する（両モジュールはモック化）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+
+    def _make_document(self, title, privacy_flag=False):
+        from documents.models import Document
+
+        doc = Document(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=timezone.localdate(), privacy_flag=privacy_flag,
+        )
+        doc.file.save(f"{title}.pdf", ContentFile(b"%PDF-1.4 dummy"), save=False)
+        doc.save()
+        return doc
+
+    @staticmethod
+    def _mock_pdfplumber(text):
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = text
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__.return_value = mock_pdf
+        mock_pdf.__exit__.return_value = False
+        return mock_pdf
+
+    def test_embed_disabled_by_default_does_not_call_embed(self):
+        """既定（OCR_EMBED_TEXT_TO_PDF=False）でも本文抽出自体は座標付き抽出
+        （core.ocr_layout_services、2026-08-19統合後の唯一のOCR経路）を使うが、
+        PDFへの埋め込み（core.pdf_text_embed_services）は呼ばれない。"""
+        doc = self._make_document("スキャン文書埋め込み無効")
+        fake_textdatas = [object()]
+        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=False):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    return_value=("座標付きOCRで抽出した本文", fake_textdatas),
+                ) as mock_layout_ocr:
+                    with patch(
+                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
+                        ".embed_textdatas_into_pdf",
+                    ) as mock_embed:
+                        call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
+        self.assertFalse(doc.searchable_file)
+        mock_layout_ocr.assert_called_once()
+        mock_embed.assert_not_called()
+
+    def test_embed_skipped_for_document_with_privacy_flag(self):
+        """個人情報が含まれる文書（privacy_flag=True）は、settings.OCR_EMBED_TEXT_TO_PDF=Trueでも
+        埋め込みをスキップする（検索用PDFに個人情報を透明テキストとして複製しないための判断、
+        2026-08-19追加）。"""
+        doc = self._make_document("個人情報を含む文書", privacy_flag=True)
+        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    return_value=("座標付きOCRで抽出した本文", [object()]),
+                ):
+                    with patch(
+                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
+                        ".embed_textdatas_into_pdf",
+                    ) as mock_embed:
+                        call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
+        self.assertTrue(doc.ocr_attempted)
+        self.assertFalse(doc.searchable_file)
+        mock_embed.assert_not_called()
+
+    def test_embed_flag_saves_searchable_file(self):
+        doc = self._make_document("スキャン文書埋め込み", privacy_flag=False)
+        fake_textdatas = [object()]  # 中身はembed_textdatas_into_pdf自体をモックするため使われない
+        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    return_value=("座標付きOCRで抽出した本文", fake_textdatas),
+                ):
+                    with patch(
+                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
+                        ".embed_textdatas_into_pdf",
+                        return_value=b"%PDF-1.4 embedded",
+                    ) as mock_embed:
+                        call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
+        self.assertTrue(doc.ocr_attempted)
+        self.assertTrue(doc.searchable_file)
+        mock_embed.assert_called_once()
+
+    def test_embed_skipped_when_no_textdatas_leaves_searchable_file_empty(self):
+        """座標データが1件も取れなかった場合（全ページOCR失敗等）は埋め込み自体を試みず、
+        searchable_fileはnullのままにする。"""
+        doc = self._make_document("座標データ無し文書", privacy_flag=False)
+        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    return_value=("", []),
+                ):
+                    with patch(
+                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
+                        ".embed_textdatas_into_pdf",
+                    ) as mock_embed:
+                        call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertTrue(doc.ocr_attempted)
+        self.assertFalse(doc.searchable_file)
+        mock_embed.assert_not_called()
+
+    def test_embed_failure_does_not_prevent_text_extraction(self):
+        """PDF埋め込みは全文検索の本体（extracted_text）に対する付加処理という位置付けのため、
+        埋め込み処理が例外を送出してもテキスト抽出自体は成功させる。"""
+        doc = self._make_document("スキャン文書埋め込み失敗", privacy_flag=False)
+        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    return_value=("座標付きOCRで抽出した本文", [object()]),
+                ):
+                    with patch(
+                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
+                        ".embed_textdatas_into_pdf",
+                        side_effect=ValueError("dummy embed failure"),
+                    ):
+                        call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
+        self.assertTrue(doc.ocr_attempted)
+        self.assertFalse(doc.searchable_file)
+
+
+class ShouldEmbedTests(TestCase):
+    """extract_pending_pdf_textコマンドの_should_embed（PDF埋め込みの要否判定、
+    documents.Document.privacy_flag連動、2026-08-19追加）の単体テスト。DBを使わず判定ロジック
+    だけを検証する（DB込みの結合テストはExtractPendingPdfTextEmbedTests参照）。"""
+
+    def setUp(self):
+        from core.management.commands.extract_pending_pdf_text import Command
+
+        self.command = Command()
+
+    def test_embeds_when_privacy_flag_false(self):
+        self.assertTrue(self.command._should_embed(SimpleNamespace(privacy_flag=False)))
+
+    def test_skips_when_privacy_flag_true(self):
+        self.assertFalse(self.command._should_embed(SimpleNamespace(privacy_flag=True)))
+
+    def test_embeds_when_model_has_no_privacy_flag_field(self):
+        """contracts.Contractのように個人情報フラグ自体を持たないモデルは、この個別判定を
+        行わずsettings.OCR_EMBED_TEXT_TO_PDFのみに従って常に埋め込み対象とする。"""
+        self.assertTrue(self.command._should_embed(SimpleNamespace()))
+
+
+class TryImmediateTextLayerExtractionTests(TestCase):
+    """core.text_extraction_services.try_immediate_text_layer_extraction
+    （アップロード直後の同期テキスト層抽出、2026-08-10追加）の単体テスト。
+    documents/contracts.UploadStep2View.postから呼ばれる（documents.tests参照）が、
+    ロジック自体はモデル非依存のためここではDocumentで代表して検証する。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        from documents.models import Document
+
+        self.doc = Document(
+            title="対象文書", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=timezone.localdate(),
+        )
+        self.doc.file.save("a.pdf", ContentFile(b"%PDF-1.4 dummy"), save=False)
+        self.doc.save()
+
+    @staticmethod
+    def _mock_pdfplumber(text):
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = text
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__.return_value = mock_pdf
+        mock_pdf.__exit__.return_value = False
+        return mock_pdf
+
+    def test_text_layer_pdf_is_extracted_immediately(self):
+        with patch(
+            "core.text_extraction_services.pdfplumber.open",
+            return_value=self._mock_pdfplumber("十分な文字数を含む本文テキストです。"),
+        ):
+            try_immediate_text_layer_extraction(self.doc, label="document")
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.extracted_text, "十分な文字数を含む本文テキストです。")
+
+    def test_scanned_pdf_is_left_for_the_batch(self):
+        """テキスト層が実質無い（スキャン文書）場合は何もせず、extracted_text=""のまま据え置く
+        （OCR要否の判定はcore.management.commands.extract_pending_pdf_textに委ねる）。"""
+        with patch("core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber("")):
+            try_immediate_text_layer_extraction(self.doc, label="document")
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.extracted_text, "")
+
+    def test_extraction_failure_does_not_raise(self):
+        """解析失敗（破損PDF等）でも例外を伝播させない（アップロード処理自体を失敗させないため）。"""
+        with patch("core.text_extraction_services.pdfplumber.open", side_effect=ValueError("corrupt pdf")):
+            try_immediate_text_layer_extraction(self.doc, label="document")
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.extracted_text, "")
+
+
+class IsImageFilenameTests(TestCase):
+    """保管画面２・編集画面の実画像プレビュー可否判定（documents/contracts.views参照）。"""
+
+    def test_common_raster_extensions_are_images(self):
+        for name in ["a.jpg", "a.JPG", "a.jpeg", "a.png", "a.gif", "a.bmp", "a.webp"]:
+            self.assertTrue(is_image_filename(name), name)
+
+    def test_non_image_extensions_are_not_images(self):
+        for name in ["a.pdf", "a.docx", "a.txt", "noext"]:
+            self.assertFalse(is_image_filename(name), name)
+
+    def test_svg_is_excluded_for_xss_safety(self):
+        """SVGはインラインscriptを含められるため、ブラウザに直接読み込ませるプレビュー用途では
+        あえて画像として扱わない（core.file_type_services.is_image_filename docstring参照）。"""
+        self.assertFalse(is_image_filename("a.svg"))
+
+
+class HealthCheckViewTests(TestCase):
+    """未実装改善候補の棚卸しで発見・2026-08-12追加。原本HTML/xlsxには存在しない、監視ツール向け
+    死活監視エンドポイント（core.views.HealthCheckView）。"""
+
+    def test_ok_without_login(self):
+        """監視ツールは職員番号ログインを行わないため、未ログインでも200であること。"""
+        response = self.client.get("/healthz/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok", "database": "ok"})
+
+    def test_db_failure_returns_503(self):
+        with patch("core.views.connection.cursor", side_effect=OperationalError("down")):
+            response = self.client.get("/healthz/")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "error")

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}メイン画面 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-menu" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム</div>
+        <h1>-メイン画面-</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="menu-grid">
+      <div class="menu-box search-zone">
+        <h2>検索・閲覧・変更</h2>
+        <div class="menu-buttons">
+          <button type="button" onclick="window.location.href='{% url 'documents:search' %}'">文書</button>
+          <button type="button" onclick="window.location.href='{% url 'contracts:search' %}'">契約書</button>
+    {% comment "下記の部分はコメントアウト" %}
+          {# 電子決裁の検索・閲覧・変更画面自体が原本HTML/xlsxのいずれにも存在しない
+             （権限管理・保存期間設定マスタにのみ電子決裁関連の項目があるのみ）。将来陣で
+             実装予定という位置づけではなく恒久的にスコープ外のため、その旨を明示する。 #}
+    {% endcomment%}
+          <button type="button" disabled title="電子決裁の検索・閲覧・変更画面はスコープ外です">電子決裁</button>
+        </div>
+      </div>
+      <div class="menu-box storage-zone">
+        <h2>保管</h2>
+        <div class="menu-buttons">
+          <button type="button" onclick="window.location.href='{% url 'documents:upload_step1' %}'">文書</button>
+          <button type="button" onclick="window.location.href='{% url 'contracts:upload_step1' %}'">契約書</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="notice-area">
+      <h3>お知らせ</h3>
+      <ul>
+        <li>有効期限切れの文書が
+          <a href="{% url 'documents:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired }} 件</span></a>
+          あります。</li>
+        {% comment %}
+          原本index.html:1133-1149のclickNoticeLink()は、2番目のお知らせ（表示文言は「文書」）の
+          クリック時のみtransitionToSearch('contract')で契約書検索画面へ遷移していた（他の2件は
+          文書検索画面）。表示文言・件数集計（documents.Document基準）と遷移先モデルが食い違う
+          原本特有の矛盾で、以前は原本フィデリティ優先でそのまま踏襲していたが、実際の運用で
+          「バッジ件数と遷移先の検索結果件数が一致しない」との指摘を受け、3件とも文書検索へ統一
+          するようユーザー判断で変更した（2026-08-13）。
+        {% endcomment %}
+        <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の文書が
+          <a href="{% url 'documents:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon }} 件</span></a>
+          あります。</li>
+        <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された文書が
+          <a href="{% url 'documents:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted }} 件</span></a>
+          あります。</li>
+      </ul>
+    </div>
+
+    <div class="footer-controls">
+      <button type="button" class="menu-btn" onclick="window.location.href='{% url 'core:settings' %}'">⚙️ 設定</button>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,94 @@
+{% load static %}<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>{% block title %}クラウド文書管理システム{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/style.css' %}">
+  <link rel="stylesheet" href="{% static 'css/compact.css' %}">
+  <link rel="stylesheet" href="{% static 'css/django_widgets.css' %}">
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+{% block body %}{% endblock %}
+
+{% block popups %}
+  {# popup-select: 部署/分類/年/カテゴリー選択ポップアップ（共通、hidden-popupで既定非表示） #}
+  <div id="popup-select" class="style-popup-select hidden-popup">
+    <div class="popup-select-header">
+      <span id="popup-select-title">選択</span>
+      <button type="button" onclick="closePopupPopup()">&times;</button>
+    </div>
+    <div class="popup-select-body">
+      <input type="text" id="popup-select-search" placeholder="検索キーワード..." oninput="filterPopupPopupItems()">
+      <div id="popup-select-items-container"></div>
+    </div>
+    <div class="popup-select-footer">
+      <button type="button" class="btn-cancel" onclick="closePopupPopup()">キャンセル</button>
+      <button type="button" class="btn-popup-submit" onclick="submitPopupPopupSelection()">確定</button>
+    </div>
+    <div class="resize-handle" id="popup-select-resize"></div>
+  </div>
+
+  {# popup-detail: 検索結果詳細ポップアップ（共通、既定非表示。documents/contracts双方の検索画面から使う） #}
+  <div id="popup-detail" class="popup-window" style="display:none;">
+    <div class="popup-header-alert" id="detail-alert-banner" style="display:none;"></div>
+    <div style="display:flex; justify-content:space-between; margin-bottom:15px; align-items: center; border-bottom: 1px solid #ddd; padding-bottom: 10px;">
+      <button type="button" style="background:#7f8c8d; color:white;" onclick="closeDetailPopup()">閉じる</button>
+      <div id="detail-view-title" style="font-weight:bold; font-size:16px;"></div>
+      <div style="width: 80px;"></div>
+    </div>
+    <div class="storage-layout" style="margin-top:10px;">
+      <div class="pdf-preview-container">
+        <div class="zoom-controls">
+          <button type="button" onclick="zoomPdf('detail-pdf-page', -0.1)">－</button>
+          <button type="button" onclick="zoomPdf('detail-pdf-page', 0.1)">＋</button>
+        </div>
+        <div class="pdf-view-box drag-scrollable" style="height:405px;" id="detail-pdf-view-box">
+          <div class="pdf-scroll-area">
+          <div class="pdf-mock-page" id="detail-pdf-page">
+            <h3 id="detail-mock-title" style="border-bottom:2px solid #e74c3c; padding-bottom:5px; color:#e74c3c;"></h3>
+        {% comment %}
+            {# ユーザー依頼（2026-08-12）で追加した実プレビュー（画像／PDF）。documents/edit.htmlの
+               preview_kind分岐と同じ考え方だが、詳細ポップアップはfetch()で毎回動的に開くため、
+               静的テンプレート側のif分岐ではなくstatic/js/common.jsのrenderDetailPopup()が
+               data.preview_kind/data.preview_urlを見てJSでdisplay/srcを切り替える。 #}
+        {% endcomment %}
+            <img id="detail-preview-image" alt="" style="max-width:100%; margin-top:10px; display:none;">
+            <iframe id="detail-preview-frame" title="" style="width:100%; height:320px; margin-top:10px; border:none; display:none;"></iframe>
+            <p id="detail-preview-denied" style="margin-top:20px; font-size:13px; color:#c0392b; display:none;"></p>
+            <p id="detail-mock-body" style="margin-top:20px; font-size:12px; color:#755;">閲覧用アーカイブデータ</p>
+          </div>
+          </div>
+        </div>
+      </div>
+      <div class="meta-input-form-wrapper">
+        <div class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:440px; box-sizing:border-box;">
+          <div id="detail-properties-view" style="flex-grow:1; overflow-y:auto; max-height:350px; padding-right:5px;"></div>
+          <div style="display:flex; justify-content:space-between; align-items:center; padding-top:10px; padding-bottom:5px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
+            <button type="button" id="detail-download-btn" class="btn-primary" style="background-color:#2ecc71; margin:0; height:36px; padding:0 20px;">ダウンロード</button>
+            <div style="display:flex; gap:5px;">
+              <button type="button" id="detail-change-btn" class="btn-primary" style="margin:0; height:36px; padding:0 20px;">変更</button>
+              <button type="button" id="detail-delete-btn" class="btn-danger" style="background-color:#e74c3c; color:white; border:none; height:36px; padding:0 20px; border-radius:4px; cursor:pointer; font-weight:bold; font-size:14px;">削除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# overlay-progress: アップロード/登録/検索中の進捗表示（共通、既定非表示） #}
+  <div id="overlay-progress" class="overlay">
+    <div class="progress-container">
+      <div id="progress-msg" style="font-weight:bold; font-size:16px;">処理中...</div>
+      <div class="progress-bar-bg">
+        <div id="progress-fill" class="progress-bar-fill"></div>
+      </div>
+      <div id="progress-percent" style="font-size:14px; color:#666;">0%</div>
+    </div>
+  </div>
+{% endblock %}
+
+<script src="{% static 'js/common.js' %}"></script>
+{% block extra_script %}{% endblock %}
+</body>
+</html>

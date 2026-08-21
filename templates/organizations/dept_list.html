@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% load search_extras %}
+
+{% block title %}部署管理一覧 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-dept-list" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        {% comment %}
+          原本は部署管理・権限管理・分類管理・カテゴリー管理・保存期間設定の設定画面群
+          （計15画面）で一貫して.system-nameクラスを使用しており、単なる誤記ではなく
+          意図的な使い分けと判断し原本通りにする（style.cssには.system-name自体の定義は
+          無いため、実際の表示はブラウザ既定の通常サイズ・黒文字になる）。
+          2026-08-09フィデリティ監査でユーザーに確認の上、原本通りに復元した。
+        {% endcomment %}
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 部署管理一覧 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="get">
+      <div class="master-search-panel">
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">本支所</label>
+          {{ form.branch_code }}
+        </div>
+        {% comment %}
+          xlsx 部署管理!B38「本支所を選択時に、部課プルダウン内容を動的に更新する」。
+          accounts/staff_list.htmlの検索パネルと同じ考え方（サーバー側は全部課を選択肢として
+          保持したまま、選択済みの本支所に応じてクライアント側で表示する<option>を絞り込む）。
+        {% endcomment %}
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">部課</label>
+          {{ form.section_code }}
+        </div>
+        <button type="submit" class="btn-primary" style="padding:5px 15px;">検索</button>
+      </div>
+    </form>
+
+    <div style="display:inline-block; max-width:100%;">
+      <div class="action-bar" style="justify-content:space-between; align-items:center;">
+        <button type="button" class="btn-primary" onclick="window.location.href='{% url 'organizations:dept_regist' %}'">＋ 新規登録</button>
+        <div style="font-size:14px; color:#666;">総件数：{{ departments|length }} 件</div>
+      </div>
+
+      <div class="content-container">
+      <div class="table-scroll-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th><a class="sort-link" href="{% sort_url request.GET 'branch_code' sort_key sort_dir %}">本支所コード{% sort_arrow 'branch_code' sort_key sort_dir %}</a></th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'branch_name' sort_key sort_dir %}">本支所名{% sort_arrow 'branch_name' sort_key sort_dir %}</a></th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'section_code' sort_key sort_dir %}">部課コード{% sort_arrow 'section_code' sort_key sort_dir %}</a></th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'section_name' sort_key sort_dir %}">部課名{% sort_arrow 'section_name' sort_key sort_dir %}</a></th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for department in departments %}
+              <tr>
+                <td>{{ department.branch_code }}</td>
+                <td>{{ department.branch_name }}</td>
+                <td>{{ department.section_code }}</td>
+                <td>{{ department.section_name }}</td>
+                <td><button type="button" class="btn-sm" onclick="window.location.href='{% url 'organizations:dept_edit' department.pk %}'">編集</button></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // accounts/staff_list.htmlと同じ連動プルダウンJS（xlsx 部署管理!B38）。
+  (function () {
+    const departments = {{ departments_json|safe }};
+    const branchSelect = document.getElementById('id_branch_code');
+    const sectionSelect = document.getElementById('id_section_code');
+    if (!branchSelect || !sectionSelect) return;
+
+    function updateSectionOptions() {
+      const branchCode = branchSelect.value;
+      const currentValue = sectionSelect.value;
+      const seen = new Set();
+      const sections = [];
+      departments
+        .filter(function (d) { return !branchCode || d.branch_code === branchCode; })
+        .forEach(function (d) {
+          if (d.section_code && !seen.has(d.section_code)) {
+            seen.add(d.section_code);
+            sections.push({ code: d.section_code, name: d.section_name });
+          }
+        });
+      sectionSelect.innerHTML = '';
+      const allOpt = document.createElement('option');
+      allOpt.value = '';
+      allOpt.textContent = '(全て)';
+      sectionSelect.appendChild(allOpt);
+      sections.forEach(function (s) {
+        const opt = document.createElement('option');
+        opt.value = s.code;
+        opt.textContent = s.name;
+        sectionSelect.appendChild(opt);
+      });
+      if (sections.some(function (s) { return s.code === currentValue; })) {
+        sectionSelect.value = currentValue;
+      }
+    }
+
+    branchSelect.addEventListener('change', updateSectionOptions);
+    updateSectionOptions();
+  })();
+</script>
+{% endblock %}

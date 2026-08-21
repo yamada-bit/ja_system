@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}その他設定 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-other-pass" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- その他設定 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <div>
+        <input type="radio" name="other-tab" value="pass" checked> パスワード
+      </div>
+      <form method="post" id="other-pass-form">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <table class="vertical-master-table">
+          {% comment %}
+            原本は現在のパスワードを平文表示(ja1111等)するが、ハッシュ化必須の規約上実際の値は
+            表示不能なため一覧・詳細画面と同じマスク表示にする（ログイン画面と同種の必然的な逸脱）。
+          {% endcomment %}
+          <tr><th>現在のパスワード</th><td>********</td></tr>
+          <tr>
+            <th>変更後パスワード</th>
+            <td>
+              {{ form.new_password }} (半角英数6桁以上)
+              {% for error in form.new_password.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>変更後パスワード(確認)</th>
+            <td>
+              {{ form.new_password_confirm }} (半角英数6桁以上)
+              {% for error in form.new_password_confirm.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="clearPassFields()">クリア</button>
+          <button type="submit" class="btn-primary">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // 原本index.html clearPassFields()の移植。
+  function clearPassFields() {
+    document.getElementById('id_new_password').value = '';
+    document.getElementById('id_new_password_confirm').value = '';
+  }
+</script>
+{% endblock %}

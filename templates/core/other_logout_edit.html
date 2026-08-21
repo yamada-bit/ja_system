@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}自動ログアウト時間編集 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-other-logout-edit" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 自動ログアウト時間編集 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <table class="vertical-master-table">
+          <tr>
+            <th>時間(分)</th>
+            <td>
+              {{ form.session_idle_timeout_minutes }} 分
+              {% for error in form.session_idle_timeout_minutes.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:other_settings' %}?tab=logout'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

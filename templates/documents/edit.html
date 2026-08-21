@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}編集画面 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-storage2" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム -文書管理-</div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
+          <button type="button" onclick="window.location.href='{% url 'documents:search' %}'">＜ 戻る</button>
+          <h1 style="margin: 0;">編集画面</h1>
+        </div>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="storage-layout">
+      <div class="pdf-preview-container">
+        <div class="zoom-controls">
+          <button type="button" onclick="zoomPdf('storage-pdf-page', -0.1)">－</button>
+          <button type="button" onclick="zoomPdf('storage-pdf-page', 0.1)">＋</button>
+        </div>
+        <div class="pdf-view-box2 drag-scrollable" id="storage-pdf-view-box">
+          <div class="pdf-scroll-area">
+          <div class="pdf-mock-page" id="storage-pdf-page">
+            <h3 id="pdf-mock-title" style="border-bottom:2px solid #333; padding-bottom:5px;">{{ document.display_name }}</h3>
+            {% if preview_kind == "image" and can_download %}
+              {% comment %}
+                ユーザー依頼（2026-08-12）で追加した実プレビュー。原本index.htmlは固定モックのみ。
+                対象が画像／PDFかつcan_download権限がある場合のみ、下の擬似PDF文言の代わりに
+                documents:previewの実データを表示する（documents.views.DocumentEditView参照）。
+              {% endcomment %}
+              <img src="{% url 'documents:preview' document.pk %}" alt="{{ document.display_name }}" style="max-width:100%; margin-top:10px; display:block;">
+            {% elif preview_kind == "pdf" and can_download %}
+              <iframe src="{% url 'documents:preview' document.pk %}" title="{{ document.display_name }}" style="width:100%; height:440px; margin-top:10px; border:none;"></iframe>
+            {% elif preview_kind %}
+              {% comment %}
+                2026-08-13ユーザー報告対応：画像／PDFなのに権限不足でモック文言のまま表示され
+                「プレビューが表示されない」と誤解された。権限不足が理由だと分かるよう明示する。
+              {% endcomment %}
+              <p style="margin-top:20px; font-size:13px; color:#c0392b;">プレビューを表示するには「文書-ダウンロード」権限が必要です。権限管理画面でご確認ください。</p>
+            {% else %}
+              <p style="margin-top:20px; font-size:12px; color:#555;">これはデモ用の擬似PDFプレビュー画面です。右側の切り替えボタンと連動して内容が切り替わります。</p>
+              <p style="margin-top:40px; border-left:3px solid var(--primary-color); padding-left:10px;">電帳法要件定義対応スタンプ：承認済</p>
+            {% endif %}
+          </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="meta-input-form-wrapper">
+        <form method="post" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
+          {% csrf_token %}
+          <input type="hidden" name="token" value="{{ token }}">
+
+          <div class="pager-top" style="flex-shrink:0;">
+            <button type="submit" name="bulk_nav" value="prev" id="btn-prev-doc" {% if not bulk or not bulk.has_prev %}disabled{% endif %}>＜</button>
+            <span id="doc-pager-text" style="font-weight:bold;">{% if bulk %}{{ bulk.index }} / {{ bulk.total }}{% else %}1 / 1{% endif %}</span>
+            <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
+          </div>
+          {% if bulk %}
+            <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">選択した文書をまとめて編集中です。移動すると現在の内容が保存されます。</div>
+          {% endif %}
+
+          <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
+            <div class="form-section">
+              <h4>[1] 保管先</h4>
+              <div class="form-row"><label>部署</label>{{ form.department }}</div>
+              <div class="form-row"><label>分類</label>{{ form.group }}</div>
+              <div class="form-row"><label>年</label>{{ form.year }}</div>
+              <div class="form-row"><label>カテゴリー</label>{{ form.category }}</div>
+            </div>
+
+            <div class="form-section">
+              <h4>[2] 文書情報</h4>
+              <div class="form-row">
+                <label>文書タイトル</label>
+                {{ title_field }}
+                {% for error in title_field.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+              </div>
+              <div class="form-row">
+                <label>保存期間</label>
+                <div class="input-with-unit">
+                  {{ form.retention_period }}
+                  <span id="expiry-date-calc" style="font-size:13px; color:#7f8c8d; margin-left:10px;"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-section">
+              <h4>[3] 個人情報</h4>
+              <div class="form-row">
+                <label>個人情報が</label>
+                <div class="radio-group">{{ form.privacy_flag }}</div>
+              </div>
+            </div>
+
+            <div class="form-section">
+              <h4>[4] メモ欄</h4>
+              {{ form.memo }}
+              <div style="text-align: right; margin-top: 10px;">
+                <button type="button" style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;" onclick="clearMemo()">削除</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
+            <button type="submit" class="btn-primary" style="padding:8px 30px;">{% if bulk and bulk.has_next %}次へ{% else %}更新{% endif %}</button>
+            <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:search' %}'">キャンセル</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    {% include "documents/_complete_modal.html" %}
+  </div>
+  {{ expiry_previews|json_script:"expiry-previews" }}
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // 原本index.html:832-850 calculateExpiryDate()の移植（documents/storage2.htmlと同一ロジック。
+  // 2026-08-20ユーザー確認：保存満了日＝保存した日+保存期間であり「年」欄は計算に関与しない。
+  // documents/storage2.html extra_scriptのコメント参照）。
+  window.calculateExpiryDate = function () {
+    const periodSelect = document.getElementById('storage-period');
+    const span = document.getElementById('expiry-date-calc');
+    const previews = JSON.parse(document.getElementById('expiry-previews').textContent);
+    const iso = previews[periodSelect.value];
+    if (!iso) {
+      span.textContent = '';
+      return;
+    }
+    const [y, m, d] = iso.split('-').map((s) => parseInt(s, 10));
+    span.textContent = `（有効期限：${y}年${m}月${d}日）`;
+  };
+
+  calculateExpiryDate();
+</script>
+{% endblock %}

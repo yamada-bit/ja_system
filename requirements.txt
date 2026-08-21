@@ -1,0 +1,16 @@
+Django==5.2.9
+psycopg[binary]==3.2.3
+django-environ==0.11.2
+whitenoise==6.7.0
+argon2-cffi==25.1.0
+# 全文検索基盤（core.management.commands.extract_pending_pdf_text）。
+# pdfplumber: テキスト層のあるPDFからの本文抽出。
+# google-cloud-vision: スキャンPDF（画像PDF）のOCR。
+# pdf2image: OCR時のPDF→ページ画像変換（poppler必須。settings.POPPLER_PATH参照）。
+pdfplumber==0.11.10
+google-cloud-vision==3.15.0
+pdf2image==1.17.0
+# reportlab/pypdf: OCR結果PDFへの透明テキスト埋め込み（core.pdf_text_embed_services、
+# settings.OCR_EMBED_TEXT_TO_PDF）。
+reportlab==5.0.0
+pypdf==6.14.2

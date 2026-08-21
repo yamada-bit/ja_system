@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}部署編集 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-dept-edit" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 部署編集 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <table class="vertical-master-table">
+          <tr><th>本支所コード</th><td>{{ department.branch_code }}</td></tr>
+          <tr>
+            <th>本支所名</th>
+            <td>
+              {{ form.branch_name }}
+              {% for error in form.branch_name.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr><th>部課コード</th><td>{{ department.section_code }}</td></tr>
+          <tr>
+            <th>部課名</th>
+            <td>
+              {{ form.section_name }}
+              {% for error in form.section_name.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>部署統合・分割</th>
+            <td>
+              {% for radio in form.dept_action %}<label>{{ radio.tag }}{{ radio.choice_label }}</label>&#12288;{% endfor %}
+              <div id="dept-action-target" class="form-group" style="display:none;">
+                <label id="dept-action-msg" style="width:300px;"></label>
+                {{ form.dept_action_target }}
+              </div>
+            </td>
+          </tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'organizations:dept_list' %}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // 原本index.html toggleDeptAction()の移植。
+  document.querySelectorAll('input[name="dept_action"]').forEach(function (radio) {
+    radio.addEventListener('change', function () {
+      const target = document.getElementById('dept-action-target');
+      const msg = document.getElementById('dept-action-msg');
+      if (this.value === 'merge') {
+        target.style.display = 'block';
+        msg.textContent = '統合する部署を選択してください';
+      } else if (this.value === 'split') {
+        target.style.display = 'block';
+        msg.textContent = '分割する部署を選択してください';
+      } else {
+        target.style.display = 'none';
+      }
+    });
+  });
+</script>
+{% endblock %}

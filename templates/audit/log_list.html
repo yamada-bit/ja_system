@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}操作履歴ログ - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-log-list" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 操作履歴ログ -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    <form method="get">
+      <div class="master-search-panel">
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">操作日</label>
+          {{ form.date_start }}～{{ form.date_end }}
+        </div>
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">職員番号</label>
+          {{ form.employee_no }}
+        </div>
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">職員名</label>
+          {{ form.employee_name }}
+        </div>
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">イベントメッセージ</label>
+          {{ form.event_message }}
+        </div>
+        <div>
+          <label style="font-weight:bold; cursor:pointer;">{{ form.personal_info_flag }} 個人情報書類</label>
+        </div>
+        <button type="submit" class="btn-primary" style="padding:5px 15px;">検索</button>
+        <button type="button" onclick="window.location.href='{% url 'audit:log_csv_export' %}?' + window.location.search.slice(1)">CSV出力</button>
+      </div>
+    </form>
+
+    <div style="display:inline-block; max-width:100%;">
+      <div style="text-align:right; font-size:14px; color:#666; margin-bottom:5px;">総件数：{{ page_obj.paginator.count }} 件</div>
+      <div class="content-container">
+      <div class="table-scroll-container" style="max-height: 380px;">
+        <table class="data-table">
+          <thead>
+            <tr><th>操作日時</th><th>職員番号</th><th>部署名</th><th>職員名</th><th>操作内容</th><th>イベントメッセージ</th><th>個人情報</th></tr>
+          </thead>
+          <tbody>
+            {% for log in page_obj %}
+              <tr>
+                <td>{{ log.timestamp|date:"Y/m/d H:i" }}</td>
+                <td>{{ log.employee_no }}</td>
+                <td style="text-align:left;">{{ log.department_name }}</td>
+                <td>{{ log.employee_name }}</td>
+                <td>{{ log.action }}</td>
+                <td style="text-align:left;">{{ log.event_message }}</td>
+                <td>{% if log.personal_info_flag %}○{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="pager-bottom">
+        {% if page_obj.has_previous %}
+          <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page=1'">«</button>
+          <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.previous_page_number }}'">＜</button>
+        {% else %}
+          <button type="button" disabled>«</button>
+          <button type="button" disabled>＜</button>
+        {% endif %}
+        {% for num in page_obj.paginator.page_range %}
+          {% if num == page_obj.number %}
+            <button type="button" class="active">{{ num }}</button>
+          {% else %}
+            <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ num }}'">{{ num }}</button>
+          {% endif %}
+        {% endfor %}
+        {% if page_obj.has_next %}
+          <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.next_page_number }}'">＞</button>
+          <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.paginator.num_pages }}'">»</button>
+        {% else %}
+          <button type="button" disabled>＞</button>
+          <button type="button" disabled>»</button>
+        {% endif %}
+      </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

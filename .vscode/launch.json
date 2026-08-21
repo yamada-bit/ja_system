@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Django: runserver",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\manage.py",
+      "args": [
+        "runserver", "127.0.0.1:8020"
+        // "extract_pending_pdf_text"
+        // "cleanup_temp_uploads"
+
+      ],
+      "django": true,
+      "justMyCode": true,
+      "console": "integratedTerminal"
+    }
+  ]
+}

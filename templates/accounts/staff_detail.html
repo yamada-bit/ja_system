@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}職員マスタ詳細 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-staff-detail" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム</div>
+        <h1>- 職員マスタ詳細 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'accounts:staff_list' %}'">一覧へ戻る</button>
+
+    <div class="master-detail-box">
+      <table class="vertical-master-table">
+        <tr><th>職員番号</th><td>{{ employee.employee_no }}</td></tr>
+        <tr><th>氏名</th><td>{{ employee.name }}</td></tr>
+        {% comment %}
+          原本は平文パスワードを表示するが、パスワードハッシュ化必須の規約上実際の値は表示不能なため
+          一覧と同じマスク表示にする（ログイン画面のダミー資格情報プリフィルと同種の必然的な逸脱）。
+        {% endcomment %}
+        <tr><th>パスワード</th><td>********</td></tr>
+        <tr><th>本支所</th><td><span class="ctg-code-area">{{ employee.department.branch_code }}</span><span class="ctg-name-area">{{ employee.department.branch_name }}</span></td></tr>
+        <tr><th>部課</th><td><span class="ctg-code-area">{{ employee.department.section_code }}</span><span class="ctg-name-area">{{ employee.department.section_name }}</span></td></tr>
+        <tr><th>職階</th><td><span class="ctg-code-area">{{ employee.rank }}</span><span class="ctg-name-area">{{ employee.get_rank_display }}</span></td></tr>
+        <tr><th>役職</th><td><span class="ctg-code-area">{{ employee.position }}</span><span class="ctg-name-area">{{ employee.get_position_display }}</span></td></tr>
+        <tr><th>退職</th><td>{% if employee.is_retired %}○{% endif %}</td></tr>
+      </table>
+      <div style="margin-top:20px; display:flex; gap:10px;">
+        <button type="button" class="btn-primary" style="padding:8px 20px;" onclick="window.location.href='{% url 'accounts:staff_edit' employee.pk %}'">編集</button>
+      </div>
+    </div>
+  </div>
+{% endblock %}

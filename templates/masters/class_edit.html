@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}分類管理編集 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-class-edit" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 分類管理編集 -</h1>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <table class="vertical-master-table">
+          <tr>
+            <th>分類コード</th>
+            <td>
+              {{ form.code }}
+              {% for error in form.code.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>分類名</th>
+            <td>
+              {{ form.name }}
+              {% for error in form.name.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr><th>書類管理区分</th><td>{{ form.doc_kbn }}</td></tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'masters:class_list' %}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}その他設定 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-other-main" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- その他設定 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="form-group">
+      <input type="radio" name="other-tab-main" value="main" id="other-tab-main-radio" onchange="kbnSelectForOtherSettings(this.value)" {% if selected_tab != "logout" %}checked{% endif %}> メイン画面項目&#12288;
+      <input type="radio" name="other-tab-main" value="logout" id="other-tab-logout-radio" onchange="kbnSelectForOtherSettings(this.value)" {% if selected_tab == "logout" %}checked{% endif %}> 自動ログアウト時間
+    </div>
+
+    <div style="display:inline-block; max-width:100%;">
+      <div id="screen-other-main-count" style="text-align:right; font-size:14px; color:#666; margin-bottom:5px;">総件数：{{ page_obj.paginator.count }} 件</div>
+      <div class="content-container">
+      <div class="table-scroll-container">
+        <table id="other-setting-menu" class="data-table">
+          <thead>
+            <tr>
+              <th rowspan="2">No.</th>
+              <th rowspan="2">部署</th>
+              <th colspan="3">検索・閲覧・変更</th>
+              <th colspan="2">保管</th>
+              <th rowspan="2">操作</th>
+            </tr>
+            <tr>
+              <th>文書</th>
+              <th>契約書</th>
+              <th>電子決裁</th>
+              <th>文書</th>
+              <th>契約書</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in page_obj %}
+              <tr>
+                <td style="text-align:right;">{{ forloop.counter0|add:page_obj.start_index }}</td>
+                <td style="text-align:left;">{{ row.department }}</td>
+                <td>{% if row.setting.show_search_document %}〇{% else %}×{% endif %}</td>
+                <td>{% if row.setting.show_search_contract %}〇{% else %}×{% endif %}</td>
+                <td>{% if row.setting.show_search_eapproval %}〇{% else %}×{% endif %}</td>
+                <td>{% if row.setting.show_storage_document %}〇{% else %}×{% endif %}</td>
+                <td>{% if row.setting.show_storage_contract %}〇{% else %}×{% endif %}</td>
+                <td><button type="button" class="btn-sm" onclick="window.location.href='{% url 'core:other_main_edit' row.department.pk %}'">編集</button></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <table id="other-setting-logout" class="data-table" style="display:none;">
+          <thead><tr><th>項目</th><th>設定値</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>自動ログアウト時間</td>
+              <td>{{ logout_setting.session_idle_timeout_minutes }}分</td>
+              <td><button type="button" class="btn-sm" onclick="window.location.href='{% url 'core:other_logout_edit' %}'">編集</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      </div>
+    </div>
+
+    <div id="screen-other-main-pager" class="pager-bottom">
+      {% if page_obj.has_previous %}
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page=1'">«</button>
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.previous_page_number }}'">＜</button>
+      {% else %}
+        <button type="button" disabled>«</button>
+        <button type="button" disabled>＜</button>
+      {% endif %}
+      {% for num in page_obj.paginator.page_range %}
+        {% if num == page_obj.number %}
+          <button type="button" class="active">{{ num }}</button>
+        {% else %}
+          <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ num }}'">{{ num }}</button>
+        {% endif %}
+      {% endfor %}
+      {% if page_obj.has_next %}
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.next_page_number }}'">＞</button>
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.paginator.num_pages }}'">»</button>
+      {% else %}
+        <button type="button" disabled>＞</button>
+        <button type="button" disabled>»</button>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // 原本index.html kbnSelectForOtherSettings()の移植。
+    // 一覧再表示時は選択中のタブをサーバー側で描画し直した状態（ラジオボタンのchecked）から、
+  // 表示切替もそれに合わせて復元する。
+  kbnSelectForOtherSettings(document.getElementById('other-tab-logout-radio').checked ? 'logout' : 'main');
+
+  function kbnSelectForOtherSettings(value) {
+    const menuTable = document.getElementById('other-setting-menu');
+    const logoutTable = document.getElementById('other-setting-logout');
+    const pager = document.getElementById('screen-other-main-pager');
+    const count = document.getElementById('screen-other-main-count');
+    if (value === 'main') {
+      menuTable.style.display = '';
+      logoutTable.style.display = 'none';
+      pager.style.display = 'flex';
+      count.style.display = '';
+    } else {
+      menuTable.style.display = 'none';
+      logoutTable.style.display = '';
+      pager.style.display = 'none';
+      count.style.display = 'none';
+    }
+  }
+</script>
+{% endblock %}

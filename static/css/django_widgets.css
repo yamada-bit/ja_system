@@ -1,0 +1,57 @@
+/*
+ * HTML確定版のCSS（style.css/compact.css）は原本のコピーとして手を加えず維持するため、
+ * Django標準ウィジェットが生成する独自のDOM構造（style.css側では想定されていない）に
+ * 対応するための補助スタイルをこのファイルに分離する。
+ *
+ * 例: forms.RadioSelectは各選択肢を<div>で個別に囲んで出力するため、原本のような
+ * 生の<input>の並び（横並びになる）と違い、既定では縦積みになってしまう。
+ * ここでは検索・保管フォーム内のラジオボタン群を横並びに強制する。
+ */
+.search-condition-table td > div[id^="id_"],
+.form-row > div[id^="id_"] {
+  display: inline-block;
+  vertical-align: middle;
+}
+.search-condition-table div[id^="id_"] > div,
+.form-row div[id^="id_"] > div {
+  display: inline-block;
+  margin-right: 10px;
+}
+.search-condition-table div[id^="id_"] > div label,
+.form-row div[id^="id_"] > div label {
+  white-space: nowrap;
+}
+
+/*
+ * 個人情報有無ラジオ（screen-storage2/screen-document-edit）は原本CSSの.radio-group
+ * （flexboxのgap:15px）を使っているため、上の汎用10px上書きより優先させる
+ * （後方に書くことでセレクタ詳細度が同じ場合の後勝ちルールで上書きする）。
+ */
+.radio-group div[id^="id_"] > div {
+  margin-right: 15px;
+}
+
+/*
+ * Djangoのmessagesフレームワーク用<ul class="messages">は原本HTMLに存在しない要素のため
+ * style.css側に対応するリセットが無く、既定のブラウザ<ul>装飾（黒丸・インデント）が出てしまう。
+ */
+ul.messages {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+/*
+ * 一覧のソート矢印（.sort-btn）は原本ではただの<span onclick>だが、本実装は
+ * サーバーサイド遷移のため<a>で囲む必要がある。原本と同じ見た目にするため
+ * リンクの既定色・下線を打ち消す（色自体は.sort-btnが持っている）。
+ *
+ * 職員マスタ一覧・部署管理一覧・権限管理一覧（.data-table/.data-table-auth）のソート機能は
+ * 原本HTML・xlsxいずれにも存在しない独自追加（検索画面と同じ全社的パターンとしての拡張）で、
+ * 色指定の原本記載も無い。検索画面の.sort-linkと見た目を統一する方針のため、テーブルの種類を
+ * 問わず.sort-link全体に適用する（.result-tableへのスコープ限定をやめた）。
+ */
+a.sort-link {
+  color: inherit;
+  text-decoration: none;
+}

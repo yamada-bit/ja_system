@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+
+{% block title %}{% if mode == "create" %}契約書 保管画面{% else %}編集画面{% endif %} - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-storage2" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム -契約書管理-</div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
+          <button type="button" onclick="window.location.href='{% url 'contracts:upload_step1' %}'">＜ 戻る</button>
+          <h1 style="margin: 0;">{% if mode == "create" %}契約書 保管画面{% else %}編集画面{% endif %}</h1>
+        </div>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="storage-layout">
+      <div class="pdf-preview-container">
+        <div class="zoom-controls">
+          <button type="button" onclick="zoomPdf('storage-pdf-page', -0.1)">－</button>
+          <button type="button" onclick="zoomPdf('storage-pdf-page', 0.1)">＋</button>
+        </div>
+        <div class="pdf-view-box2 drag-scrollable" id="storage-pdf-view-box">
+          <div class="pdf-scroll-area">
+          <div class="pdf-mock-page" id="storage-pdf-page">
+            <h3 id="pdf-mock-title" style="border-bottom:2px solid #333; padding-bottom:5px;">{{ file_rows.0.0.original_name }}</h3>
+            {# documents/storage2.htmlと同じ理由（ユーザー依頼2026-08-12で追加した実プレビュー、画像／PDF）。 #}
+            <img id="pdf-preview-image" alt="" style="max-width:100%; margin-top:10px; display:none;">
+            <iframe id="pdf-preview-frame" title="" style="width:100%; height:440px; margin-top:10px; border:none; display:none;"></iframe>
+            <p id="pdf-preview-denied" style="margin-top:20px; font-size:13px; color:#c0392b; display:none;">プレビューを表示するには「契約書-ダウンロード」権限が必要です。権限管理画面でご確認ください。</p>
+            <div id="pdf-mock-body">
+              <p style="margin-top:20px; font-size:12px; color:#555;">これはデモ用の擬似PDFプレビュー画面です。右側の切り替えボタンと連動して内容が切り替わります。</p>
+              <p style="margin-top:40px; border-left:3px solid var(--primary-color); padding-left:10px;">電帳法要件定義対応スタンプ：承認済</p>
+            </div>
+          </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="meta-input-form-wrapper">
+        <form method="post" enctype="multipart/form-data" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
+          {% csrf_token %}
+          <input type="hidden" name="token" value="{{ token }}">
+
+          <div class="pager-top" style="flex-shrink:0;">
+            <button type="button" id="btn-prev-doc" onclick="changeActiveDoc(-1)">＜</button>
+            <span id="doc-pager-text" style="font-weight:bold;">1 / {{ file_rows|length }}</span>
+            <button type="button" id="btn-next-doc" onclick="changeActiveDoc(1)">＞</button>
+          </div>
+
+          <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
+            <div class="form-section">
+              <h4>[1] 保管先</h4>
+              <div class="form-row">
+                <label>部署</label>
+                {{ form.department }}
+                {% for error in form.department.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+              </div>
+              <div class="form-row">
+                <label>分類</label>
+                {{ form.group }}
+                {% for error in form.group.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+              </div>
+              <div class="form-row">
+                <label>年</label>
+                {{ form.year }}
+              </div>
+              <div class="form-row">
+                <label>カテゴリー</label>
+                {{ form.category }}
+                {% for error in form.category.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+              </div>
+            </div>
+
+            <div class="form-section">
+              <h4>[2] 文書情報</h4>
+              {% for item, title_field in file_rows %}
+                <div class="form-row title-row" data-doc-index="{{ forloop.counter0 }}"{% if not forloop.first %} style="display:none;"{% endif %}>
+                  <label>契約書タイトル</label>
+                  {{ title_field }}
+                  {% for error in title_field.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+                </div>
+              {% endfor %}
+              <div class="form-row" style="margin-top:10px;"><label>契約日</label>{{ form.contract_date }}</div>
+              <div class="form-row"><label>契約期間</label>{{ form.contract_period_start }} ～ {{ form.contract_period_end }}</div>
+              <div class="form-row"><label>契約更新日</label>{{ form.renewal_date }}</div>
+              <div class="form-row"><label>契約金額</label>{{ form.contract_amount }} 円</div>
+              <div class="form-row"><label>契約先名</label>{{ form.contract_partner }}</div>
+            </div>
+
+            <div class="form-section">
+              <h4>[3] 関連書類</h4>
+              {# 原本index.html:1567-1589のsetupStorageFormForActiveDoc()は、アクティブ文書を
+                 切り替えるたびに関連書類欄のコンテナをリセットする＝一括登録の各契約書ごとに
+                 個別の関連書類を添付できる想定。以前はHTML/xlsxに複数件一括時の割り当て方法が
+                 未定義という理由で1件登録時のみに制限していたが、原本フィデリティ監査を受けて
+                 契約書タイトル欄（title-row）と同じdata-doc-index方式で文書ごとに独立した
+                 コンテナ・inputを用意し、原本の挙動通り件数に関わらず添付できるようにする。 #}
+              {% for item, title_field in file_rows %}
+                <div class="form-row related-files-row" data-doc-index="{{ forloop.counter0 }}" style="flex-direction:column; align-items:flex-start; gap:5px;{% if not forloop.first %} display:none;{% endif %}">
+                  <label style="width:100%;">関連書類</label>
+                  <div id="storage-file-inputs-container-{{ forloop.counter0 }}" style="width:100%;">
+                    <div class="related-file-row">
+                      <input type="file" name="related_files_{{ forloop.counter0 }}" onchange="handleRelatedFileChange(this)">
+                    </div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+
+            <div class="form-section">
+              <h4>[4] メモ欄</h4>
+              {{ form.memo }}
+              <div style="text-align: right; margin-top: 10px;">
+                <button type="button" style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;" onclick="clearMemo()">削除</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
+            <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
+            <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'contracts:upload_step1' %}'">キャンセル</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    {% include "contracts/_complete_modal.html" %}
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  (function () {
+    const fileNames = [
+      {% for item, _ in file_rows %}"{{ item.original_name|escapejs }}"{% if not forloop.last %}, {% endif %}{% endfor %}
+    ];
+    const previewUrls = [
+      {% for url in preview_urls %}"{{ url|escapejs }}"{% if not forloop.last %}, {% endif %}{% endfor %}
+    ];
+    const previewKinds = [
+      {% for kind in preview_kinds %}"{{ kind|escapejs }}"{% if not forloop.last %}, {% endif %}{% endfor %}
+    ];
+    let activeDocIndex = 0;
+
+    function setupActiveDoc() {
+      const total = fileNames.length;
+      document.getElementById('doc-pager-text').textContent = `${activeDocIndex + 1} / ${total}`;
+      document.getElementById('pdf-mock-title').textContent = fileNames[activeDocIndex];
+
+      const previewImg = document.getElementById('pdf-preview-image');
+      const previewFrame = document.getElementById('pdf-preview-frame');
+      const previewDenied = document.getElementById('pdf-preview-denied');
+      const mockBody = document.getElementById('pdf-mock-body');
+      const url = previewUrls[activeDocIndex];
+      const kind = previewKinds[activeDocIndex];
+      previewImg.style.display = 'none';
+      previewImg.removeAttribute('src');
+      previewFrame.style.display = 'none';
+      previewFrame.removeAttribute('src');
+      previewDenied.style.display = 'none';
+      mockBody.style.display = '';
+      if (kind === 'image' && url) {
+        previewImg.src = url;
+        previewImg.style.display = 'block';
+        mockBody.style.display = 'none';
+      } else if (kind === 'pdf' && url) {
+        previewFrame.src = url;
+        previewFrame.style.display = 'block';
+        mockBody.style.display = 'none';
+      } else if (kind === 'image' || kind === 'pdf') {
+        // documents/storage2.htmlと同じ理由（2026-08-13ユーザー報告対応）。
+        previewDenied.style.display = 'block';
+        mockBody.style.display = 'none';
+      }
+
+      document.querySelectorAll('.title-row').forEach((row) => {
+        row.style.display = (parseInt(row.dataset.docIndex, 10) === activeDocIndex) ? '' : 'none';
+      });
+      document.querySelectorAll('.related-files-row').forEach((row) => {
+        row.style.display = (parseInt(row.dataset.docIndex, 10) === activeDocIndex) ? '' : 'none';
+      });
+      document.getElementById('btn-prev-doc').disabled = (activeDocIndex === 0);
+      document.getElementById('btn-next-doc').disabled = (activeDocIndex === total - 1);
+    }
+
+    window.changeActiveDoc = function (dir) {
+      activeDocIndex += dir;
+      if (activeDocIndex < 0) activeDocIndex = 0;
+      if (activeDocIndex >= fileNames.length) activeDocIndex = fileNames.length - 1;
+      setupActiveDoc();
+    };
+
+    setupActiveDoc();
+  })();
+</script>
+{% endblock %}

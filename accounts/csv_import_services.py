@@ -1,0 +1,210 @@
+import csv
+import io
+import logging
+
+from django.db import transaction
+
+from accounts.models import Employee
+from accounts.services import reset_permission_profile_if_needed
+from audit import services as audit_services
+from organizations.models import Department
+from permissions.models import PermissionProfile, PermissionRole
+
+logger = logging.getLogger(__name__)
+
+# xlsx 職員マスタ!B94-95(Rev1.1「フォーム変更」)に埋め込み画像として存在する取込用CSVレイアウト。
+# 列順は固定（職員番号,氏名,支所コード,本支所名正式名称,部課コード,部課名,役職コード,役職名,
+# 職階コード,職階名,所属長フラグ）。ヘッダー行が1行あることを前提にする。
+CSV_HEADER = [
+    "職員番号", "氏名", "支所コード", "本支所名正式名称", "部課コード", "部課名",
+    "役職コード", "役職名", "職階コード", "職階名", "所属長フラグ",
+]
+
+RETIRED_SECTION_CODE = "99"
+
+
+class CsvImportError(Exception):
+    """取込用CSV自体が読めない・列数が合わない等、行単位の処理に進めない場合のエラー。"""
+
+
+class ImportSummary:
+    """取込結果の集計（screen-staff-listへ表示するメッセージ用）。"""
+
+    def __init__(self):
+        self.created = 0
+        self.updated = 0
+        self.retired = 0
+        self.unchanged = 0
+        self.errors = []
+
+    def __str__(self):
+        return (
+            f"新規登録{self.created}件、更新{self.updated}件、退職扱い{self.retired}件、"
+            f"変更なし{self.unchanged}件"
+            + (f"、エラー{len(self.errors)}件" if self.errors else "")
+        )
+
+
+def import_staff_csv(file_obj, *, actor):
+    """職員マスタCSV取込（xlsx 職員マスタ!B93-142、Rev1.1で所属長フラグ列が追加された）。
+
+    1行=1職員。部署（本支所/部課）は取込時に無ければ新規登録、名称に差分があれば更新する
+    （B127-138）。職員は職員番号で既存レコードと突き合わせ、氏名のみの変更・部課/役職/職階の
+    変更（異動・昇格降格扱いで権限リセット）・部課コード"99"（退職扱い）・新規登録
+    （権限管理は初期値、パスワードは"ja"+職員番号下4桁）のいずれかとして扱う。取込用CSVに
+    存在しない既存職員は処理不要（削除しない、B121-122）。所属長フラグ"1"の行は、対象職員の
+    権限管理システム権限を「所属長」に更新する（B124-125、後述の権限管理と連動する数少ない
+    CSV取込項目）。
+
+    1行の処理失敗（必須列欠落・コード不正等）は他の行の処理を止めず、summary.errorsに集積する
+    （インポート全体が1行のミスで巻き戻ると大量データの再取込コストが大きいため）。
+    """
+    summary = ImportSummary()
+    try:
+        text = file_obj.read().decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise CsvImportError("CSVファイルの文字コードを確認してください（UTF-8を想定しています）。") from exc
+
+    reader = csv.reader(io.StringIO(text))
+    try:
+        header = next(reader)
+    except StopIteration:
+        raise CsvImportError("CSVファイルが空です。")
+    if [h.strip() for h in header] != CSV_HEADER:
+        raise CsvImportError(f"CSVの列構成が想定と異なります。期待する列: {','.join(CSV_HEADER)}")
+
+    for line_no, row in enumerate(reader, start=2):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+        try:
+            _import_row(row, actor=actor, summary=summary)
+        except Exception as exc:
+            logger.exception("職員マスタCSV取込で行の処理に失敗しました: line=%s", line_no)
+            summary.errors.append(f"{line_no}行目: {exc}")
+
+    logger.info(
+        "職員マスタCSV取込を実行しました: employee_no=%s 結果=%s", actor.employee_no, summary
+    )
+    audit_services.log(
+        employee=actor,
+        action="職員マスタ CSV取込",
+        event_message=f"職員マスタCSV取込,{summary}",
+    )
+    return summary
+
+
+def _import_row(row, *, actor, summary):
+    if len(row) != len(CSV_HEADER):
+        raise ValueError(f"列数が{len(CSV_HEADER)}列ではありません（{len(row)}列）。")
+    (
+        employee_no, name, branch_code, branch_name, section_code, section_name,
+        position_code, position_name, rank_code, rank_name, manager_flag,
+    ) = (cell.strip() for cell in row)
+
+    if not employee_no:
+        raise ValueError("職員番号が空です。")
+
+    with transaction.atomic():
+        department = _upsert_department(branch_code, branch_name, section_code, section_name)
+        _import_employee(
+            employee_no=employee_no, name=name, department=department,
+            section_code=section_code, position_code=position_code, rank_code=rank_code,
+            manager_flag=manager_flag, actor=actor, summary=summary,
+        )
+
+
+def _upsert_department(branch_code, branch_name, section_code, section_name):
+    """xlsx 職員マスタ!B127-138。本支所コード＋部課コードの組み合わせで部署マスタを
+    新規登録・更新する（Department.Meta.constraints unique_department_branch_sectionと同じキー）。
+    """
+    department, created = Department.objects.get_or_create(
+        branch_code=branch_code, section_code=section_code,
+        defaults={"branch_name": branch_name, "section_name": section_name},
+    )
+    if not created and (department.branch_name != branch_name or department.section_name != section_name):
+        department.branch_name = branch_name
+        department.section_name = section_name
+        department.save(update_fields=["branch_name", "section_name"])
+    return department
+
+
+def _import_employee(*, employee_no, name, department, section_code, position_code, rank_code, manager_flag, actor, summary):
+    try:
+        employee = Employee.objects.get(employee_no=employee_no)
+    except Employee.DoesNotExist:
+        employee = None
+
+    if employee is None:
+        # xlsx B117-119「職員マスタテーブルに存在しない場合...新規登録扱いとし『権限管理』は
+        # 初期値をセットしておく。パスワードの初期値はjaXXXX(XXXXは職員番号)とする」。
+        employee = Employee.objects.create_user(
+            employee_no=employee_no, name=name, password="ja" + employee_no[-4:],
+            department=department, rank=rank_code, position=position_code,
+            is_retired=(section_code == RETIRED_SECTION_CODE),
+        )
+        PermissionProfile.objects.create(employee=employee, role=PermissionRole.STAFF)
+        summary.created += 1
+        _apply_manager_flag(employee, manager_flag, actor)
+        return
+
+    changed_fields = []
+    department_changed = employee.department_id != department.pk
+    rank_changed = employee.rank != rank_code
+    position_changed = employee.position != position_code
+
+    if employee.name != name:
+        # xlsx B111-112(Rev1.1)「職員番号が同じで氏名が変わった場合...氏名を更新する」。
+        employee.name = name
+        changed_fields.append("name")
+    if department_changed:
+        employee.department = department
+        changed_fields.append("department")
+    if rank_changed:
+        employee.rank = rank_code
+        changed_fields.append("rank")
+    if position_changed:
+        employee.position = position_code
+        changed_fields.append("position")
+
+    is_retiring_now = section_code == RETIRED_SECTION_CODE and not employee.is_retired
+    if is_retiring_now:
+        # xlsx B114-115「部課コードが"99"の場合...退職扱いとし対象職員の退職フラグをセットする」。
+        employee.is_retired = True
+        changed_fields.append("is_retired")
+
+    if changed_fields:
+        employee.save(update_fields=changed_fields)
+        # xlsx B108-109「部課コード、役職コード、職階コードのいずれかに差分があった場合...
+        # 異動、昇格/降格扱いとし権限設定をリセットする」。退職も同じくリセット対象
+        # （accounts.services.reset_permission_profile_if_needed参照）。
+        reset_permission_profile_if_needed(
+            employee, department_changed=department_changed, rank_changed=rank_changed,
+            position_changed=position_changed, actor=actor,
+        )
+        if is_retiring_now:
+            summary.retired += 1
+        else:
+            summary.updated += 1
+    else:
+        summary.unchanged += 1
+
+    _apply_manager_flag(employee, manager_flag, actor)
+
+
+def _apply_manager_flag(employee, manager_flag, actor):
+    """xlsx B124-125(Rev1.1)「所属長フラグが"1"の場合...後述『権限管理』権限マスタの対象者を
+    『所属長』として権限更新する」。既に管理者ロールの職員は降格させない（CSV取込という
+    間接的な経路で管理者権限を意図せず引き下げる事故を避けるための安全側の判断）。
+    """
+    if manager_flag != "1":
+        return
+    profile, _ = PermissionProfile.objects.get_or_create(
+        employee=employee, defaults={"role": PermissionRole.MANAGER}
+    )
+    if profile.role == PermissionRole.STAFF:
+        profile.role = PermissionRole.MANAGER
+        profile.save(update_fields=["role"])
+        logger.info(
+            "CSV取込の所属長フラグにより権限を所属長へ更新しました: employee_no=%s",
+            employee.employee_no,
+        )

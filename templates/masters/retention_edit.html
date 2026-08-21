@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}保存期間設定編集 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-retention-edit-doc" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 保存期間設定編集(<span class="retention-kbn">{% if period.kbn == "eapproval" %}電子決裁{% else %}文書{% endif %}</span>) -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        {{ form.kbn }}
+        {{ form.doc_name }}
+        <table class="vertical-master-table">
+          {% if period.kbn == "eapproval" %}
+            <tr>
+              <th>書類名</th>
+              <td><span class="select-doc-name-str">{{ period.get_doc_name_display }}</span></td>
+            </tr>
+          {% endif %}
+          <tr>
+            <th>保存期間</th>
+            <td>
+              {{ form.period_value }}
+              {{ form.period_unit }}
+              {% for error in form.period_value.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>表示順</th>
+            <td>
+              {{ form.display_order }}
+              {% for error in form.display_order.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'masters:retention_list' %}?kbn={{ period.kbn }}&doc_name={{ period.doc_name }}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  function handlePermanent(selectElement) {
+    const periodInput = document.getElementById('save-period-txt');
+    if (selectElement.value === 'permanent') {
+      periodInput.value = '';
+      periodInput.disabled = true;
+    } else {
+      periodInput.disabled = false;
+    }
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}メイン画面項目編集 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-other-main-edit" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- メイン画面項目編集 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <table class="vertical-master-table">
+          <tr><th>No.</th><td>{{ no }}</td></tr>
+          <tr><th>所属部署</th><td>{{ department }}</td></tr>
+          <tr>
+            <th>検索・閲覧・変更</th>
+            <td>
+              <label>{{ form.show_search_document }} 文書&#12288;</label>
+              <label>{{ form.show_search_contract }} 契約書&#12288;</label>
+              <label>{{ form.show_search_eapproval }} 電子決裁</label>
+            </td>
+          </tr>
+          <tr>
+            <th>保管</th>
+            <td>
+              <label>{{ form.show_storage_document }} 文書&#12288;</label>
+              <label>{{ form.show_storage_contract }} 契約書&#12288;</label>
+            </td>
+          </tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:other_settings' %}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

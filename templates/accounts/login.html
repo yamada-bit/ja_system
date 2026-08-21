@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}ログイン - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-login" class="screen active">
+    <div class="login-container">
+      <div class="system-sub">電帳法対応</div>
+      <div class="login-title">クラウド文書管理システム</div>
+
+      <form method="post">
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+          <div class="login-form-group">
+            {% for error in form.non_field_errors %}
+              <span style="color:#c0392b;">{{ error }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
+        <div class="login-form-group">
+          <label for="login-user">職員番号</label>
+          {{ form.username }}
+        </div>
+        <div class="login-form-group">
+          <label for="login-pass">パスワード</label>
+          <div class="password-wrapper">
+            {{ form.password }}
+            <span class="password-toggle" id="pass-toggle-icon">👁️</span>
+          </div>
+        </div>
+        <button type="submit" class="btn-primary" style="width:100%; padding:12px; font-size:16px; margin-top:10px;">ログイン</button>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  document.getElementById('pass-toggle-icon').addEventListener('click', function() {
+    const passwordField = document.getElementById('login-pass');
+    if (passwordField.type === 'password') {
+      passwordField.type = 'text';
+    } else {
+      passwordField.type = 'password';
+    }
+  });
+</script>
+{% endblock %}

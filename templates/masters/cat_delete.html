@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}カテゴリー管理削除 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-cat-delete" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- カテゴリー管理削除 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <p>以下のカテゴリーを削除します。よろしいですか？</p>
+      <table class="vertical-master-table">
+        <tr><th>カテゴリーコード</th><td>{{ category.code }}</td></tr>
+        <tr><th>カテゴリー名</th><td>{{ category.name }}</td></tr>
+        <tr><th>分類</th><td>{{ category.group.name }}</td></tr>
+        <tr><th>書類管理区分</th><td>{{ category.get_doc_kbn_display }}</td></tr>
+      </table>
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'masters:cat_list' %}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('削除してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">削除</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

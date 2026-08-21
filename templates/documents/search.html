@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% load search_extras %}
+
+{% block title %}文書 検索・閲覧画面 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-search" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub-title">クラウド文書管理システム -文書管理-</div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
+          <button type="button" onclick="window.location.href='{% url 'core:menu' %}'">＜ 戻る</button>
+          <h1 style="margin: 0;">文書 検索・閲覧画面</h1>
+        </div>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="get">
+      <div style="position:relative; height:160px; border:1px solid var(--border-color); padding:5px; border-radius:6px; background:var(--panel-bg);">
+        <div style="display:flex; align-items:flex-start;">
+          <table class="search-condition-table" style="float:left;">
+            <tr><td class="label">部署名</td><td>{{ form.department }}</td></tr>
+            <tr><td class="label">分類</td><td>{{ form.group }}</td></tr>
+            <tr><td class="label">年</td><td>{{ form.year }}</td></tr>
+            <tr><td class="label">カテゴリー</td><td>{{ form.category }}</td></tr>
+          </table>
+
+          <table class="search-condition-table" style="float:left; margin-left:50px;">
+            <tr>
+              <td class="label"></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td class="label">文書タイトル</td>
+              <td>{{ form.title }}　{{ form.title_match }}</td>
+            </tr>
+            <tr>
+              <td class="label">フリーワード</td>
+              <td>{{ form.freeword }}　{{ form.freeword_match }}</td>
+            </tr>
+            <tr>
+              <td class="label">期間</td>
+              <td>{{ form.save_date_start }} ～ {{ form.save_date_end }}<span style="display:inline-block; width:48px;"></span> {{ form.save_day_kbn }}</td>
+            </tr>
+            <tr>
+              <td class="label">保存期間</td>
+              <td>{{ form.retention_period }}</td>
+            </tr>
+          </table>
+        </div>
+        <div style="position:absolute; bottom:2px; right:10px;">
+          <button type="submit" class="btn-primary" style="width:160px; padding:10px;">検索開始</button>
+          <button type="button" class="btn-cancel" style="width:160px; padding:10px;" onclick="window.location.href='{% url 'documents:search' %}'">条件クリア</button>
+        </div>
+      </div>
+    </form>
+
+    <div class="search-grid-layout">
+      <div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; position:absolute; top:5px; left:350px;">
+          <div style="font-weight:bold;">検索結果 一覧表示 <span style="font-size:14px; color:#666; margin-left:10px;" id="search-count-text">{{ page_obj.paginator.count }} 件</span></div>
+        </div>
+        <form method="post" action="{% url 'documents:bulk_download' %}">
+          {% csrf_token %}
+          <button type="button" id="btn-toggle-all" onclick="toggleAllCheckboxes()">一括選択</button>　{% if can_download %}<button type="submit">一括ダウンロード</button>{% endif %}　<button type="submit" formaction="{% url 'documents:bulk_edit_start' %}">一括編集</button>
+          <div class="table-wrapper">
+            <table class="result-table" data-result-count="{{ page_obj.paginator.count }}">
+              <thead>
+                <tr>
+                  <th style="width:40px;">選択</th>
+                  <th style="width:60px;">No. <a class="sort-link" href="{% sort_url request.GET 'no' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'no' sort_key sort_dir %}</span></a></th>
+                  <th>文書タイトル <a class="sort-link" href="{% sort_url request.GET 'title' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'title' sort_key sort_dir %}</span></a></th>
+                  <th>保存情報 <a class="sort-link" href="{% sort_url request.GET 'info' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'info' sort_key sort_dir %}</span></a></th>
+                  <th>保管・更新者 <a class="sort-link" href="{% sort_url request.GET 'uploader' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'uploader' sort_key sort_dir %}</span></a></th>
+                  <th>保存日 <a class="sort-link" href="{% sort_url request.GET 'save_date' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'save_date' sort_key sort_dir %}</span></a></th>
+                  <th>保存期間 <a class="sort-link" href="{% sort_url request.GET 'retention_period' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'retention_period' sort_key sort_dir %}</span></a></th>
+                  <th>保存満了日 <a class="sort-link" href="{% sort_url request.GET 'expiry_date' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'expiry_date' sort_key sort_dir %}</span></a></th>
+                  <th>更新日時 <a class="sort-link" href="{% sort_url request.GET 'updated_at' sort_key sort_dir %}"><span class="sort-btn">{% sort_arrow 'updated_at' sort_key sort_dir %}</span></a></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for document in page_obj %}
+                  <tr{% if forloop.counter|divisibleby:2 %} style="background-color:#E7E7E7;"{% endif %} onclick="showSearchPreview('{{ document.title|escapejs }}', '{% if can_download %}{% url 'documents:preview' document.pk %}{% endif %}', 'document', '{{ document.display_name|preview_kind }}')" ondblclick="openDetailPopup('{% url 'documents:api_detail' document.pk %}', 'document')">
+                    <td style="text-align:center;"><input type="checkbox" class="row-checkbox" name="pks" value="{{ document.pk }}" onclick="event.stopPropagation();"></td>
+                    <td style="text-align:right;">{{ document.display_no }}</td>
+                    <td style="font-weight:bold; color:{% if notice %}#e74c3c{% else %}#1a0dab{% endif %};">{{ document.title }}</td>
+                    <td>{{ document.department.section_name }}/{{ document.year }}/{{ document.category }}</td>
+                    <td>{{ document.uploader.department.section_name }}｜{{ document.uploader.name }}</td>
+                    <td style="text-align:center;">{{ document.save_date|date:"Y-m-d" }}</td>
+                    <td style="text-align:center;">{{ document.retention_period }}</td>
+                    <td style="text-align:center;">{{ document.expiry_date|date:"Y-m-d" }}</td>
+                    <td style="text-align:center;">{{ document.updated_at|date:"Y-m-d H:i" }}</td>
+                  </tr>
+                {% empty %}
+                  <tr><td colspan="9">該当する文書がありません。</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </form>
+
+        <div class="pager-bottom">
+          {% if page_obj.has_previous %}
+            <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page=1'">«</button>
+            <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.previous_page_number }}'">＜</button>
+          {% else %}
+            <button type="button" disabled>«</button>
+            <button type="button" disabled>＜</button>
+          {% endif %}
+          {% for num in page_obj.paginator.page_range %}
+            {% if num == page_obj.number %}
+              <button type="button" class="active">{{ num }}</button>
+            {% else %}
+              <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ num }}'">{{ num }}</button>
+            {% endif %}
+          {% endfor %}
+          {% if page_obj.has_next %}
+            <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.next_page_number }}'">＞</button>
+            <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.paginator.num_pages }}'">»</button>
+          {% else %}
+            <button type="button" disabled>＞</button>
+            <button type="button" disabled>»</button>
+          {% endif %}
+        </div>
+      </div>
+
+      <div>
+        <div style="font-weight:bold;">文書イメージ</div>
+        <div class="pdf-view-box" style="height:320px; position:relative;">
+          <iframe id="search-preview-frame" style="width:100%; height:100%; border:none; display:none;"></iframe>
+          <div id="search-preview-placeholder" style="text-align:center; color:#999; padding:20px;">
+            <p style="font-size:24px; margin-bottom:10px;">📄</p>
+            <p id="search-preview-title" style="font-size:13px;">一覧から行を選択すると<br>ここにプレビューが表示されます</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

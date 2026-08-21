@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% load search_extras %}
+
+{% block title %}職員マスタ一覧 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-staff-list" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム</div>
+        <h1>- 職員マスタ一覧 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="get">
+      <div class="master-search-panel">
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">本支所</label>
+          {{ form.branch_code }}
+        </div>
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">部課</label>
+          {{ form.section_code }}
+        </div>
+        {% comment %}
+          xlsx 職員マスタ!B38「本支所を選択時に、部課プルダウン内容を動的に更新する」。
+          サーバー側は全部課を選択肢として保持したまま、選択済みの本支所に応じてクライアント側で
+          表示する<option>を絞り込む（staff_regist.html/staff_edit.htmlのupdateSections()と
+          同じ考え方だが、検索欄は必須項目ではないため「(全て)」を常に残し、無効化はしない）。
+        {% endcomment %}
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">氏名</label>
+          {{ form.name }}
+        </div>
+        <div>
+          <label style="font-weight:bold; cursor:pointer;">{{ form.include_retired }} 退職者を含める</label>
+        </div>
+        <button type="submit" class="btn-primary" style="padding:5px 15px;">検索</button>
+      </div>
+    </form>
+
+    <div style="display:inline-block; max-width:100%;">
+      <div class="action-bar" style="justify-content:space-between; align-items:center;">
+        <div style="display:flex; gap:10px;">
+          <button type="button" class="btn-primary" onclick="window.location.href='{% url 'accounts:staff_regist' %}'">＋ 新規登録</button>
+          <form method="post" action="{% url 'accounts:staff_csv_import' %}" enctype="multipart/form-data" style="display:inline;">
+            {% csrf_token %}
+            <input type="hidden" name="token" value="{{ csv_import_token }}">
+            <input type="file" name="csv_file" accept=".csv" id="staff-csv-import-input" style="display:none;" onchange="this.form.submit()">
+            <button type="button" onclick="document.getElementById('staff-csv-import-input').click()">CSV取込</button>
+          </form>
+          <button type="button" onclick="window.location.href='{% url 'accounts:staff_csv_export' %}?' + window.location.search.slice(1)">CSV出力</button>
+        </div>
+        <div style="font-size:14px; color:#666;">総件数：{{ page_obj.paginator.count }} 件</div>
+      </div>
+      <div class="content-container">
+      <div class="table-scroll-container" style="max-height: 340px;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th><a class="sort-link" href="{% sort_url request.GET 'employee_no' sort_key sort_dir %}">職員番号{% sort_arrow 'employee_no' sort_key sort_dir %}</a></th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'name' sort_key sort_dir %}">氏名{% sort_arrow 'name' sort_key sort_dir %}</a></th>
+              <th>パスワード</th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'branch_code' sort_key sort_dir %}">本支所コード{% sort_arrow 'branch_code' sort_key sort_dir %}</a></th>
+              <th>本支所名</th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'section_code' sort_key sort_dir %}">部課コード{% sort_arrow 'section_code' sort_key sort_dir %}</a></th>
+              <th>部課名</th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'rank' sort_key sort_dir %}">職階コード{% sort_arrow 'rank' sort_key sort_dir %}</a></th>
+              <th>職階名</th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'position' sort_key sort_dir %}">役職コード{% sort_arrow 'position' sort_key sort_dir %}</a></th>
+              <th>役職名</th>
+              <th>退職</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for employee in page_obj %}
+              <tr{% if employee.is_retired %} style="color:#F00;"{% endif %}>
+                <td>{{ employee.employee_no }}</td>
+                <td style="text-align:left;">{{ employee.name }}</td>
+                <td>********</td>
+                <td>{{ employee.department.branch_code }}</td>
+                <td style="text-align:left;">{{ employee.department.branch_name }}</td>
+                <td>{{ employee.department.section_code }}</td>
+                <td style="text-align:left;">{{ employee.department.section_name }}</td>
+                <td>{{ employee.rank }}</td>
+                <td style="text-align:left;">{{ employee.get_rank_display }}</td>
+                <td>{{ employee.position }}</td>
+                <td style="text-align:left;">{{ employee.get_position_display }}</td>
+                <td>{% if employee.is_retired %}○{% endif %}</td>
+                <td><button type="button" onclick="window.location.href='{% url 'accounts:staff_detail' employee.pk %}'">詳細</button></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      </div>
+    </div>
+    <div class="pager-bottom">
+      {% if page_obj.has_previous %}
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page=1'">«</button>
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.previous_page_number }}'">＜</button>
+      {% else %}
+        <button type="button" disabled>«</button>
+        <button type="button" disabled>＜</button>
+      {% endif %}
+      {% for num in page_obj.paginator.page_range %}
+        {% if num == page_obj.number %}
+          <button type="button" class="active">{{ num }}</button>
+        {% else %}
+          <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ num }}'">{{ num }}</button>
+        {% endif %}
+      {% endfor %}
+      {% if page_obj.has_next %}
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.next_page_number }}'">＞</button>
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.paginator.num_pages }}'">»</button>
+      {% else %}
+        <button type="button" disabled>＞</button>
+        <button type="button" disabled>»</button>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // xlsx 職員マスタ!B38「本支所を選択時に、部課プルダウン内容を動的に更新する」。
+  // 登録/編集画面（staff_regist.html/staff_edit.htmlのupdateSections()）と同じ考え方で、
+  // サーバー側は全部課を選択肢として保持したまま、選択済みの本支所に応じてクライアント側で
+  // 表示する<option>を絞り込む。検索欄は必須項目ではないため「(全て)」は常に残し、
+  // 部課select自体の無効化はしない（登録/編集と異なり本店以外でも部課の絞り込みが有効）。
+  (function () {
+    const departments = {{ departments_json|safe }};
+    const branchSelect = document.getElementById('id_branch_code');
+    const sectionSelect = document.getElementById('id_section_code');
+    if (!branchSelect || !sectionSelect) return;
+
+    function updateSectionOptions() {
+      const branchCode = branchSelect.value;
+      const currentValue = sectionSelect.value;
+      const seen = new Set();
+      const sections = [];
+      departments
+        .filter(function (d) { return !branchCode || d.branch_code === branchCode; })
+        .forEach(function (d) {
+          if (d.section_code && !seen.has(d.section_code)) {
+            seen.add(d.section_code);
+            sections.push({ code: d.section_code, name: d.section_name });
+          }
+        });
+      sectionSelect.innerHTML = '';
+      const allOpt = document.createElement('option');
+      allOpt.value = '';
+      allOpt.textContent = '(全て)';
+      sectionSelect.appendChild(allOpt);
+      sections.forEach(function (s) {
+        const opt = document.createElement('option');
+        opt.value = s.code;
+        opt.textContent = s.name;
+        sectionSelect.appendChild(opt);
+      });
+      if (sections.some(function (s) { return s.code === currentValue; })) {
+        sectionSelect.value = currentValue;
+      }
+    }
+
+    branchSelect.addEventListener('change', updateSectionOptions);
+    updateSectionOptions();
+  })();
+</script>
+{% endblock %}

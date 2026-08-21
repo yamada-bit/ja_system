@@ -1,0 +1,16 @@
+{% load static %}<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>アクセスが拒否されました - クラウド文書管理システム</title>
+  <link rel="stylesheet" href="{% static 'css/style.css' %}">
+  <link rel="stylesheet" href="{% static 'css/compact.css' %}">
+</head>
+<body>
+  <div class="screen active" style="max-width:600px; margin:80px auto; text-align:center;">
+    <h1>- アクセスが拒否されました -</h1>
+    <p style="margin:20px 0;">{{ exception|default:"この操作を行う権限がありません。" }}</p>
+    <button type="button" class="btn-primary" onclick="window.location.href='/'">メイン画面へ戻る</button>
+  </div>
+</body>
+</html>

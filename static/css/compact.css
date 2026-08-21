@@ -1,0 +1,41 @@
+/* 1360x768 向け全体サイズ調整・コンパクト化スタイル（HTML確定版 index.html の<head>内style要素をそのまま移植） */
+body {
+  font-size: 13px;
+}
+.screen {
+  max-width: 1320px;
+  margin: 0 auto;
+}
+.system-header {
+  padding: 8px 15px;
+  margin-bottom: 10px;
+}
+.system-header h1 {
+  font-size: 18px;
+}
+.system-sub {
+  font-size: 11px;
+}
+input[type="text"], input[type="password"], input[type="date"], select, textarea {
+  font-size: 12px;
+  padding: 4px 8px;
+}
+button {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.search-condition-table td {
+  padding: 3px 5px;
+}
+.menu-grid {
+  gap: 15px;
+}
+.menu-box {
+  padding: 15px;
+}
+.storage-layout {
+  gap: 15px;
+}
+.master-detail-box {
+  padding: 15px;
+}

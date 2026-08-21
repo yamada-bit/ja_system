@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}保存期間設定 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-retention-doc" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 保存期間設定 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="content-container">
+      <div class="form-group">
+        <input type="radio" name="retention-type" value="1" id="retention-type-doc" onchange="kbnSelectForDocSave(this.value)" {% if selected_kbn != "eapproval" %}checked{% endif %}> 文書　
+        <input type="radio" name="retention-type" value="2" id="retention-type-eapproval" onchange="kbnSelectForDocSave(this.value)" {% if selected_kbn == "eapproval" %}checked{% endif %}> 電子決裁
+      </div>
+
+      <div class="master-search-panel" id="doc-select-pulldown" style="display:none;">
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">書類名</label>
+          <select id="doc-pulldown-select" onchange="kbnSelectForDocSave(this.value)">
+            <option value="ringisho" {% if selected_doc_name == "ringisho" %}selected{% endif %}>稟議書</option>
+            <option value="keihi" {% if selected_doc_name == "keihi" %}selected{% endif %}>経費支出伺</option>
+          </select>
+        </div>
+        <button type="button" class="btn-primary" style="padding:5px 15px;">表示</button>
+      </div>
+
+      <div class="action-bar">
+        <button type="button" class="btn-primary" id="btn-retention-regist">＋ 新規登録</button>
+      </div>
+
+      <table class="data-table">
+        <thead>
+          <tr><th>No.</th><th>保存期間</th><th>表示順</th><th>操作</th></tr>
+        </thead>
+        <tbody id="doc-save-table-tbody1">
+          {% for period in doc_periods %}
+            <tr>
+              <td style="text-align:right;">{{ forloop.counter }}</td>
+              <td>{{ period }}</td>
+              <td style="text-align:right;">{{ period.display_order }}</td>
+              <td>
+                <button type="button" class="btn-sm" onclick="window.location.href='{% url 'masters:retention_edit' period.pk %}'">編集</button>
+                <button type="button" class="btn-sm btn-danger" onclick="window.location.href='{% url 'masters:retention_delete' period.pk %}'">削除</button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+        <tbody id="doc-save-table-tbody2" style="display:none;">
+          {% for period in ringisho_periods %}
+            <tr>
+              <td style="text-align:right;">{{ forloop.counter }}</td>
+              <td>{{ period }}</td>
+              <td style="text-align:right;">{{ period.display_order }}</td>
+              <td>
+                <button type="button" class="btn-sm" onclick="window.location.href='{% url 'masters:retention_edit' period.pk %}'">編集</button>
+                <button type="button" class="btn-sm btn-danger" onclick="window.location.href='{% url 'masters:retention_delete' period.pk %}'">削除</button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+        <tbody id="doc-save-table-tbody3" style="display:none;">
+          {% for period in keihi_periods %}
+            <tr>
+              <td style="text-align:right;">{{ forloop.counter }}</td>
+              <td>{{ period }}</td>
+              <td style="text-align:right;">{{ period.display_order }}</td>
+              <td>
+                <button type="button" class="btn-sm" onclick="window.location.href='{% url 'masters:retention_edit' period.pk %}'">編集</button>
+                <button type="button" class="btn-sm btn-danger" onclick="window.location.href='{% url 'masters:retention_delete' period.pk %}'">削除</button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // 原本index.html kbnSelectForDocSave()の移植（3tbody事前描画+表示切替という同じ方式）。
+  function kbnSelectForDocSave(value) {
+    const pulldownArea = document.getElementById('doc-select-pulldown');
+    const tbody1 = document.getElementById('doc-save-table-tbody1');
+    const tbody2 = document.getElementById('doc-save-table-tbody2');
+    const tbody3 = document.getElementById('doc-save-table-tbody3');
+    if (value === '1') {
+      pulldownArea.style.display = 'none';
+      tbody1.style.display = '';
+      tbody2.style.display = 'none';
+      tbody3.style.display = 'none';
+    } else {
+      pulldownArea.style.display = 'flex';
+      tbody1.style.display = 'none';
+      const docName = document.getElementById('doc-pulldown-select').value;
+      tbody2.style.display = docName === 'ringisho' ? '' : 'none';
+      tbody3.style.display = docName === 'keihi' ? '' : 'none';
+    }
+    updateRegistLink();
+  }
+
+  function updateRegistLink() {
+    const isDoc = document.getElementById('retention-type-doc').checked;
+    const base = "{% url 'masters:retention_regist' %}";
+    if (isDoc) {
+      document.getElementById('btn-retention-regist').onclick = function () {
+        window.location.href = base + '?kbn=document';
+      };
+    } else {
+      const docName = document.getElementById('doc-pulldown-select').value;
+      document.getElementById('btn-retention-regist').onclick = function () {
+        window.location.href = base + '?kbn=eapproval&doc_name=' + docName;
+      };
+    }
+  }
+
+  // 一覧再表示時は選択中の区分(kbn)・書類名(doc_name)をサーバー側で描画し直した状態
+  // （ラジオボタンのchecked・プルダウンのselected）から、表示切替もそれに合わせて復元する。
+  kbnSelectForDocSave(document.getElementById('retention-type-eapproval').checked ? '2' : '1');
+</script>
+{% endblock %}

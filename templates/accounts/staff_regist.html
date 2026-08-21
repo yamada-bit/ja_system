@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block title %}職員マスタ登録 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-staff-regist" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム</div>
+        <h1>- 職員マスタ登録 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <form method="post" id="staff-regist-form">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        {{ form.department }}
+        <table class="vertical-master-table">
+          <tr>
+            <th>職員番号</th>
+            <td>
+              {{ form.employee_no }}
+              {% for error in form.employee_no.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>氏名</th>
+            <td>
+              {{ form.name }}
+              {% for error in form.name.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>本支所</th>
+            <td>
+              <span class="ctg-code-area" id="code-branch-regist"></span>
+              <span class="ctg-name-area">
+                <select id="honshisyo-regist">
+                  <option value="">(選択してください)</option>
+                </select>
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <th>部課</th>
+            <td>
+              <span class="ctg-code-area" id="code-dept-regist"></span>
+              <span class="ctg-name-area">
+                <select id="buka-regist" disabled>
+                  <option value="">(選択してください)</option>
+                </select>
+              </span>
+              {% for error in form.department.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>職階</th>
+            <td>
+              <span class="ctg-code-area" id="code-rank-regist"></span>
+              <span class="ctg-name-area">{{ form.rank }}</span>
+              {% for error in form.rank.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>役職</th>
+            <td>
+              <span class="ctg-code-area" id="code-pos-regist"></span>
+              <span class="ctg-name-area">{{ form.position }}</span>
+              {% for error in form.position.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'accounts:staff_list' %}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('登録してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">登録</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // 原本index.html updateCode()の移植。ただし原本は固定サンプル値だったのに対し、
+  // xlsx注記（本支所は「部署管理」の実データを参照する動的リスト）通り、実際のDepartmentから
+  // 本支所→部課の連動選択肢を生成する。
+  const departments = {{ departments_json|safe }};
+  const branchSelect = document.getElementById('honshisyo-regist');
+  const sectionSelect = document.getElementById('buka-regist');
+  const departmentInput = document.getElementById('id_department');
+
+  const branches = [];
+  const seen = new Set();
+  departments.forEach(function (d) {
+    if (!seen.has(d.branch_code)) {
+      seen.add(d.branch_code);
+      branches.push({ code: d.branch_code, name: d.branch_name });
+    }
+  });
+  branches.forEach(function (b) {
+    const opt = document.createElement('option');
+    opt.value = b.code;
+    opt.textContent = b.name;
+    branchSelect.appendChild(opt);
+  });
+
+  function updateSections() {
+    const branchCode = branchSelect.value;
+    document.getElementById('code-branch-regist').textContent = branchCode;
+    sectionSelect.innerHTML = '<option value="">(選択してください)</option>';
+    document.getElementById('code-dept-regist').textContent = '';
+    departmentInput.value = '';
+    // 原本index.html:2156-2165のupdateCode()と同じ業務ルール：部課区分を持つのは本店(000)
+    // のみのため、本店または未選択のときだけ部課selectを有効化し、それ以外の支所を選ぶと
+    // 部課select自体を無効化する（選択肢の絞り込みだけでは原本の見た目と食い違うため、
+    // 原本フィデリティ監査で追加）。
+    if (branchCode && branchCode !== '000') {
+      sectionSelect.disabled = true;
+      // 部課を持たない本支所（物流センター等）は「本支所コード＋空の部課コード」の
+      // Departmentレコードが1件だけ存在する。部課select自体を無効化するため、
+      // そのレコードのpkを直接hidden inputに設定しないとdepartmentが必須エラーになる。
+      const soleDept = departments.find(function (d) { return d.branch_code === branchCode; });
+      if (soleDept) departmentInput.value = soleDept.id;
+      return;
+    }
+    sectionSelect.disabled = false;
+    departments
+      .filter(function (d) { return d.branch_code === branchCode; })
+      .forEach(function (d) {
+        const opt = document.createElement('option');
+        opt.value = d.id;
+        opt.textContent = d.section_name || '－';
+        opt.dataset.sectionCode = d.section_code;
+        sectionSelect.appendChild(opt);
+      });
+  }
+
+  branchSelect.addEventListener('change', updateSections);
+  sectionSelect.addEventListener('change', function () {
+    const opt = sectionSelect.options[sectionSelect.selectedIndex];
+    document.getElementById('code-dept-regist').textContent = opt ? (opt.dataset.sectionCode || '') : '';
+    departmentInput.value = sectionSelect.value;
+  });
+
+  // 職階・役職も本支所・部課と同じく原本index.html updateCode()のコード表示エリアを持つが
+  // （xlsxに専用マスタ画面が無くDjango choicesの固定値のため、本支所/部課のような動的な
+  // 連動選択は不要）、選択値のコードをそのまま表示するだけで足りる。
+  function wireCodeDisplay(selectId, codeAreaId) {
+    const select = document.getElementById(selectId);
+    const codeArea = document.getElementById(codeAreaId);
+    const update = function () { codeArea.textContent = select.value; };
+    select.addEventListener('change', update);
+    update();
+  }
+  wireCodeDisplay('id_rank', 'code-rank-regist');
+  wireCodeDisplay('id_position', 'code-pos-regist');
+</script>
+{% endblock %}

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% load search_extras %}
+
+{% block title %}カテゴリー管理一覧 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-cat-list" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- カテゴリー管理一覧 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'core:settings' %}'">設定メニューへ戻る</button>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="get">
+      <div class="master-search-panel">
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">カテゴリー名</label>
+          {{ form.name }}
+        </div>
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">分類名</label>
+          {{ form.group }}
+        </div>
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">書類管理区分</label>
+          {{ form.doc_kbn }}
+        </div>
+        <button type="submit" class="btn-primary" style="padding:5px 15px;">検索</button>
+      </div>
+    </form>
+
+    <div style="display:inline-block; max-width:100%;">
+      <div class="action-bar" style="justify-content:space-between; align-items:center;">
+        <button type="button" class="btn-primary" onclick="window.location.href='{% url 'masters:cat_regist' %}'">＋ 新規登録</button>
+        <div style="font-size:14px; color:#666;">総件数：{{ page_obj.paginator.count }} 件</div>
+      </div>
+
+      <div class="content-container">
+      <div class="table-scroll-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th><a class="sort-link" href="{% sort_url request.GET 'code' sort_key sort_dir %}">カテゴリーコード{% sort_arrow 'code' sort_key sort_dir %}</a></th>
+              <th>カテゴリー名</th>
+              <th>書類管理区分</th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'group' sort_key sort_dir %}">分類{% sort_arrow 'group' sort_key sort_dir %}</a></th>
+              <th><a class="sort-link" href="{% sort_url request.GET 'count' sort_key sort_dir %}">文書件数{% sort_arrow 'count' sort_key sort_dir %}</a></th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for category in page_obj %}
+              <tr>
+                <td style="text-align:right;">{{ category.code }}</td>
+                <td style="text-align:left;">{{ category.name }}</td>
+                <td>{{ category.get_doc_kbn_display }}</td>
+                <td>{{ category.group.name }}</td>
+                <td style="text-align:right;">{% if category.doc_kbn == "document" %}{{ category.doc_count }}{% else %}{{ category.contract_count }}{% endif %}</td>
+                <td>
+                  <button type="button" class="btn-sm" onclick="window.location.href='{% url 'masters:cat_edit' category.pk %}'">編集</button>
+                  {% if category.doc_kbn == "document" and category.doc_count == 0 or category.doc_kbn == "contract" and category.contract_count == 0 %}
+                    <button type="button" class="btn-sm btn-danger" onclick="window.location.href='{% url 'masters:cat_delete' category.pk %}'">削除</button>
+                  {% else %}
+                    <button type="button" class="btn-sm" disabled>削除</button>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      </div>
+    </div>
+    <div class="pager-bottom">
+      {% if page_obj.has_previous %}
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page=1'">«</button>
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.previous_page_number }}'">＜</button>
+      {% else %}
+        <button type="button" disabled>«</button>
+        <button type="button" disabled>＜</button>
+      {% endif %}
+      {% for num in page_obj.paginator.page_range %}
+        {% if num == page_obj.number %}
+          <button type="button" class="active">{{ num }}</button>
+        {% else %}
+          <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ num }}'">{{ num }}</button>
+        {% endif %}
+      {% endfor %}
+      {% if page_obj.has_next %}
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.next_page_number }}'">＞</button>
+        <button type="button" onclick="window.location.href='?{{ request.GET.urlencode }}&page={{ page_obj.paginator.num_pages }}'">»</button>
+      {% else %}
+        <button type="button" disabled>＞</button>
+        <button type="button" disabled>»</button>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}

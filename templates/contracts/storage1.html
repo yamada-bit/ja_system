@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}契約書 保管画面 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-storage1" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム -契約書管理-</div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
+          <button type="button" onclick="window.location.href='{% url 'core:menu' %}'">＜ 戻る</button>
+          <h1 style="margin: 0;">契約書 保管画面</h1>
+        </div>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li style="color:#c0392b;">{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div style="margin-top:15px; font-weight:bold;">【文書選択】</div>
+    <form method="post" enctype="multipart/form-data" id="storage1-form">
+      {% csrf_token %}
+      <div class="drop-zone" id="upload-drop-zone">
+        <p style="margin-bottom: 15px; color:#666;">ファイルを選択するか、またはここにドラッグ＆ドロップしてください！</p>
+        <input type="file" id="file-input" name="files" multiple style="display:none;">
+        <button type="button" onclick="document.getElementById('file-input').click()">ファイルを選択</button>
+        <div id="selected-file-list" style="margin-top: 15px; font-size:13px; color:var(--primary-color);"></div>
+      </div>
+
+      <div style="text-align:center;">
+        <button type="submit" class="btn-primary" style="padding:12px 60px; font-size:16px;" id="storage-submit-btn">実行</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script src="{% static 'js/chunk_upload.js' %}"></script>
+<script>
+  const dropZone = document.getElementById('upload-drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const fileList = document.getElementById('selected-file-list');
+  const storage1Form = document.getElementById('storage1-form');
+
+  function renderSelectedFiles() {
+    const files = fileInput.files;
+    if (!files || files.length === 0) {
+      fileList.textContent = '';
+      return;
+    }
+    const names = Array.from(files, (f) => f.name);
+    fileList.innerHTML = `選択されたファイル (${files.length}個):<br>` + names.join('<br>');
+  }
+
+  fileInput.addEventListener('change', renderSelectedFiles);
+
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('dragover');
+  });
+  dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('dragover');
+  });
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    fileInput.files = e.dataTransfer.files;
+    renderSelectedFiles();
+  });
+
+  // documents/storage1.htmlと同じ理由でsettings.MAX_UPLOAD_SIZE_BYTES超過ファイルを
+  // チャンク分割アップロードAPI（contracts:upload_chunk）へ振り分ける。
+  storage1Form.addEventListener('submit', async function (e) {
+    const allFiles = Array.from(fileInput.files);
+    if (allFiles.length === 0) {
+      return;
+    }
+    e.preventDefault();
+
+    const threshold = {{ max_upload_size_bytes }};
+    const bigFiles = allFiles.filter((f) => f.size > threshold);
+    const smallFiles = allFiles.filter((f) => f.size <= threshold);
+    const { withinBudget, overBudget } = splitFilesBySizeBudget(smallFiles, threshold);
+    const filesToChunk = bigFiles.concat(overBudget);
+
+    if (filesToChunk.length > 0) {
+      try {
+        await uploadFilesInChunks(filesToChunk, "{% url 'contracts:upload_chunk' %}");
+      } catch (err) {
+        alert(String(err.message || err));
+        return;
+      }
+    }
+
+    const dt = new DataTransfer();
+    withinBudget.forEach((f) => dt.items.add(f));
+    fileInput.files = dt.files;
+    storage1Form.submit();
+  });
+</script>
+{% endblock %}

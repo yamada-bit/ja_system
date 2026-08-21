@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}権限管理編集 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-authority-edit" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム -文書管理-</div>
+        <h1>- 権限管理編集 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box-for-authority-info" id="master-detail-box-for-authority-edit">
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <table class="vertical-master-table-authority-info">
+          <tr>
+            <th>職員番号</th><td>{{ employee.employee_no }}</td>
+            <th>氏名</th><td>{{ employee.name }}</td>
+            <th>所属部署</th><td>{{ employee.department }}</td>
+            <th>役職</th><td>{{ employee.get_position_display }}</td>
+          </tr>
+        </table>
+        <br>
+        <table class="vertical-master-table-authority-info">
+          <tr>
+            <th>システム権限</th><td>{{ form.role }}</td>
+          </tr>
+        </table>
+        <div>
+          <button type="button" id="btn-toggle-all-authority" onclick="toggleAllCheckboxesForAuth()" style="margin-top: 10px;">一括許可</button>
+        </div>
+        <table class="vertical-master-table-authority-info">
+          <tr>
+            <th colspan="3">文書管理</th>
+            <th colspan="3">契約書</th>
+            <th colspan="3">電子決裁</th>
+          </tr>
+          <tr>
+            <th>分類</th>
+            <th colspan="2">文書</th>
+            <th rowspan="2">部門間閲覧設定</th>
+            <th>分類</th>
+            <th>契約書</th>
+            <th rowspan="2">書類毎の閲覧設定</th>
+            <th>書類名</th>
+            <th>申請書</th>
+          </tr>
+          <tr>
+            <th>表示</th>
+            <th>保存満了日変更</th>
+            <th>ダウンロード</th>
+            <th>表示</th>
+            <th>ダウンロード</th>
+            <th>作成・変更</th>
+            <th>保存期間</th>
+          </tr>
+          <tr>
+            <td>{{ form.doc_visible_groups }}</td>
+            <td>{{ form.doc_retention_edit }}</td>
+            <td>{{ form.doc_download }}</td>
+            <td>{{ form.contract_visible_departments }}</td>
+            <td>{{ form.contract_visible_groups }}</td>
+            <td>{{ form.contract_download }}</td>
+            <td>{{ form.eapproval_view_setting }}</td>
+            <td>{{ form.eapproval_doc_name_manage }}</td>
+            <td>{{ form.eapproval_retention }}</td>
+          </tr>
+        </table>
+        <div style="margin-top:10px; margin-bottom:10px; display:flex; gap:10px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'permissions:authority_list' %}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  // 原本index.html toggleAllCheckboxesForAuth()の移植。Rev1.1 権限管理!B119-123
+  // 「一括無許可にした際は、選択ボタンで設定する下記項目（文書管理-分類-表示／
+  // 契約書-部門間閲覧設定／契約書-分類-表示）もクリアする」に対応。
+  function toggleAllCheckboxesForAuth() {
+    const btn = document.getElementById('btn-toggle-all-authority');
+    const container = document.getElementById('master-detail-box-for-authority-edit');
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    const clearableIds = ['id_doc_visible_groups', 'id_contract_visible_departments', 'id_contract_visible_groups'];
+
+    if (btn.textContent === '一括許可') {
+      checkboxes.forEach((cb) => (cb.checked = true));
+      btn.textContent = '一括無許可';
+    } else {
+      checkboxes.forEach((cb) => (cb.checked = false));
+      clearableIds.forEach((id) => {
+        const hidden = document.getElementById(id);
+        const display = hidden && document.getElementById(hidden.dataset.display);
+        if (hidden) hidden.value = '';
+        if (display) display.value = '';
+      });
+      btn.textContent = '一括許可';
+    }
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}保存期間設定削除 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-retention-delete" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-name">クラウド文書管理システム</div>
+        <h1>- 保存期間設定削除 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li style="color:#c0392b;">{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <p>以下の設定を削除します。よろしいですか？</p>
+      <table class="vertical-master-table">
+        <tr><th>No.</th><td>{{ no }}</td></tr>
+        {% if period.kbn == "eapproval" %}
+          <tr><th>書類名</th><td>{{ period.get_doc_name_display }}</td></tr>
+        {% endif %}
+        <tr><th>保存期間</th><td>{{ period }}</td></tr>
+        <tr><th>表示順</th><td>{{ period.display_order }}</td></tr>
+      </table>
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'masters:retention_list' %}?kbn={{ period.kbn }}&doc_name={{ period.doc_name }}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('削除してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">削除</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

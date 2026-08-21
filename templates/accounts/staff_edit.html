@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+
+{% block title %}職員マスタ編集 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-staff-edit" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム</div>
+        <h1>- 職員マスタ編集 -</h1>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="master-detail-box">
+      <form method="post" id="staff-edit-form">
+        {% csrf_token %}
+        <input type="hidden" name="token" value="{{ token }}">
+        {{ form.department }}
+        <table class="vertical-master-table">
+          <tr>
+            <th>職員番号</th>
+            <td>{{ employee.employee_no }}</td>
+          </tr>
+          <tr>
+            <th>氏名</th>
+            <td>
+              {{ form.name }}
+              {% for error in form.name.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>パスワード</th>
+            <td class="password-wrapper">
+              {{ form.password }}
+              <span class="password-toggle2" id="pass-toggle-icon2">👁️</span>
+              <input class="btn-secondary" type="button" value="リセット" onclick="resetPassword();">
+              <div style="font-size:12px; color:#666;">空欄のまま更新すると変更されません。</div>
+            </td>
+          </tr>
+          <tr>
+            <th>本支所</th>
+            <td>
+              <span class="ctg-code-area" id="code-branch-edit"></span>
+              <span class="ctg-name-area">
+                <select id="honshisyo-edit"></select>
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <th>部課</th>
+            <td>
+              <span class="ctg-code-area" id="code-dept-edit"></span>
+              <span class="ctg-name-area">
+                <select id="buka-edit"></select>
+              </span>
+              {% for error in form.department.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>職階</th>
+            <td>
+              <span class="ctg-code-area" id="code-rank-edit"></span>
+              <span class="ctg-name-area">{{ form.rank }}</span>
+              {% for error in form.rank.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>役職</th>
+            <td>
+              <span class="ctg-code-area" id="code-pos-edit"></span>
+              <span class="ctg-name-area">{{ form.position }}</span>
+              {% for error in form.position.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>退職(使用不可)</th>
+            <td><label>{{ form.is_retired }} 退職(使用不可)</label></td>
+          </tr>
+        </table>
+        <div style="margin-top:20px;">
+          <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'accounts:staff_list' %}'">キャンセル</button>
+          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+  document.getElementById('pass-toggle-icon2').addEventListener('click', function () {
+    const passwordField = document.getElementById('id_password');
+    passwordField.type = passwordField.type === 'password' ? 'text' : 'password';
+  });
+
+  /**
+   * リセットボタン：原本resetPassword()の移植。"ja" + 職員番号の下4桁を入力欄にセットするのみで、
+   * 実際の保存は「更新」ボタン押下時（原本と同じ2段階の挙動）。
+   */
+  function resetPassword() {
+    const newPassword = "ja" + "{{ employee.employee_no|slice:'-4:' }}";
+    const passInput = document.getElementById('id_password');
+    passInput.value = newPassword;
+    passInput.type = 'text';
+    alert("パスワードをリセットしました: " + newPassword);
+  }
+
+  const departments = {{ departments_json|safe }};
+  const branchSelect = document.getElementById('honshisyo-edit');
+  const sectionSelect = document.getElementById('buka-edit');
+  const departmentInput = document.getElementById('id_department');
+  const currentDepartmentId = "{{ employee.department_id }}";
+
+  const branches = [];
+  const seen = new Set();
+  departments.forEach(function (d) {
+    if (!seen.has(d.branch_code)) {
+      seen.add(d.branch_code);
+      branches.push({ code: d.branch_code, name: d.branch_name });
+    }
+  });
+  branches.forEach(function (b) {
+    const opt = document.createElement('option');
+    opt.value = b.code;
+    opt.textContent = b.name;
+    branchSelect.appendChild(opt);
+  });
+
+  function updateSections(preselectId) {
+    const branchCode = branchSelect.value;
+    document.getElementById('code-branch-edit').textContent = branchCode;
+    sectionSelect.innerHTML = '';
+    // 原本index.html:2156-2165のupdateCode()と同じ業務ルール（staff_regist.htmlと同一理由）。
+    // 本店(000)または未選択のときのみ部課selectを有効化する。
+    if (branchCode && branchCode !== '000') {
+      sectionSelect.disabled = true;
+      document.getElementById('code-dept-edit').textContent = '';
+      departmentInput.value = '';
+      // 部課を持たない本支所（物流センター等）は「本支所コード＋空の部課コード」の
+      // Departmentレコードが1件だけ存在する。部課select自体を無効化するため、
+      // そのレコードのpkを直接hidden inputに設定しないとdepartmentが必須エラーになる。
+      const soleDept = departments.find(function (d) { return d.branch_code === branchCode; });
+      if (soleDept) departmentInput.value = soleDept.id;
+      return;
+    }
+    sectionSelect.disabled = false;
+    departments
+      .filter(function (d) { return d.branch_code === branchCode; })
+      .forEach(function (d) {
+        const opt = document.createElement('option');
+        opt.value = d.id;
+        opt.textContent = d.section_name || '－';
+        opt.dataset.sectionCode = d.section_code;
+        if (preselectId && String(d.id) === String(preselectId)) opt.selected = true;
+        sectionSelect.appendChild(opt);
+      });
+    const selectedOpt = sectionSelect.options[sectionSelect.selectedIndex];
+    document.getElementById('code-dept-edit').textContent = selectedOpt ? (selectedOpt.dataset.sectionCode || '') : '';
+    departmentInput.value = sectionSelect.value;
+  }
+
+  const currentDept = departments.find(function (d) { return String(d.id) === currentDepartmentId; });
+  if (currentDept) {
+    branchSelect.value = currentDept.branch_code;
+  }
+  updateSections(currentDepartmentId);
+
+  branchSelect.addEventListener('change', function () { updateSections(null); });
+  sectionSelect.addEventListener('change', function () {
+    const opt = sectionSelect.options[sectionSelect.selectedIndex];
+    document.getElementById('code-dept-edit').textContent = opt ? (opt.dataset.sectionCode || '') : '';
+    departmentInput.value = sectionSelect.value;
+  });
+
+  // 職階・役職も本支所・部課と同じく原本index.html updateCode()のコード表示エリアを持つが
+  // （xlsxに専用マスタ画面が無くDjango choicesの固定値のため、本支所/部課のような動的な
+  // 連動選択は不要）、選択値のコードをそのまま表示するだけで足りる。編集画面は初期表示時点で
+  // 既存の職階・役職が選択済みのため、ページ読み込み直後にも一度反映する。
+  function wireCodeDisplay(selectId, codeAreaId) {
+    const select = document.getElementById(selectId);
+    const codeArea = document.getElementById(codeAreaId);
+    const update = function () { codeArea.textContent = select.value; };
+    select.addEventListener('change', update);
+    update();
+  }
+  wireCodeDisplay('id_rank', 'code-rank-edit');
+  wireCodeDisplay('id_position', 'code-pos-edit');
+</script>
+{% endblock %}

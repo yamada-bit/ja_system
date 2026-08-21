@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block title %}編集画面 - クラウド文書管理システム{% endblock %}
+
+{% block body %}
+  <div id="screen-storage2" class="screen active">
+    <div class="system-header">
+      <div class="system-title">
+        <div class="system-sub">クラウド文書管理システム -契約書管理-</div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
+          <button type="button" onclick="window.location.href='{% url 'contracts:search' %}'">＜ 戻る</button>
+          <h1 style="margin: 0;">編集画面</h1>
+        </div>
+      </div>
+      <div class="user-info">
+        <div class="system-sub">{{ user.department.section_name }}｜{{ user.name }}</div>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit">ログアウト</button>
+        </form>
+      </div>
+    </div>
+
+    {% if form.non_field_errors %}
+      <ul class="messages">
+        {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="storage-layout">
+      <div class="pdf-preview-container">
+        <div class="zoom-controls">
+          <button type="button" onclick="zoomPdf('storage-pdf-page', -0.1)">－</button>
+          <button type="button" onclick="zoomPdf('storage-pdf-page', 0.1)">＋</button>
+        </div>
+        <div class="pdf-view-box2 drag-scrollable" id="storage-pdf-view-box">
+          <div class="pdf-scroll-area">
+          <div class="pdf-mock-page" id="storage-pdf-page">
+            <h3 id="pdf-mock-title" style="border-bottom:2px solid #333; padding-bottom:5px;">{{ contract.display_name }}</h3>
+            {% if preview_kind == "image" and can_download %}
+              {# documents/edit.htmlと同じ理由（ユーザー依頼2026-08-12で追加した実プレビュー）。 #}
+              <img src="{% url 'contracts:preview' contract.pk %}" alt="{{ contract.display_name }}" style="max-width:100%; margin-top:10px; display:block;">
+            {% elif preview_kind == "pdf" and can_download %}
+              <iframe src="{% url 'contracts:preview' contract.pk %}" title="{{ contract.display_name }}" style="width:100%; height:440px; margin-top:10px; border:none;"></iframe>
+            {% elif preview_kind %}
+              {# documents/edit.htmlと同じ理由（2026-08-13ユーザー報告対応）。 #}
+              <p style="margin-top:20px; font-size:13px; color:#c0392b;">プレビューを表示するには「契約書-ダウンロード」権限が必要です。権限管理画面でご確認ください。</p>
+            {% else %}
+              <p style="margin-top:20px; font-size:12px; color:#555;">これはデモ用の擬似PDFプレビュー画面です。右側の切り替えボタンと連動して内容が切り替わります。</p>
+              <p style="margin-top:40px; border-left:3px solid var(--primary-color); padding-left:10px;">電帳法要件定義対応スタンプ：承認済</p>
+            {% endif %}
+          </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="meta-input-form-wrapper">
+        <form method="post" enctype="multipart/form-data" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
+          {% csrf_token %}
+          <input type="hidden" name="token" value="{{ token }}">
+          <input type="hidden" name="remove_related_ids" id="id_remove_related_ids" value="">
+
+          <div class="pager-top" style="flex-shrink:0;">
+            <button type="submit" name="bulk_nav" value="prev" id="btn-prev-doc" {% if not bulk or not bulk.has_prev %}disabled{% endif %}>＜</button>
+            <span id="doc-pager-text" style="font-weight:bold;">{% if bulk %}{{ bulk.index }} / {{ bulk.total }}{% else %}1 / 1{% endif %}</span>
+            <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
+          </div>
+          {% if bulk %}
+            <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">選択した契約書をまとめて編集中です。移動すると現在の内容が保存されます。</div>
+          {% endif %}
+
+          <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
+            <div class="form-section">
+              <h4>[1] 保管先</h4>
+              <div class="form-row"><label>部署</label>{{ form.department }}</div>
+              <div class="form-row"><label>分類</label>{{ form.group }}</div>
+              <div class="form-row"><label>年</label>{{ form.year }}</div>
+              <div class="form-row"><label>カテゴリー</label>{{ form.category }}</div>
+            </div>
+
+            <div class="form-section">
+              <h4>[2] 文書情報</h4>
+              <div class="form-row">
+                <label>契約書名</label>
+                {{ title_field }}
+                {% for error in title_field.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+              </div>
+              <div class="form-row" style="margin-top:10px;"><label>契約日</label>{{ form.contract_date }}</div>
+              <div class="form-row"><label>契約期間</label>{{ form.contract_period_start }} ～ {{ form.contract_period_end }}</div>
+              <div class="form-row"><label>契約更新日</label>{{ form.renewal_date }}</div>
+              <div class="form-row"><label>契約金額</label>{{ form.contract_amount }} 円</div>
+              <div class="form-row"><label>契約先名</label>{{ form.contract_partner }}</div>
+            </div>
+
+            <div class="form-section">
+              <h4>[3] 関連書類</h4>
+              <div class="form-row" style="flex-direction:column; align-items:flex-start; gap:5px;">
+                <label style="width:100%;">関連書類</label>
+                <div id="storage-file-inputs-container" style="width:100%;">
+                  {% for rf in contract.related_files.all %}
+                    <div class="related-file-row">
+                      <span class="related-file-name">📎 {{ rf.display_name }}</span>
+                      <button type="button" class="btn-delete-file" onclick="removeExistingRelatedFile(this, {{ rf.pk }})">×</button>
+                    </div>
+                  {% endfor %}
+                  <div class="related-file-row">
+                    <input type="file" name="related_files" onchange="handleRelatedFileChange(this)">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-section">
+              <h4>[4] メモ欄</h4>
+              {{ form.memo }}
+              <div style="text-align: right; margin-top: 10px;">
+                <button type="button" style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;" onclick="clearMemo()">削除</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
+            <button type="submit" class="btn-primary" style="padding:8px 30px;">{% if bulk and bulk.has_next %}次へ{% else %}更新{% endif %}</button>
+            <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'contracts:search' %}'">キャンセル</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    {% include "contracts/_complete_modal.html" %}
+  </div>
+{% endblock %}

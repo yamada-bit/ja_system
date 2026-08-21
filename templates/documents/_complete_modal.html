@@ -1,0 +1,58 @@
+{% comment %}
+原本index.html:536-565の.overlay要素（登録/更新完了ポップアップ）の移植。原本はJSで
+overlay-modalをdisplay:flexに切り替えるだけで画面遷移は起きず、背後のscreen-storage2は
+そのままDOMに残り続ける。この部分テンプレートをdocuments/storage2.html・edit.htmlの
+screen-storage2内にそのまま含めることで同じ挙動にする（登録完了時に別テンプレートへ
+丸ごと差し替えると背後の保管画面が消えてしまうため、専用ページには分離しない）。
+{% endcomment %}
+{% if complete %}
+  <div id="overlay-modal" class="overlay" style="display:flex;">
+    <div class="modal-container" style="width: 750px; max-width: 95%; text-align: left;">
+      <div style="font-size: 16px; font-weight: bold; margin-bottom: 10px;">
+        {% if complete.mode == "create" %}
+          登録が完了しました。<span id="regist-datetime">(登録日時：{{ complete.created.0.save_date|date:"Y-m-d H:i" }})</span>
+        {% else %}
+          更新が完了しました。<span id="regist-datetime">{{ complete.created.0.updated_at|date:"Y-m-d H:i" }}</span>
+        {% endif %}
+      </div>
+      <div style="font-size: 13px; color: #555; margin-bottom: 10px;">
+        以下の内容で文書を{% if complete.mode == "create" %}登録{% else %}更新{% endif %}しました。
+      </div>
+
+      <div style="max-height: 220px; overflow-y: auto; border: 1px solid #ddd; margin-bottom: 15px; border-radius: 4px;">
+        <table class="data-table" style="width: 100%; border-collapse: collapse; margin: 0;">
+          <thead>
+            <tr>
+              <th style="position: sticky; top: 0; background: #f5f5f5;">分類</th>
+              <th style="position: sticky; top: 0; background: #f5f5f5; width: 70px;">年</th>
+              <th style="position: sticky; top: 0; background: #f5f5f5;">カテゴリー</th>
+              <th style="position: sticky; top: 0; background: #f5f5f5;">文書タイトル</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for document in complete.created %}
+              <tr>
+                <td>{{ document.group }}</td>
+                <td>{% if complete.mode == "create" %}{{ document.year }} 年{% else %}{{ document.year }}{% endif %}</td>
+                <td>{{ document.category }}</td>
+                <td>{{ document.title }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% if complete.mode == "create" %}
+        <div style="display: flex; gap: 8px; width: 100%;">
+          <button type="button" class="btn-primary" style="flex:1; white-space: nowrap;" onclick="window.location.href='{% url 'documents:upload_step1' %}'">続けて別の文書を登録する</button>
+          <button type="button" class="btn-primary" style="flex:1; white-space: nowrap;" onclick="window.location.href='{% url 'documents:search' %}?pks={% for d in complete.created %}{{ d.pk }}{% if not forloop.last %},{% endif %}{% endfor %}'">登録した文書を確認する</button>
+          <button type="button" class="btn-primary" style="flex:1; white-space: nowrap;" onclick="window.location.href='{% url 'core:menu' %}'">メイン画面に戻る</button>
+        </div>
+      {% else %}
+        <div style="display: flex; justify-content: center; width: 100%;">
+          <button type="button" class="btn-primary" style="padding: 8px 30px; white-space: nowrap;" onclick="window.location.href='{% url 'documents:search' %}'">検索・閲覧画面に戻る</button>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
