@@ -264,7 +264,15 @@ class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     def get(self, request, pk):
         group = self._get_object(request, pk)
         return render(
-            request, self.template_name, {"group": group, "token": issue_token(request.session, self.form_id)}
+            request,
+            self.template_name,
+            {
+                "group": group,
+                "token": issue_token(request.session, self.form_id),
+                # 一覧・登録・編集と同じゲーティング（xlsx B75「一覧の「部署」を非表示」、
+                # フィデリティ監査で発見：削除確認画面だけ条件無しで部署を表示していた）。
+                "is_admin_viewer": get_role(request.user) == PermissionRole.ADMIN,
+            },
         )
 
     def post(self, request, pk):
@@ -518,7 +526,14 @@ class CategoryDeleteView(LoginRequiredMixin, View):
     def get(self, request, pk):
         category = self._get_object(request, pk)
         return render(
-            request, self.template_name, {"category": category, "token": issue_token(request.session, self.form_id)}
+            request,
+            self.template_name,
+            {
+                "category": category,
+                "token": issue_token(request.session, self.form_id),
+                # GroupDeleteView.getと同じ理由（一覧・登録・編集とゲーティングを揃える）。
+                "is_admin_viewer": get_role(request.user) == PermissionRole.ADMIN,
+            },
         )
 
     def post(self, request, pk):
