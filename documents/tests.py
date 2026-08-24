@@ -677,6 +677,16 @@ class DownloadViewTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertFalse(AuditLog.objects.filter(action="文書検索 ダウンロード").exists())
 
+    def test_deleted_document_download_returns_404(self):
+        """xlsx 検索・閲覧・変更!B331(Rev1.2)「削除されている(削除フラグがTrue)文書は、ボタンを
+        非表示とする」のURL直打ち対策（DocumentEditView.get_object()と同じ
+        is_deleted=Falseパターン）。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, doc_download=True)
+        self.document.is_deleted = True
+        self.document.save(update_fields=["is_deleted"])
+        response = self.client.get(f"/documents/{self.document.pk}/download/")
+        self.assertEqual(response.status_code, 404)
+
 
 class BulkButtonsHiddenForRecentlyDeletedNoticeTests(TestCase):
     """Rev1.2（xlsx 検索・閲覧・変更!B260,B267「メイン画面「お知らせ」の"直近Xヵ月以内で
@@ -1400,11 +1410,13 @@ class DetailAPIViewTests(TestCase):
     def test_deleted_document_yields_null_edit_and_delete_urls(self):
         """削除済み文書一覧の詳細ポップアップで「変更」が404になっていた不具合の修正
         （2026-08-12ユーザー報告）：DocumentEditView.get_object()がis_deleted=Falseでしか対象を
-        取得できない以上、API側でedit_urlをNoneにしてボタンを無効化するのが正しい対応
-        （download_urlはis_deletedに関わらず参照可能な仕様のためNoneにしない）。delete_urlも
-        Rev1.2（xlsx 検索・閲覧・変更!B331,B337「削除されている文書は、ボタンを非表示とする」）
-        でNoneになるよう変更した（documents.services.can_delete docstring参照。以前は
-        「ゴミ箱保管中の削除ボタンで完全削除」機能のため常に返していたが、その機能は廃止した）。"""
+        取得できない以上、API側でedit_urlをNoneにしてボタンを無効化するのが正しい対応。delete_urlも
+        Rev1.2（xlsx 検索・閲覧・変更!B331,B337,B342「削除されている(削除フラグがTrue)文書は、
+        ボタンを非表示とする」）でNoneになるよう変更した（documents.services.can_delete docstring
+        参照。以前は「ゴミ箱保管中の削除ボタンで完全削除」機能のため常に返していたが、その機能は
+        廃止した）。download_urlも同じB331の対象（2026-08-24追加分の再監査で発見：以前は
+        can_download権限のみを見ておりis_deleted判定が漏れていたため、削除済み文書でも
+        ダウンロードボタンが表示され続けていた）。"""
         self.document.is_deleted = True
         self.document.save(update_fields=["is_deleted"])
 
@@ -1412,12 +1424,15 @@ class DetailAPIViewTests(TestCase):
         data = response.json()
         self.assertIsNone(data["edit_url"])
         self.assertIsNone(data["delete_url"])
+        self.assertIsNone(data["download_url"])
 
     def test_non_deleted_document_still_has_edit_and_delete_urls(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, doc_download=True)
         response = self.client.get(f"/documents/api/{self.document.pk}/")
         data = response.json()
         self.assertEqual(data["edit_url"], f"/documents/{self.document.pk}/edit/")
         self.assertEqual(data["delete_url"], f"/documents/{self.document.pk}/delete/")
+        self.assertEqual(data["download_url"], f"/documents/{self.document.pk}/download/")
 
     def test_document_past_delete_window_yields_null_delete_url(self):
         """xlsx 保管!B300,B581・検索・閲覧・変更!B339-340「初回登録から1週間以上経過している

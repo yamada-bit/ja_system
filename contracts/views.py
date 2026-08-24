@@ -615,8 +615,12 @@ class SearchView(LoginRequiredMixin, View):
 
 
 class DownloadView(LoginRequiredMixin, View):
+    """documents.views.DownloadViewと同じ理由（xlsx 検索・閲覧・変更!B659(Rev1.2)「削除されている
+    (削除フラグがTrue)契約書は、ボタンを非表示とする」）で、is_deleted=Falseでしか対象を
+    取得できないようにする。"""
+
     def get(self, request, pk):
-        contract = get_object_or_404(Contract, pk=pk)
+        contract = get_object_or_404(Contract, pk=pk, is_deleted=False)
         if not can_download(request.user, kind="contract"):
             logger.warning(
                 "ダウンロード権限の無いユーザーによる試行: employee_no=%s contract_id=%s",
@@ -768,6 +772,24 @@ class DeleteView(LoginRequiredMixin, View):
             if is_ajax:
                 return JsonResponse({"success": False, "message": "対象の契約書が見つかりません。"}, status=404)
             raise
+
+        if not can_edit_contract(request.user):
+            # xlsx 権限管理!B198(Rev1.2)「編集不可…検索・閲覧画面の検索結果一覧の明細ダブル
+            # クリック後に開く契約書詳細画面の「編集」「削除」ボタンを非表示にする」。監査で発見：
+            # DetailAPIViewのdelete_urlは`can_delete(contract) and can_edit`で判定しボタン自体は
+            # 隠していたが、DeleteView.post側にcan_edit_contractの検証が無く、URL直打ちで
+            # 契約書-契約書-契約書情報変更がOFFの職員でも削除できてしまっていた
+            # （ContractEditView.dispatch/UploadStep1View.dispatchと同じくサーバー側でも強制する）。
+            logger.warning(
+                "契約書情報変更権限が無いユーザーによる削除操作を拒否しました: "
+                "employee_no=%s contract_id=%s",
+                request.user.employee_no,
+                pk,
+            )
+            message = "契約書を削除する権限がありません。"
+            if is_ajax:
+                return JsonResponse({"success": False, "message": message}, status=403)
+            raise PermissionDenied(message)
 
         if not can_delete(contract):
             # xlsx 検索・閲覧・変更!B659,B663,B664-665「削除済みの契約書、および初回登録から

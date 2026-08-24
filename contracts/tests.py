@@ -335,6 +335,10 @@ class DeleteViewAjaxTests(TestCase):
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
+        # DeleteView.postはRev1.2で追加された「契約書-契約書-契約書情報変更」権限を要求する
+        # ため（xlsx 権限管理!B198）、既存の削除系テストが引き続き通るようcontract_edit=Trueを
+        # 付与しておく（権限拒否そのものを確認するテストはDeleteViewPermissionTestsで別途行う）。
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, contract_edit=True)
         self.client.login(username="1", password="pass1234")
         group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
         category = Category.objects.create(code="001", name="契約カテゴリーＡ", group=group, doc_kbn=DocKbn.CONTRACT)
@@ -420,6 +424,73 @@ class DeleteViewAjaxTests(TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response["Content-Type"], "application/json")
         self.assertFalse(response.json()["success"])
+
+
+class DeleteViewRequiresContractEditPermissionTests(TestCase):
+    """xlsx 権限管理!B198(Rev1.2)「契約書-契約書-契約書情報変更」がOFFの場合、検索・閲覧画面の
+    詳細ポップアップ「編集」「削除」ボタンを非表示にする」に対応。監査で発見：DetailAPIViewの
+    delete_urlは`can_edit_contract`込みで判定しボタン自体は隠していたが、DeleteView.post側には
+    その検証が無く、契約書-契約書-契約書情報変更がOFFの職員でもURL直打ちで削除できてしまって
+    いた（2026-08-24追記で修正、contracts.views.DeleteView.post参照）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+        group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        category = Category.objects.create(code="001", name="契約カテゴリーＡ", group=group, doc_kbn=DocKbn.CONTRACT)
+        from contracts.models import Contract
+
+        self.contract = Contract(
+            title="削除対象", department=self.department, group=group, category=category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+        )
+        self.contract.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        self.contract.save()
+
+    def test_delete_without_contract_edit_permission_is_rejected(self):
+        """PermissionProfile未作成（一般職員相当、contract_edit=False）は削除を拒否される。"""
+        from contracts.models import Contract
+
+        response = self.client.post(
+            f"/contracts/{self.contract.pk}/delete/", HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["success"])
+        self.contract.refresh_from_db()
+        self.assertFalse(self.contract.is_deleted)
+        self.assertTrue(Contract.objects.filter(pk=self.contract.pk, is_deleted=False).exists())
+
+    def test_delete_with_contract_edit_off_is_rejected(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, contract_edit=False)
+        response = self.client.post(
+            f"/contracts/{self.contract.pk}/delete/", HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(response.status_code, 403)
+        self.contract.refresh_from_db()
+        self.assertFalse(self.contract.is_deleted)
+
+    def test_delete_with_contract_edit_on_succeeds(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, contract_edit=True)
+        response = self.client.post(
+            f"/contracts/{self.contract.pk}/delete/", HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.contract.refresh_from_db()
+        self.assertTrue(self.contract.is_deleted)
+
+    def test_admin_can_delete_without_explicit_flag(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.post(
+            f"/contracts/{self.contract.pk}/delete/", HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(response.status_code, 200)
 
 
 class RelatedFilesMultiUploadTests(TestCase):
@@ -520,6 +591,16 @@ class DownloadViewTests(TestCase):
         response = self.client.get(f"/contracts/{self.contract.pk}/download/")
         self.assertEqual(response.status_code, 403)
         self.assertFalse(AuditLog.objects.filter(action="契約書検索 ダウンロード").exists())
+
+    def test_deleted_contract_download_returns_404(self):
+        """documents.tests.DownloadViewTests.test_deleted_document_download_returns_404と同じ理由
+        （xlsx 検索・閲覧・変更!B659(Rev1.2)「削除されている契約書は、ボタンを非表示とする」の
+        URL直打ち対策）。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, contract_download=True)
+        self.contract.is_deleted = True
+        self.contract.save(update_fields=["is_deleted"])
+        response = self.client.get(f"/contracts/{self.contract.pk}/download/")
+        self.assertEqual(response.status_code, 404)
 
 
 class BulkDownloadViewTests(TestCase):
@@ -1061,7 +1142,10 @@ class DetailAPIViewTests(TestCase):
         404になっていた）。delete_urlもRev1.2（xlsx 検索・閲覧・変更!B659,B663「削除されている
         契約書は、ボタンを非表示とする」）でNoneになるよう変更した
         （contracts.services.can_delete docstring参照。以前は「ゴミ箱保管中の削除ボタンで
-        完全削除」機能のため常に返していたが、その機能は廃止した）。"""
+        完全削除」機能のため常に返していたが、その機能は廃止した）。download_urlも同じB659の
+        対象（2026-08-24追加分の再監査で発見：以前はcan_download権限のみを見ておりis_deleted
+        判定が漏れていたため、削除済み契約書でもダウンロードボタンが表示され続けていた）。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, contract_download=True)
         self.contract.is_deleted = True
         self.contract.save(update_fields=["is_deleted"])
 
@@ -1069,17 +1153,19 @@ class DetailAPIViewTests(TestCase):
         data = response.json()
         self.assertIsNone(data["edit_url"])
         self.assertIsNone(data["delete_url"])
+        self.assertIsNone(data["download_url"])
 
     def test_non_deleted_contract_still_has_edit_and_delete_urls(self):
         # Rev1.2で追加された「契約書-契約書-契約書情報変更」がONでないとedit_urlがNoneになる
         # ため（permissions.services.can_edit_contract）付与しておく。
         PermissionProfile.objects.create(
-            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True, contract_download=True
         )
         response = self.client.get(f"/contracts/api/{self.contract.pk}/")
         data = response.json()
         self.assertEqual(data["edit_url"], f"/contracts/{self.contract.pk}/edit/")
         self.assertEqual(data["delete_url"], f"/contracts/{self.contract.pk}/delete/")
+        self.assertEqual(data["download_url"], f"/contracts/{self.contract.pk}/download/")
 
     def test_contract_past_delete_window_yields_null_delete_url(self):
         """xlsx 保管!B300,B581・検索・閲覧・変更!B664-665「初回登録から1週間以上経過している
@@ -1117,6 +1203,8 @@ class DeleteViewWindowTests(TestCase):
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
+        # DeleteViewAjaxTests.setUpと同じ理由（Rev1.2のcontract_edit権限チェックが先に走るため）。
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, contract_edit=True)
         group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.CONTRACT)
         category = Category.objects.create(code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.CONTRACT)
         self.client.login(username="1", password="pass1234")

@@ -617,20 +617,24 @@ function renderDetailPopup(data, kind) {
     dlBtn.style.display = "none";
     dlBtn.onclick = null;
   }
-  // 変更ボタン（監査で発見：削除済み文書は documents/contracts.views の
-  // DocumentEditView.get_object() が is_deleted=False で対象を絞るため404になる。dlBtnと同じ
-  // 「disabled+title」パターンで、削除済みの間はそもそもクリックできないようにし、
-  // 404ページに到達させない）。
+  // 変更ボタン（xlsx 検索・閲覧・変更!B337,B663(Rev1.2)「削除されている(削除フラグがTrue)
+  // 文書/契約書は、ボタンを非表示とする」）。以前は「disabled+title」パターン（削除済みでも
+  // ボタン自体は表示したままグレーアウトする実装）だったが、これはdlBtn/deleteBtnがRev1.1で
+  // 「押下不可(disabled)」から明示的に変更した「非表示(style.display)」パターンと矛盾していた
+  // （2026-08-24再監査で発見：ダウンロードボタンの見落とし修正時に変更ボタン側の見直しが
+  // 漏れていた）。edit_urlはis_deletedだけでなく契約書側は`can_edit_contract`（xlsx
+  // 権限管理!B198「編集不可…「編集」「削除」ボタンを非表示にする」）でもNoneになるため、
+  // dlBtn/deleteBtnと同じ「data.edit_urlの有無だけを見て表示/非表示を切り替える」に統一する
+  // （「削除済みだから」と決め打ちしたtitle文言は、契約書の権限不足ケースでは誤りになるため
+  // 廃止）。
   const editBtn = document.getElementById("detail-change-btn");
-  if (!data.is_deleted && data.edit_url) {
-    editBtn.disabled = false;
-    editBtn.removeAttribute("title");
+  if (data.edit_url) {
+    editBtn.style.display = "";
     editBtn.onclick = () => {
       window.location.href = data.edit_url;
     };
   } else {
-    editBtn.disabled = true;
-    editBtn.title = "削除済みのため変更できません";
+    editBtn.style.display = "none";
     editBtn.onclick = null;
   }
   // 削除ボタン。data.delete_urlがNoneになるのは、既に削除済み、または保存から1週間以上

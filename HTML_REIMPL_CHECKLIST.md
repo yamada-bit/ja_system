@@ -1692,3 +1692,124 @@ COUNTIF集計は正しい値に更新される（一時的にキャッシュ値�
 
 `python manage.py test`（全406件）・`manage.py check`で確認済み（見た目のみの変更のためテスト
 追加は無し）。
+
+## 検索結果詳細ポップアップ：ダウンロードボタンの削除済み非表示漏れを修正（2026-08-24追記）
+
+ユーザーから「文書・契約書の編集画面（検索結果詳細ポップアップ）でダウンロード／変更／削除の
+3ボタンとも削除済みなら非表示のはずが反映されていない」と指摘を受けて再点検した。
+
+xlsx 検索・閲覧・変更!B327-342（screen-doc-detail、契約書側はB655-668）を確認すると、
+ダウンロード・変更・削除の3ボタンいずれにも「※削除されている(削除フラグがTrue)文書は、
+ボタンを非表示とする」の注記があり、Rev1.2で3ボタンとも対象になっていた。しかし前回
+（[[簡易設計指示書 Rev1.2改訂の反映]]）の実装・監査では「変更」「削除」の2ボタンのみ
+`is_deleted`をgatingに含め、「ダウンロード」ボタンだけ`permissions.services.can_download`
+の権限判定のみで`is_deleted`を見ていなかった（`documents/tests.py`
+`test_deleted_document_yields_null_edit_and_delete_urls`のコメントに「download_urlは
+is_deletedに関わらず参照可能な仕様のためNoneにしない」という誤った説明が残っており、これが
+見落としの原因だった）。
+
+### 修正内容
+- `documents/api.py`・`contracts/api.py`の`DetailAPIView`：`download_url`の算出条件に
+  `not document.is_deleted`（契約書は`not contract.is_deleted`）を追加。
+- `documents/views.py`・`contracts/views.py`の`DownloadView`：URL直打ち対策として
+  `get_object_or_404(..., is_deleted=False)`に変更（`DocumentEditView.get_object()`と
+  同じパターン）。以前は削除済みでもファイル実体を直接ダウンロードできてしまっていた。
+- `static/js/common.js`側は`data.can_download && data.download_url`でボタン表示を判定して
+  おり、`download_url`がNoneになれば自動的に非表示になるため変更不要。
+
+### テスト
+`documents/contracts.tests.DetailAPIViewTests`の削除済みケースに`download_url`のアサーションを
+追加、非削除ケースにも`download_url`の期待値を追加。`DownloadViewTests`に削除済み文書/契約書へ
+のダウンロード試行が404になることを確認するテストを追加。`python manage.py test`（全408件）・
+`manage.py check`で確認済み。
+
+**教訓**：xlsxの「※削除されている場合はボタンを非表示」という注記は同一画面内の複数ボタンに
+繰り返し付くことがあり、1ボタンだけ対応して他を見落とすと機械diff（セル単位比較）はパスして
+しまう（diffツール自体はテキスト変更を正しく検出していたが、実装側で該当ボタンを1つ
+取りこぼした）。同種の注記が複数ボタンに付いている箇所は、実装時にボタン単位でチェックリスト化
+して抜け漏れを防ぐ。
+
+## 契約書削除のサーバー側権限チェック漏れを追加修正（2026-08-24再監査）
+
+上記のダウンロードボタン見落としを受け、ユーザーから「ほかに見落としはないか」と再点検を
+依頼された。openpyxlでAI列（変更種別マーカー）に`Rev1.2`を含む全セルを7シート分機械的に
+列挙し（表紙除く6シートで計46箇所）、1件ずつ実装と突き合わせる方式で再監査した。
+
+その過程で、xlsx 権限管理!B198(Rev1.2)「契約書-契約書-契約書情報変更がOFFの場合、編集不可…
+検索・閲覧画面の検索結果一覧の明細ダブルクリック後に開く契約書詳細画面の「編集」「削除」
+ボタンを非表示にする」について、**「編集」側（`ContractEditView`, `BulkEditStartView`,
+`BulkEditView`, `UploadStep1View`, `UploadStep2View`）はいずれも`dispatch()`で
+`can_edit_contract`をサーバー側強制していたが、「削除」側（`contracts.views.DeleteView.post`）
+だけ`can_delete(contract)`（削除済み・1週間経過のみを見る）しか呼んでおらず、
+`can_edit_contract`の検証が抜けていた**ことを発見した。
+
+`DetailAPIView`の`delete_url`は`can_delete(contract) and can_edit`で判定しボタン自体は
+正しく隠していたため、通常操作では気づけない。しかし`contract_edit`権限が無い職員でも
+対象契約書のpkさえ分かれば`/contracts/<pk>/delete/`へ直接POSTすることで削除できてしまう
+状態だった（ボタン非表示だけでURL直打ちを防げていなかった、他画面で徹底している
+「サーバー側でも強制する」方針からの逸脱）。
+
+### 修正内容
+- `contracts/views.py`の`DeleteView.post`冒頭で`can_edit_contract(request.user)`を検証し、
+  NGなら403（AJAX時はJsonResponse、非AJAX時はPermissionDenied）を返すよう追加。
+- 既存の`DeleteViewAjaxTests`・`DeleteViewWindowTests`は`PermissionProfile`を作成せず
+  テストしていたため（＝旧仕様では権限を問わず削除できていたことの裏返し）、
+  `contract_edit=True`を付与するよう`setUp`を修正。
+- 新規`DeleteViewRequiresContractEditPermissionTests`（4件）：権限プロファイル未設定／
+  `contract_edit=False`／`contract_edit=True`／管理者、の4パターンで削除可否を確認。
+
+### 再監査で確認した範囲（見落とし以外）
+機械列挙した46箇所（メイン画面5・権限管理7・分類管理9・カテゴリー管理9・検索閲覧変更19・
+保管4→[[簡易設計指示書 Rev1.2改訂の反映]]で一部集計)は全て実装済みと確認した。特に「同一の
+※注記が複数ボタン/複数画面に繰り返し付く」パターン（分類・カテゴリー管理の部署列4画面×2、
+検索・保管フォームの分類/カテゴリー「自部署」表記4箇所、一括選択/一括ダウンロード/一括編集の
+3ボタン、メイン画面お知らせの文書/契約書6件数）は、繰り返し箇所を1つずつ個別に開いて
+突き合わせた。文書・契約書の通常検索（`notice`未指定）は`is_deleted=False`固定
+（`documents/contracts.search_services.build_queryset`）のため、削除済みレコードが一括操作の
+対象に紛れ込む余地が無いことも確認した。
+
+`python manage.py test`（全412件）・`manage.py check`で確認済み。
+
+**教訓（追加）**：ボタンの表示/非表示（クライアント側・APIのURL生成）と、そのボタンが叩く
+エンドポイントのサーバー側権限チェックは別物であり、片方を直したら必ずもう片方も
+（POSTで直接叩いて）確認する。「詳細ポップアップのdelete_urlがNoneになる」ことは
+「DeleteView.postが権限を検証している」ことを保証しない。
+
+## 検索結果詳細ポップアップ：変更ボタンが「非表示」ではなく「disabled」のままだった不具合を修正（2026-08-24再々追記）
+
+ユーザーから「変更ボタンの『削除済みなら非表示』も見落としているのでは」と指摘を受けて
+`static/js/common.js`の`renderDetailPopup()`を再確認したところ、指摘通りだった。
+
+xlsx 検索・閲覧・変更!B331,B337,B342,B659,B663,B668(Rev1.2)はダウンロード・変更・削除の
+3ボタンいずれも「ボタンを**非表示**とする」という同一の文言だが、`renderDetailPopup()`内の
+実装は各ボタンで方式が食い違っていた：
+- ダウンロードボタン・削除ボタン：`style.display = "none"`で完全に隠す（Rev1.1で「押下不可
+  (disabled)」から明示的に変更済み、ダウンロードボタンのコード上のコメントにもその経緯が
+  残っていた）。
+- 変更ボタン：`disabled = true` + `title`属性でグレーアウト表示するだけで、ボタン自体は
+  画面に残ったまま（削除済みでも「変更」ボタンが見え、クリックできないだけの状態）。
+
+さらに契約書側は`edit_url`が`is_deleted`だけでなく`can_edit_contract`（xlsx 権限管理!B198
+「契約書-契約書-契約書情報変更」がOFF）でもNoneになるが、旧実装は両ケースとも一律
+「削除済みのため変更できません」というtitleを表示しており、権限不足が理由のケースでは
+文言自体も不正確だった。
+
+### 修正内容
+- `static/js/common.js`の`editBtn`表示ロジックを`dlBtn`/`deleteBtn`と同じ
+  `data.edit_url`の有無で`style.display`を切り替える方式に統一（`disabled`/`title`は廃止）。
+
+### 検証
+Pythonの自動テストでは`edit_url`の値（None/URL文字列）は元々検証済みだったが、JS側の
+表示切替はテスト対象外（本プロジェクトにJSテスト基盤は無い）のため、開発DBに一時的な
+職員・削除済み文書・通常文書を作成しブラウザで直接確認した（確認後は作成したレコードのみ
+削除して原状回復、他の既存データには触れていない）：
+- 削除済み文書：ダウンロード・変更・削除の3ボタンとも`style.display === "none"`
+- 通常文書：3ボタンとも表示され、変更ボタンもクリック可能（`onclick`が関数として設定される）
+
+`python manage.py test`（全412件、JS変更のためテスト数は増減なし）・`manage.py check`で
+確認済み。
+
+**教訓（さらに追加）**：同じxlsx注記文言（「ボタンを非表示とする」）が複数ボタンに付く場合、
+実装方式（`display:none`か`disabled`か）も揃っているか確認すること。1つのボタンで先に
+`disabled`から`display:none`への変更経緯があっても、隣のボタンに同じ注記が後から追加された際に
+その変更が横展開されず古い実装方式のまま残ることがある。

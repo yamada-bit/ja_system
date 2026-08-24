@@ -91,7 +91,15 @@ class DetailAPIView(LoginRequiredMixin, View):
                     if not contract.is_deleted and can_edit
                     else None
                 ),
-                "download_url": reverse("contracts:download", args=[contract.pk]) if can_dl else None,
+                # documents.api.DetailAPIViewと同じ理由（xlsx 検索・閲覧・変更!B659(Rev1.2)
+                # 「削除されている(削除フラグがTrue)契約書は、ボタンを非表示とする」。監査で発見：
+                # 以前はcan_download権限のみを見ており、削除済み契約書でもダウンロードボタンが
+                # 表示され続けていた）。
+                "download_url": (
+                    reverse("contracts:download", args=[contract.pk])
+                    if can_dl and not contract.is_deleted
+                    else None
+                ),
                 # documents.api.DetailAPIViewと同じ理由（詳細ポップアップの実プレビュー表示用、
                 # 2026-08-13ユーザー報告対応でpreview_kindは権限に関わらず返すよう変更）。
                 "preview_url": reverse("contracts:preview", args=[contract.pk]) if can_dl else None,

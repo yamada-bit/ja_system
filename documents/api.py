@@ -79,7 +79,16 @@ class DetailAPIView(LoginRequiredMixin, View):
                 # renderDetailPopup()側でもdata.is_deletedを見てボタンをdisabledにするが、
                 # can_download/download_urlと同じ考え方でAPI側でもNoneにしておく）。
                 "edit_url": reverse("documents:edit", args=[document.pk]) if not document.is_deleted else None,
-                "download_url": reverse("documents:download", args=[document.pk]) if can_dl else None,
+                # download_urlもxlsx 検索・閲覧・変更!B331(Rev1.2)「削除されている(削除フラグが
+                # True)文書は、ボタンを非表示とする」に従いis_deletedをgatingに加える（監査で発見：
+                # 以前はcan_download権限のみを見ており、削除済み文書でもダウンロードボタンが
+                # 表示され続けていた。documents.views.DownloadView側もis_deleted=Falseに揃えて
+                # URL直打ち対策済み）。
+                "download_url": (
+                    reverse("documents:download", args=[document.pk])
+                    if can_dl and not document.is_deleted
+                    else None
+                ),
                 # 詳細ポップアップの実プレビュー表示用（ユーザー依頼2026-08-12で追加）。
                 # preview_urlは実データを指すためcan_download権限でgatingするが、preview_kind
                 # （拡張子判定）は権限に関わらず返す。common.jsのrenderDetailPopup()側で

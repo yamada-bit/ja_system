@@ -591,10 +591,16 @@ class SearchView(LoginRequiredMixin, View):
 class DownloadView(LoginRequiredMixin, View):
     """詳細ポップアップ「ダウンロード」ボタン。要再確認No.20〜22（権限管理「文書-ダウンロード」フラグ）
     に対応し、`permissions.services.can_download`で一元判定する。
+
+    xlsx 検索・閲覧・変更!B331(Rev1.2)「削除されている(削除フラグがTrue)文書は、ボタンを非表示と
+    する」に対応し、DocumentEditView.get_object()と同じくis_deleted=Falseでしか対象を取得できない
+    ようにする（監査で発見：documents.api.DetailAPIViewのdownload_urlはcan_download権限のみを
+    見ておりis_deleted判定が漏れていたため、削除済み文書でもダウンロードボタンが表示され続けて
+    いた）。
     """
 
     def get(self, request, pk):
-        document = get_object_or_404(Document, pk=pk)
+        document = get_object_or_404(Document, pk=pk, is_deleted=False)
         if not can_download(request.user, kind="document"):
             logger.warning(
                 "ダウンロード権限の無いユーザーによる試行: employee_no=%s document_id=%s",
