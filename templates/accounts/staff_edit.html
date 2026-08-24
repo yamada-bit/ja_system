@@ -129,6 +129,10 @@
   const departmentInput = document.getElementById('id_department');
   const currentDepartmentId = "{{ employee.department_id }}";
 
+  // 原本index.html:2215,2230の両selectとも常に「(選択してください)」を先頭に持つ静的markupに
+  // 合わせる（staff_regist.htmlのupdateSections()と同じ理由。フィデリティ監査で発見：
+  // 動的再構築時にプレースホルダーを付け忘れていた）。
+  branchSelect.innerHTML = '<option value="">(選択してください)</option>';
   const branches = [];
   const seen = new Set();
   departments.forEach(function (d) {
@@ -147,7 +151,7 @@
   function updateSections(preselectId) {
     const branchCode = branchSelect.value;
     document.getElementById('code-branch-edit').textContent = branchCode;
-    sectionSelect.innerHTML = '';
+    sectionSelect.innerHTML = '<option value="">(選択してください)</option>';
     // 原本index.html:2156-2165のupdateCode()と同じ業務ルール（staff_regist.htmlと同一理由）。
     // 本店(000)または未選択のときのみ部課selectを有効化する。
     if (branchCode && branchCode !== '000') {
