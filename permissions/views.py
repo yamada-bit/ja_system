@@ -41,7 +41,14 @@ class AuthorityListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         return render(
             request,
             self.template_name,
-            {"form": form, "page_obj": page_obj, "sort_key": sort_key, "sort_dir": sort_dir},
+            {
+                "form": form,
+                "page_obj": page_obj,
+                "sort_key": sort_key,
+                "sort_dir": sort_dir,
+                # xlsx 権限管理!B35「「部署」プルダウン ※権限：管理者のみ表示」（Rev1.2で追加）。
+                "is_admin_viewer": get_role(request.user) == PermissionRole.ADMIN,
+            },
         )
 
 
@@ -72,7 +79,8 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             [
                 "職員番号", "部署", "氏名", "役職", "権限",
                 "文書管理-分類(表示)", "文書管理-文書(保存満了日変更)", "文書管理-文書(ダウンロード)",
-                "契約書-部門間閲覧設定", "契約書-分類(表示)", "契約書-契約書(ダウンロード)",
+                "契約書-部門間閲覧設定", "契約書-分類(表示)",
+                "契約書-契約書(契約書情報変更)", "契約書-契約書(ダウンロード)",
                 "電子決裁-書類毎の閲覧設定", "電子決裁-書類名(作成・変更)", "電子決裁-申請書(保存期間)",
             ]
         )
@@ -107,19 +115,20 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
 
 
 def _flags_row(profile):
-    """AuthorityCsvExportViewのCSVヘッダー（9列、文書管理3列＋契約書3列＋電子決裁3列）と
+    """AuthorityCsvExportViewのCSVヘッダー（10列、文書管理3列＋契約書4列＋電子決裁3列）と
     同じ順序でPermissionProfileのフラグを文字列化する。列の増減や並び替えをする際はヘッダー行
     （AuthorityCsvExportView.get内のwriterow呼び出し）とこの関数の両方を対応させて修正すること。
     profileがNone（PermissionProfile未設定の職員）の場合は全列を空文字にする。
     """
     if profile is None:
-        return [""] * 9
+        return [""] * 10
     return [
         ",".join(g.name for g in profile.doc_visible_groups.all()),
         "〇" if profile.doc_retention_edit else "",
         "〇" if profile.doc_download else "",
         ",".join(str(d) for d in profile.contract_visible_departments.all()),
         ",".join(g.name for g in profile.contract_visible_groups.all()),
+        "〇" if profile.contract_edit else "",
         "〇" if profile.contract_download else "",
         "〇" if profile.eapproval_view_setting else "",
         "〇" if profile.eapproval_doc_name_manage else "",
@@ -158,15 +167,31 @@ class AuthorityEditView(LoginRequiredMixin, View):
             return {PermissionRole.STAFF}
         return None
 
+    def _is_admin_editor(self, request):
+        """xlsx 権限管理!H182「契約書-部門間閲覧設定　※権限：管理者のみ表示」（Rev1.2で追加）。
+        編集者（ログイン者）が管理者かどうかで、この項目の表示・編集可否を分ける。
+        """
+        return get_role(request.user) == PermissionRole.ADMIN
+
     def get(self, request, pk):
         profile, _ = PermissionProfile.objects.get_or_create(
             employee=self.employee, defaults={"role": PermissionRole.STAFF}
         )
-        form = AuthorityEditForm(instance=profile, editable_roles=self._editable_roles(request))
+        is_admin_editor = self._is_admin_editor(request)
+        form = AuthorityEditForm(
+            instance=profile,
+            editable_roles=self._editable_roles(request),
+            show_contract_visible_departments=is_admin_editor,
+        )
         return render(
             request,
             self.template_name,
-            {"form": form, "employee": self.employee, "token": issue_token(request.session, self.form_id)},
+            {
+                "form": form,
+                "employee": self.employee,
+                "token": issue_token(request.session, self.form_id),
+                "is_admin_editor": is_admin_editor,
+            },
         )
 
     def post(self, request, pk):
@@ -174,15 +199,25 @@ class AuthorityEditView(LoginRequiredMixin, View):
         profile, _ = PermissionProfile.objects.get_or_create(
             employee=employee, defaults={"role": PermissionRole.STAFF}
         )
+        is_admin_editor = self._is_admin_editor(request)
         submitted_token = request.POST.get("token", "")
         if not consume_token(request.session, self.form_id, submitted_token):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("permissions:authority_edit", pk=pk)
 
-        form = AuthorityEditForm(request.POST, instance=profile, editable_roles=self._editable_roles(request))
+        form = AuthorityEditForm(
+            request.POST,
+            instance=profile,
+            editable_roles=self._editable_roles(request),
+            show_contract_visible_departments=is_admin_editor,
+        )
         if not form.is_valid():
             token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, {"form": form, "employee": employee, "token": token})
+            return render(
+                request,
+                self.template_name,
+                {"form": form, "employee": employee, "token": token, "is_admin_editor": is_admin_editor},
+            )
 
         form.save()
         logger.info("権限設定を更新しました: employee_no=%s", employee.employee_no)

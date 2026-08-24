@@ -27,6 +27,15 @@
         {% csrf_token %}
         <input type="hidden" name="token" value="{{ token }}">
         <table class="vertical-master-table">
+          {% if form.department %}
+          <tr>
+            <th>部署</th>
+            <td>
+              {{ form.department }}
+              {% for error in form.department.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          {% endif %}
           <tr>
             <th>分類コード</th>
             <td>

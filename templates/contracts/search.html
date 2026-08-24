@@ -71,7 +71,14 @@
         </div>
         <form method="post" action="{% url 'contracts:bulk_download' %}">
           {% csrf_token %}
+          {% comment %}
+            documents/search.htmlと同じ理由（xlsx 検索・閲覧・変更!B659,B663周辺(Rev1.2)、
+            メイン画面「お知らせ」"直近Xヵ月以内で削除された契約書"リンクからの遷移時は
+            一括ダウンロード・一括編集・一括選択トグルとも非表示にする）。
+          {% endcomment %}
+          {% if notice != "recently_deleted" %}
           <button type="button" id="btn-toggle-all" onclick="toggleAllCheckboxes()">一括選択</button>　{% if can_download %}<button type="submit">一括ダウンロード</button>{% endif %}　<button type="submit" formaction="{% url 'contracts:bulk_edit_start' %}">一括編集</button>
+          {% endif %}
           <div class="table-wrapper">
             <table class="result-table" data-result-count="{{ page_obj.paginator.count }}">
               <thead>

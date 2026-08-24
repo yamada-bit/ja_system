@@ -15,12 +15,17 @@ DELETE_WINDOW_DAYS = 7
 
 
 def can_delete(document) -> bool:
-    """検索・閲覧画面の削除ボタン表示可否。ゴミ箱保管中（is_deleted=True）の文書は、
-    「保存から1週間」というこの制限とは無関係に常に削除（完全削除）可能
-    （ユーザー依頼2026-08-12で追加した別機能、documents.views.DeleteView docstring参照）。
+    """検索・閲覧画面の削除ボタン表示可否（xlsx 検索・閲覧・変更!B331,B337(Rev1.2)「削除されている
+    (削除フラグがTrue)文書は、ボタンを非表示とする」）。
+
+    2026-08-12にユーザー依頼で「ゴミ箱保管中（is_deleted=True）の文書は削除ボタンで完全削除できる」
+    機能を追加していたが、Rev1.2改訂でxlsxが明示的に「削除済みなら削除ボタン自体を非表示」と
+    指定したため、2026-08-24のRev1.2反映時にユーザー判断でxlsx優先とし、この完全削除機能は廃止した
+    （documents.views.DeleteView docstring参照。完全削除自体はcore.management.commands.
+    purge_expired_deleted_records〈自動物理削除バッチ、xlsx メイン画面!B51〉に一本化）。
     """
     if document.is_deleted:
-        return True
+        return False
     return timezone.now() - document.save_date < datetime.timedelta(days=DELETE_WINDOW_DAYS)
 
 

@@ -25,8 +25,13 @@ class GroupFormTests(TestCase):
         self.assertFalse(form.is_valid())
 
     def test_keeping_own_code_on_update_is_allowed(self):
+        # show_department=False: これらのテストは分類コードのバリデーションのみを検証する
+        # ため、Rev1.2で追加された「部署」フィールド（管理者のみ表示、GroupForm docstring参照）
+        # は対象外にする。
         form = GroupForm(
-            data={"code": "1", "name": "分類Ａ改名", "doc_kbn": DocKbn.DOCUMENT}, instance=self.existing
+            data={"code": "1", "name": "分類Ａ改名", "doc_kbn": DocKbn.DOCUMENT},
+            instance=self.existing,
+            show_department=False,
         )
         self.assertTrue(form.is_valid(), form.errors)
 
@@ -34,12 +39,16 @@ class GroupFormTests(TestCase):
         """論理削除(is_deleted)済みの分類コードは重複チェックの対象外とする。"""
         self.existing.is_deleted = True
         self.existing.save()
-        form = GroupForm(data={"code": "1", "name": "新しい分類Ａ", "doc_kbn": DocKbn.DOCUMENT})
+        form = GroupForm(
+            data={"code": "1", "name": "新しい分類Ａ", "doc_kbn": DocKbn.DOCUMENT}, show_department=False
+        )
         self.assertTrue(form.is_valid(), form.errors)
 
     def test_fullwidth_code_converted_to_halfwidth(self):
         """xlsx 分類管理!B116(Rev1.1)「半角数字のみ許可する。(全角の場合は登録時に半角へ変換)」。"""
-        form = GroupForm(data={"code": "３", "name": "分類Ｃ", "doc_kbn": DocKbn.DOCUMENT})
+        form = GroupForm(
+            data={"code": "３", "name": "分類Ｃ", "doc_kbn": DocKbn.DOCUMENT}, show_department=False
+        )
         self.assertTrue(form.is_valid(), form.errors)
         group = form.save()
         self.assertEqual(group.code, "3")
@@ -86,8 +95,10 @@ class CategoryFormTests(TestCase):
 
     def test_fullwidth_code_converted_to_halfwidth(self):
         """xlsx カテゴリー管理!B113(Rev1.1)「半角数字のみ許可する。(全角の場合は登録時に半角へ変換)」。"""
+        # show_department=False: GroupFormTests.test_fullwidth_code_converted_to_halfwidthと同じ理由。
         form = CategoryForm(
-            data={"code": "００２", "name": "新カテゴリー", "group": self.group.pk, "doc_kbn": DocKbn.DOCUMENT}
+            data={"code": "００２", "name": "新カテゴリー", "group": self.group.pk, "doc_kbn": DocKbn.DOCUMENT},
+            show_department=False,
         )
         self.assertTrue(form.is_valid(), form.errors)
         category = form.save()
@@ -399,7 +410,10 @@ class MasterIntegrityErrorViewTests(TestCase):
         ):
             response = self.client.post(
                 "/masters/class/regist/",
-                {"token": token, "code": "A", "name": "重複分類", "doc_kbn": DocKbn.DOCUMENT},
+                {
+                    "token": token, "code": "A", "name": "重複分類", "doc_kbn": DocKbn.DOCUMENT,
+                    "department": self.department.pk,
+                },
             )
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "この分類コードは既に登録されています。")
@@ -419,7 +433,7 @@ class MasterIntegrityErrorViewTests(TestCase):
                 "/masters/cat/regist/",
                 {
                     "token": token, "code": "001", "name": "重複カテゴリー",
-                    "group": group.pk, "doc_kbn": DocKbn.DOCUMENT,
+                    "group": group.pk, "doc_kbn": DocKbn.DOCUMENT, "department": self.department.pk,
                 },
             )
         self.assertEqual(response.status_code, 200)
@@ -454,3 +468,123 @@ class MasterIntegrityErrorViewTests(TestCase):
         self.assertEqual(
             RetentionPeriod.objects.filter(kbn=RetentionKbn.DOCUMENT, display_order=1).count(), 1
         )
+
+
+class DepartmentScopingTests(TestCase):
+    """Rev1.2（xlsx 分類管理!B35,B73-75、カテゴリー管理!B35,B78-80、2026-08-24反映）で追加された
+    分類・カテゴリーマスタの部署スコープ。管理者は全部署、それ以外は自部署のみ閲覧・編集できる
+    （masters.services.department_scope_ids）。
+    """
+
+    def setUp(self):
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        self.group_a = Group.objects.create(
+            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.dept_a
+        )
+        self.group_b = Group.objects.create(
+            code="B", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=self.dept_b
+        )
+
+    def _login_as(self, department, role):
+        employee = Employee.objects.create_user(
+            employee_no="1", name="ログイン太郎", password="pass1234",
+            department=department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=employee, role=role)
+        self.client.login(username="1", password="pass1234")
+        return employee
+
+    def test_manager_sees_only_own_department_groups(self):
+        self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get("/masters/class/")
+        self.assertContains(response, "分類Ａ")
+        self.assertNotContains(response, "分類Ｂ")
+        # xlsx 分類管理!B75「一覧の「部署」を非表示」＝部署検索プルダウン・部署列とも
+        # 管理者以外には出さない。
+        self.assertNotContains(response, 'name="department"')
+
+    def test_admin_sees_all_departments_groups_and_department_filter(self):
+        self._login_as(self.dept_a, PermissionRole.ADMIN)
+        response = self.client.get("/masters/class/")
+        self.assertContains(response, "分類Ａ")
+        self.assertContains(response, "分類Ｂ")
+        self.assertContains(response, 'name="department"')
+
+    def test_manager_cannot_reach_other_department_group_edit(self):
+        """xlsx記載は無いが、一覧が自部署に絞られる以上、編集アクセスもサーバー側で
+        同じ範囲に制限する（URL直叩き対策、GroupEditView._get_object参照）。"""
+        self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get(f"/masters/class/{self.group_b.pk}/edit/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_manager_registered_group_is_auto_assigned_own_department(self):
+        """xlsx 分類管理!B116「「部署」プルダウン ※権限：管理者のみ表示」。非管理者の登録画面には
+        部署プルダウンが無く、作成した分類は自動的にログイン者の自部署が設定される
+        （GroupRegistView.post参照）。"""
+        employee = self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get("/masters/class/regist/")
+        token = response.context["token"]
+        self.assertNotIn(b'name="department"', response.content)
+
+        self.client.post(
+            "/masters/class/regist/",
+            {"token": token, "code": "9", "name": "所属長作成分類", "doc_kbn": DocKbn.DOCUMENT},
+        )
+        created = Group.objects.get(code="9")
+        self.assertEqual(created.department_id, employee.department_id)
+
+    def test_admin_registered_group_requires_department_selection(self):
+        employee = self._login_as(self.dept_a, PermissionRole.ADMIN)
+        response = self.client.get("/masters/class/regist/")
+        token = response.context["token"]
+
+        response = self.client.post(
+            "/masters/class/regist/",
+            {"token": token, "code": "9", "name": "管理者作成分類", "doc_kbn": DocKbn.DOCUMENT},
+        )
+        self.assertFalse(Group.objects.filter(code="9").exists())
+        self.assertContains(response, "このフィールドは必須です。")
+
+        token = response.context["token"]
+        self.client.post(
+            "/masters/class/regist/",
+            {
+                "token": token, "code": "9", "name": "管理者作成分類", "doc_kbn": DocKbn.DOCUMENT,
+                "department": self.dept_b.pk,
+            },
+        )
+        created = Group.objects.get(code="9")
+        self.assertEqual(created.department_id, self.dept_b.pk)
+
+    def test_null_department_legacy_group_visible_to_non_admin(self):
+        """department未設定（Rev1.2移行前の既存データ想定）は、非管理者にも見える
+        （masters.services.scope_queryset_by_department docstring参照。全く見えなくなる・
+        編集できなくなる退行を避けるための意図的な仕様）。"""
+        legacy = Group.objects.create(code="Z", name="移行前分類", doc_kbn=DocKbn.DOCUMENT)
+        self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get("/masters/class/")
+        self.assertContains(response, "移行前分類")
+        response = self.client.get(f"/masters/class/{legacy.pk}/edit/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_admin_list_department_column_is_leftmost(self):
+        """Rev1.2の埋め込み画像モック（分類管理シート、セル文字列では検出できず画像ハッシュ
+        突き合わせで発見）は「部署」列が分類コード列より左にある。当初は分類コードの直後に
+        実装してしまっていたため、モック通りの列順に修正した（2026-08-24）。"""
+        self._login_as(self.dept_a, PermissionRole.ADMIN)
+        response = self.client.get("/masters/class/")
+        content = response.content.decode("utf-8")
+        self.assertLess(content.index(">部署<"), content.index("分類コード"))
+
+    def test_delete_confirmation_shows_department(self):
+        """Rev1.2の埋め込み画像モック（分類管理削除シート）はテキストセルの内容こそ変化が
+        無かったが、画像だけ差し替わっており「部署」の表示行が追加されていた
+        （openpyxlでのセル単位diffでは検出できず、画像ハッシュ突き合わせで発見）。"""
+        self._login_as(self.dept_a, PermissionRole.ADMIN)
+        response = self.client.get(f"/masters/class/{self.group_a.pk}/delete/")
+        self.assertContains(response, "総務部")

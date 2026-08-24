@@ -27,6 +27,7 @@
     <div class="master-detail-box">
       <p>以下のカテゴリーを削除します。よろしいですか？</p>
       <table class="vertical-master-table">
+        <tr><th>部署</th><td>{{ category.department|default:"" }}</td></tr>
         <tr><th>カテゴリーコード</th><td>{{ category.code }}</td></tr>
         <tr><th>カテゴリー名</th><td>{{ category.name }}</td></tr>
         <tr><th>分類</th><td>{{ category.group.name }}</td></tr>

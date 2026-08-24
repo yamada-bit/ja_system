@@ -16,9 +16,10 @@ DELETE_WINDOW_DAYS = 7
 
 
 def can_delete(contract) -> bool:
-    """documents.services.can_deleteと同じ考え方（詳細はそちらのdocstring参照）。"""
+    """documents.services.can_deleteと同じ考え方（詳細はそちらのdocstring参照。Rev1.2で
+    削除済み契約書はボタン非表示に統一、完全削除機能は廃止した）。"""
     if contract.is_deleted:
-        return True
+        return False
     return timezone.now() - contract.save_date < datetime.timedelta(days=DELETE_WINDOW_DAYS)
 
 

@@ -27,6 +27,7 @@
     <div class="master-detail-box">
       <p>以下の分類を削除します。よろしいですか？</p>
       <table class="vertical-master-table">
+        <tr><th>部署</th><td>{{ group.department|default:"" }}</td></tr>
         <tr><th>分類コード</th><td>{{ group.code }}</td></tr>
         <tr><th>分類名</th><td>{{ group.name }}</td></tr>
         <tr><th>書類管理区分</th><td>{{ group.get_doc_kbn_display }}</td></tr>

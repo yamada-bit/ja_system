@@ -39,6 +39,7 @@ class AuthoritySearchForm(forms.Form):
 _FLAG_FIELDS = [
     "doc_retention_edit",
     "doc_download",
+    "contract_edit",
     "contract_download",
     "eapproval_view_setting",
     "eapproval_doc_name_manage",
@@ -88,17 +89,26 @@ class AuthorityEditForm(forms.ModelForm):
             ),
         }
 
-    def __init__(self, *args, editable_roles=None, **kwargs):
+    def __init__(self, *args, editable_roles=None, show_contract_visible_departments=True, **kwargs):
         """editable_rolesを指定すると`role`フィールドの選択肢をその値に絞り込む
         （xlsx 権限管理!B113/115「所属長はロールを"職員(一般)"のみ選択可」）。ChoiceFieldの
         `choices`自体を絞るため、選択肢に無い値をPOSTしても`is_valid()`が弾く
         （テンプレート側の見た目の絞り込みだけに頼らない）。
+
+        `show_contract_visible_departments=False`の場合は`contract_visible_departments`
+        フィールド自体をself.fieldsから取り除く（xlsx 権限管理!H182「※権限：管理者のみ表示」、
+        Rev1.2で追加。以前は管理者・所属長どちらも編集可能だった）。ModelForm._save_m2m()は
+        self.fieldsに存在しないM2Mフィールドを保存対象から除外するため、テンプレート側で
+        非表示にするだけでなくフォーム自体から外すことで、所属長がPOSTデータを直接細工しても
+        この項目を変更できないようにする（サーバー側での強制）。
         """
         super().__init__(*args, **kwargs)
         for name in _FLAG_FIELDS:
             self.fields[name].label = self.instance._meta.get_field(name).verbose_name
         for name in _MULTI_FIELDS:
             self.fields[name].required = False
+        if not show_contract_visible_departments:
+            del self.fields["contract_visible_departments"]
         if editable_roles is not None:
             self.fields["role"].choices = [
                 choice for choice in PermissionRole.choices if choice[0] in editable_roles

@@ -8,8 +8,14 @@ from django.urls import reverse_lazy
 from core.forms import search_year_choices, year_choices_with_existing
 from core.widgets import InlineRadioSelect, PopupSelectWidget
 from masters.models import Category, DocKbn, Group
+from masters.services import scope_queryset_by_department
 from organizations.models import Department
-from permissions.services import can_select_department, contract_searchable_department_ids, visible_groups
+from permissions.services import (
+    can_select_department,
+    contract_searchable_department_ids,
+    department_ids_for_group_scope,
+    visible_groups,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +143,18 @@ class UploadStep2Form(forms.Form):
             # 部署をContractEditView._build_formがinitialで渡すため、ここで上書きしない）。
             self.initial["department"] = employee.department_id
         allowed_groups = visible_groups(employee, kind="contract") if employee else None
-        if allowed_groups is not None:
-            qs = allowed_groups.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
-            self.fields["group"].queryset = qs
-            self.fields["group"].widget.queryset = qs
+        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
+        group_qs = group_qs.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
+        category_qs = Category.objects.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
+        # xlsx 保管!P430,P459(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
+        if employee is not None:
+            dept_ids = department_ids_for_group_scope(employee, kind="contract")
+            group_qs = scope_queryset_by_department(group_qs, dept_ids)
+            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        self.fields["group"].queryset = group_qs
+        self.fields["group"].widget.queryset = group_qs
+        self.fields["category"].queryset = category_qs
+        self.fields["category"].widget.queryset = category_qs
         initial_titles = initial_titles or []
         for i in range(file_count):
             initial = initial_titles[i] if i < len(initial_titles) else ""
@@ -266,7 +280,15 @@ class SearchForm(forms.Form):
                 if not can_select_department(employee, kind="contract"):
                     self.fields["department"].disabled = True
         allowed_groups = visible_groups(employee, kind="contract") if employee else None
-        if allowed_groups is not None:
-            qs = allowed_groups.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
-            self.fields["group"].queryset = qs
-            self.fields["group"].widget.queryset = qs
+        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
+        group_qs = group_qs.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
+        category_qs = Category.objects.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
+        # xlsx 検索・閲覧・変更!P470,P507(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
+        if employee is not None:
+            dept_ids = department_ids_for_group_scope(employee, kind="contract")
+            group_qs = scope_queryset_by_department(group_qs, dept_ids)
+            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        self.fields["group"].queryset = group_qs
+        self.fields["group"].widget.queryset = group_qs
+        self.fields["category"].queryset = category_qs
+        self.fields["category"].widget.queryset = category_qs

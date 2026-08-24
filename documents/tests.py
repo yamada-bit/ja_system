@@ -581,10 +581,12 @@ class DeleteViewAjaxTests(TestCase):
         self.assertTrue(Document.objects.filter(pk=self.document.pk).exists())
         self.assertTrue(self.document.file.storage.exists(self.document.file.name))
 
-    def test_deleting_already_trashed_document_permanently_removes_it(self):
-        """ユーザー依頼2026-08-12：ゴミ箱保管中（is_deleted=True）の文書を削除ボタンで
-        削除すると、ゴミ箱保管中に限定したconfirm文言「完全に削除しますか」通りDBレコード・
-        ファイル実体とも消える完全削除になる。"""
+    def test_deleting_already_trashed_document_is_rejected(self):
+        """Rev1.2（xlsx 検索・閲覧・変更!B331,B337「削除されている文書は、ボタンを非表示と
+        する」）で、2026-08-12にユーザー依頼で追加した「ゴミ箱保管中の文書を削除ボタンで
+        完全削除する」機能は2026-08-24に廃止された（documents.services.can_delete docstring
+        参照）。既に削除済みの文書への削除操作はサーバー側でも拒否し、レコード・ファイルとも
+        残ることを確認する。"""
         from documents.models import Document
 
         file_name = self.document.file.name
@@ -595,9 +597,10 @@ class DeleteViewAjaxTests(TestCase):
         response = self.client.post(
             f"/documents/{self.document.pk}/delete/", HTTP_X_REQUESTED_WITH="XMLHttpRequest"
         )
-        self.assertEqual(response.json(), {"success": True, "message": "文書を完全に削除しました。"})
-        self.assertFalse(Document.objects.filter(pk=self.document.pk).exists())
-        self.assertFalse(self.document.file.storage.exists(file_name))
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["success"])
+        self.assertTrue(Document.objects.filter(pk=self.document.pk).exists())
+        self.assertTrue(self.document.file.storage.exists(file_name))
 
     def test_non_ajax_request_still_redirects(self):
         response = self.client.post(f"/documents/{self.document.pk}/delete/")
@@ -673,6 +676,35 @@ class DownloadViewTests(TestCase):
         response = self.client.get(f"/documents/{self.document.pk}/download/")
         self.assertEqual(response.status_code, 403)
         self.assertFalse(AuditLog.objects.filter(action="文書検索 ダウンロード").exists())
+
+
+class BulkButtonsHiddenForRecentlyDeletedNoticeTests(TestCase):
+    """Rev1.2（xlsx 検索・閲覧・変更!B260,B267「メイン画面「お知らせ」の"直近Xヵ月以内で
+    削除された文書"リンクから遷移した場合は、ボタンを非表示にする」、2026-08-24反映）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_bulk_buttons_hidden_when_notice_is_recently_deleted(self):
+        response = self.client.get("/documents/search/", {"notice": "recently_deleted"})
+        self.assertNotContains(response, "一括ダウンロード")
+        self.assertNotContains(response, "一括編集")
+        self.assertNotContains(response, "一括選択")
+
+    def test_bulk_buttons_shown_for_normal_search(self):
+        response = self.client.get("/documents/search/")
+        self.assertContains(response, "一括ダウンロード")
+        self.assertContains(response, "一括編集")
+        self.assertContains(response, "一括選択")
 
 
 class BulkDownloadViewTests(TestCase):
@@ -1365,20 +1397,21 @@ class DetailAPIViewTests(TestCase):
         self.assertIsNotNone(data["preview_url"])
         self.assertIsNone(data["preview_kind"])
 
-    def test_deleted_document_yields_null_edit_url_but_keeps_delete_url(self):
-        """ユーザー報告（2026-08-12）：削除済み文書一覧の詳細ポップアップで「変更」が404に
-        なっていた。DocumentEditView.get_object()がis_deleted=Falseでしか対象を取得できない
-        以上、API側でedit_urlをNoneにしてボタンを無効化するのが正しい対応（download_urlは
-        is_deletedに関わらず参照可能な仕様のためNoneにしない）。delete_urlは別のユーザー依頼
-        （ゴミ箱保管中からの削除で完全削除できるようにする）でis_deletedに関わらず常に返す
-        よう変更したため、こちらはNoneにならない（documents.views.DeleteView.post参照）。"""
+    def test_deleted_document_yields_null_edit_and_delete_urls(self):
+        """削除済み文書一覧の詳細ポップアップで「変更」が404になっていた不具合の修正
+        （2026-08-12ユーザー報告）：DocumentEditView.get_object()がis_deleted=Falseでしか対象を
+        取得できない以上、API側でedit_urlをNoneにしてボタンを無効化するのが正しい対応
+        （download_urlはis_deletedに関わらず参照可能な仕様のためNoneにしない）。delete_urlも
+        Rev1.2（xlsx 検索・閲覧・変更!B331,B337「削除されている文書は、ボタンを非表示とする」）
+        でNoneになるよう変更した（documents.services.can_delete docstring参照。以前は
+        「ゴミ箱保管中の削除ボタンで完全削除」機能のため常に返していたが、その機能は廃止した）。"""
         self.document.is_deleted = True
         self.document.save(update_fields=["is_deleted"])
 
         response = self.client.get(f"/documents/api/{self.document.pk}/")
         data = response.json()
         self.assertIsNone(data["edit_url"])
-        self.assertEqual(data["delete_url"], f"/documents/{self.document.pk}/delete/")
+        self.assertIsNone(data["delete_url"])
 
     def test_non_deleted_document_still_has_edit_and_delete_urls(self):
         response = self.client.get(f"/documents/api/{self.document.pk}/")
@@ -1398,8 +1431,9 @@ class DetailAPIViewTests(TestCase):
         data = response.json()
         self.assertIsNone(data["delete_url"])
 
-    def test_deleted_document_past_delete_window_still_has_delete_url(self):
-        """ゴミ箱保管中（is_deleted=True）は1週間制限と無関係に常に削除可能。"""
+    def test_deleted_document_past_delete_window_yields_null_delete_url(self):
+        """ゴミ箱保管中（is_deleted=True）は1週間制限を待つまでもなく、Rev1.2で削除不可
+        （delete_url None）になる（documents.services.can_delete docstring参照）。"""
         from documents.models import Document
 
         Document.objects.filter(pk=self.document.pk).update(
@@ -1407,7 +1441,7 @@ class DetailAPIViewTests(TestCase):
         )
         response = self.client.get(f"/documents/api/{self.document.pk}/")
         data = response.json()
-        self.assertEqual(data["delete_url"], f"/documents/{self.document.pk}/delete/")
+        self.assertIsNone(data["delete_url"])
 
 
 class DeleteViewWindowTests(TestCase):

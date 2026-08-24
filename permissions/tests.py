@@ -8,6 +8,7 @@ from permissions.forms import AuthorityEditForm, AuthoritySearchForm
 from permissions.models import PermissionProfile, PermissionRole
 from permissions.services import (
     can_download,
+    can_edit_contract,
     can_select_department,
     filter_authority_queryset,
     get_role,
@@ -57,6 +58,24 @@ class PermissionServicesTests(TestCase):
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
         with self.assertRaises(ValueError):
             can_download(self.employee, kind="unknown")
+
+    def test_can_edit_contract_false_without_profile(self):
+        """Rev1.2で追加。文書側に対応するフラグは無い（documents.forms/contracts.forms.
+        UploadStep2Form.__init__docstring等参照。文書の保存・編集は引き続き無条件で可能）。"""
+        self.assertFalse(can_edit_contract(self.employee))
+
+    def test_can_edit_contract_reflects_flag(self):
+        profile = PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        self.assertFalse(can_edit_contract(self.employee))
+        profile.contract_edit = True
+        profile.save()
+        self.assertTrue(can_edit_contract(self.employee))
+
+    def test_can_edit_contract_true_for_admin_regardless_of_flag(self):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.ADMIN, contract_edit=False
+        )
+        self.assertTrue(can_edit_contract(self.employee))
 
     def test_can_download_true_for_admin_regardless_of_flags(self):
         """xlsx 権限管理!B180「※管理者は、所属長及び職員に対して設定する」。管理者自身は
@@ -252,6 +271,7 @@ class AuthorityEditFormTests(TestCase):
             "doc_download",
             "contract_visible_departments",
             "contract_visible_groups",
+            "contract_edit",
             "contract_download",
             "eapproval_view_setting",
             "eapproval_doc_name_manage",
@@ -351,6 +371,60 @@ class AuthorityEditViewTests(TestCase):
         self.assertTrue(AuditLog.objects.filter(action="権限管理 更新").exists())
 
 
+class ContractVisibleDepartmentsAdminOnlyTests(TestCase):
+    """Rev1.2（xlsx 権限管理!H182「※権限：管理者のみ表示」、2026-08-24反映）で、
+    「契約書-部門間閲覧設定」の編集画面での表示・設定が管理者のみに narrow された
+    （以前は管理者・所属長どちらも編集可能だった）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.manager = Employee.objects.create_user(
+            employee_no="1", name="所属長太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.manager, role=PermissionRole.MANAGER)
+        self.staff = Employee.objects.create_user(
+            employee_no="2", name="一般太郎", password="x",
+            department=self.department, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        self.other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+
+    def test_manager_editor_does_not_see_contract_visible_departments_field(self):
+        self.client.login(username="1", password="pass1234")
+        response = self.client.get(f"/permissions/{self.staff.pk}/edit/")
+        self.assertNotContains(response, 'name="contract_visible_departments"')
+        self.assertContains(response, "管理者のみ設定可")
+
+    def test_manager_post_cannot_set_contract_visible_departments(self):
+        """フィールド自体をフォームから除外しているため、POSTで直接値を送っても保存されない
+        （AuthorityEditForm.__init__のshow_contract_visible_departments docstring参照）。
+        """
+        self.client.login(username="1", password="pass1234")
+        get_response = self.client.get(f"/permissions/{self.staff.pk}/edit/")
+        token = get_response.context["token"]
+        self.client.post(
+            f"/permissions/{self.staff.pk}/edit/",
+            {"role": PermissionRole.STAFF, "token": token, "contract_visible_departments": [self.other_department.pk]},
+        )
+        profile = PermissionProfile.objects.get(employee=self.staff)
+        self.assertEqual(list(profile.contract_visible_departments.all()), [])
+
+    def test_admin_editor_sees_contract_visible_departments_field(self):
+        admin = Employee.objects.create_user(
+            employee_no="3", name="管理者太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=admin, role=PermissionRole.ADMIN)
+        self.client.login(username="3", password="pass1234")
+        response = self.client.get(f"/permissions/{self.staff.pk}/edit/")
+        self.assertContains(response, 'name="contract_visible_departments"')
+
+
 class AuthorityCsvExportViewTests(TestCase):
     """screen-authority-list「CSV出力」。一覧に表示されている列をそのままCSV化する。"""
 
@@ -402,3 +476,34 @@ class AuthorityCsvExportViewTests(TestCase):
         entry = AuditLog.objects.get(action="権限管理 CSV出力")
         self.assertEqual(entry.employee_no, "1")
         self.assertTrue(entry.personal_info_flag)
+
+
+class AuthorityListOperationColumnPositionTests(TestCase):
+    """Rev1.2の埋め込み画像モック（権限管理シート、セル文字列では検出できず画像ハッシュ
+    突き合わせで発見）は「操作」（編集ボタン）列が「権限」列の直後（フラグ列群より前）に
+    移動していた。当初はフラグ列群の後、一番右のままだったため、モック通りの列順に
+    修正した（2026-08-24）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_operation_column_appears_right_after_role_column(self):
+        response = self.client.get("/permissions/")
+        content = response.content.decode("utf-8")
+        # sort_key未指定時、sort_arrowは全列共通で"▼"を返す（search_extras.sort_arrow参照）ため、
+        # 「権限」列見出しは"権限▼"で一意に特定できる（ページ上部の見出し「権限管理一覧」等の
+        # 単なる文字列一致と区別するため）。
+        role_idx = content.index("権限▼")
+        operation_idx = content.index(">操作<")
+        grant_idx = content.index(">権限付与<")
+        self.assertLess(role_idx, operation_idx)
+        self.assertLess(operation_idx, grant_idx)

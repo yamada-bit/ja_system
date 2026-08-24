@@ -53,7 +53,7 @@
         <table class="vertical-master-table-authority-info">
           <tr>
             <th colspan="3">文書管理</th>
-            <th colspan="3">契約書</th>
+            <th colspan="4">契約書</th>
             <th colspan="3">電子決裁</th>
           </tr>
           <tr>
@@ -61,16 +61,17 @@
             <th colspan="2">文書</th>
             <th rowspan="2">部門間閲覧設定</th>
             <th>分類</th>
-            <th>契約書</th>
-            <th rowspan="2">書類毎の閲覧設定</th>
+            <th colspan="2">契約書</th>
+            <th rowspan="2">書類毎の<br>閲覧設定</th>
             <th>書類名</th>
             <th>申請書</th>
           </tr>
           <tr>
             <th>表示</th>
-            <th>保存満了日変更</th>
+            <th>保存満了日<br>変更</th>
             <th>ダウンロード</th>
             <th>表示</th>
+            <th>契約書情報<br>変更</th>
             <th>ダウンロード</th>
             <th>作成・変更</th>
             <th>保存期間</th>
@@ -79,8 +80,15 @@
             <td>{{ form.doc_visible_groups }}</td>
             <td>{{ form.doc_retention_edit }}</td>
             <td>{{ form.doc_download }}</td>
-            <td>{{ form.contract_visible_departments }}</td>
+            <td>
+              {% if is_admin_editor %}
+                {{ form.contract_visible_departments }}
+              {% else %}
+                <span style="color:#888;">（管理者のみ設定可）</span>
+              {% endif %}
+            </td>
             <td>{{ form.contract_visible_groups }}</td>
+            <td>{{ form.contract_edit }}</td>
             <td>{{ form.contract_download }}</td>
             <td>{{ form.eapproval_view_setting }}</td>
             <td>{{ form.eapproval_doc_name_manage }}</td>

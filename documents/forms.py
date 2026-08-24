@@ -8,9 +8,15 @@ from core.forms import search_year_choices, year_choices_with_existing
 from core.widgets import InlineRadioSelect, PopupSelectWidget
 from documents.services import used_retention_periods
 from masters.models import Category, DocKbn, Group, RetentionPeriod
+from masters.services import scope_queryset_by_department
 from organizations.models import Department
 from organizations.services import visible_department_ids
-from permissions.services import can_edit_retention, can_select_department, visible_groups
+from permissions.services import (
+    can_edit_retention,
+    can_select_department,
+    department_ids_for_group_scope,
+    visible_groups,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +134,18 @@ class UploadStep2Form(forms.Form):
         if edit_mode and employee is not None and not can_edit_retention(employee):
             self.fields["retention_period"].disabled = True
         allowed_groups = visible_groups(employee, kind="document") if employee else None
-        if allowed_groups is not None:
-            qs = allowed_groups.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
-            self.fields["group"].queryset = qs
-            self.fields["group"].widget.queryset = qs
+        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
+        group_qs = group_qs.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
+        category_qs = Category.objects.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
+        # xlsx 保管!P139,P174(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
+        if employee is not None:
+            dept_ids = department_ids_for_group_scope(employee, kind="document")
+            group_qs = scope_queryset_by_department(group_qs, dept_ids)
+            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        self.fields["group"].queryset = group_qs
+        self.fields["group"].widget.queryset = group_qs
+        self.fields["category"].queryset = category_qs
+        self.fields["category"].widget.queryset = category_qs
         initial_titles = initial_titles or []
         for i in range(file_count):
             initial = initial_titles[i] if i < len(initial_titles) else ""
@@ -272,7 +286,15 @@ class SearchForm(forms.Form):
                 visible_department_ids(employee) if employee.department_id else []
             )
         allowed_groups = visible_groups(employee, kind="document") if employee else None
-        if allowed_groups is not None:
-            qs = allowed_groups.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
-            self.fields["group"].queryset = qs
-            self.fields["group"].widget.queryset = qs
+        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
+        group_qs = group_qs.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
+        category_qs = Category.objects.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
+        # xlsx 検索・閲覧・変更!P96,P152(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
+        if employee is not None:
+            dept_ids = department_ids_for_group_scope(employee, kind="document")
+            group_qs = scope_queryset_by_department(group_qs, dept_ids)
+            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        self.fields["group"].queryset = group_qs
+        self.fields["group"].widget.queryset = group_qs
+        self.fields["category"].queryset = category_qs
+        self.fields["category"].widget.queryset = category_qs

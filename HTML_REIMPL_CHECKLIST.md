@@ -1488,3 +1488,207 @@ Rev1.1改訂で解消済みと判明した（2026-08-19のRev1.1一斉反映作�
   CLAUDE.md「既知の未実装・保留事項」から当該項目を削除した。
 
 この訂正に伴い、[CLAUDE.md](CLAUDE.md)「既知の未実装・保留事項」から本項目を削除した。
+
+## 簡易設計指示書 Rev1.2改訂の反映（2026-08-24）
+
+`HTML/文書管理システム_簡易設計指示書_Rev1_1.xlsx`→`Rev1_2.xlsx`への改訂（印刷枠外の
+"Rev1.2"表記で変更箇所を明示、担当:原田(TNW)、2026-08-21回答反映）。html4からのHTML側の
+改訂は無く、xlsx（指示書）のみの改訂。Rev1.0→Rev1.1の時と同じくopenpyxlでのセル単位比較
+（画像埋め込み表も同じくハッシュ比較で確認、差分無し）で機械的に差分抽出してから反映した。
+
+### 差分の内容（openpyxlセル単位diff、対象7シート）
+- **表紙**：Rev1.2の版数・改訂日（2026-08-21）・担当者記録のみ。
+- **メイン画面**：お知らせ3項目（有効期限切れ／有効期限切れまでXヵ月以内／直近Xヵ月内で削除）が
+  「文書」のみから「文書、契約書」両方対象に拡張。加えて新規の補足事項「"直近Xヵ月"を経過した
+  文書・契約書は自動的に物理削除を行うこと」が追加。
+- **権限管理**：新規権限「契約書-契約書-契約書情報変更」追加（OFFで契約書の保存・編集不可）。
+  既存の「契約書-文書-ダウンロード」表記の誤記修正（「契約書-契約書-ダウンロード」へ）。
+  「契約書-部門間閲覧設定」の編集・一覧検索「部署」プルダウンが管理者のみ表示に narrow。
+- **分類管理・カテゴリー管理**：検索・登録・編集画面に「部署」プルダウン（管理者のみ表示）を
+  新設、一覧の閲覧範囲・ソート・列表示を部署単位でスコープ（管理者=全部署、非管理者=自部署のみ）。
+- **検索・閲覧・変更**：分類/カテゴリー選択ポップアップが「自部署の内容を表示」に変更（部署を
+  複数選択できる権限の場合は選択部署分を選択可）。一括ダウンロード/一括編集ボタンをメイン画面
+  お知らせ「直近Xヵ月内で削除された」リンクからの遷移時は非表示に。削除済み(is_deleted=True)の
+  文書/契約書は削除ボタンを非表示、かつ「本文書/本契約書は削除されています」の表示を追加。
+- **保管**：分類/カテゴリー選択の「自部署の内容を表示」表記変更のみ（検索・閲覧・変更と同旨）。
+
+### ユーザーとの確認事項（実装前に2点確認）
+1. **削除ボタンの扱い**：Rev1.2「削除済みは削除ボタンを非表示」が、2026-08-12にユーザー依頼で
+   追加した「ゴミ箱保管中の削除ボタンで完全削除する」機能と直接競合。ユーザーに確認し
+   **Rev1.2通り非表示にする**（完全削除機能は廃止）を選択。完全削除自体は新設の日次バッチ
+   `core.management.commands.purge_expired_deleted_records`に一本化した。
+2. **お知らせの文書・契約書表示**：DocumentとContractは別モデル・別検索画面のため、1行に
+   統合して両方を検索結果に表示する新機能は今回のスコープ外と判断し、ユーザーに確認。
+   **1行を2件数＋2リンクに分割**（例：「有効期限切れの文書がX件、契約書がY件あります」）を選択。
+
+### 反映した変更ファイル（アプリ別）
+- **permissions**：`models.py`（`contract_edit`フィールド追加、マイグレーション
+  `0003_permissionprofile_contract_edit`）、`forms.py`（`_FLAG_FIELDS`に追加、
+  `AuthorityEditForm.show_contract_visible_departments`で管理者以外はフィールド自体を除外）、
+  `views.py`（`AuthorityListView`/`AuthorityEditView`に管理者判定を追加、CSV出力に列追加）、
+  `services.py`（`can_edit_contract()`追加）、`templates/permissions/authority_list.html`・
+  `authority_edit.html`（列追加・管理者限定表示）。
+- **masters**：`models.py`（`Group`/`Category`に`department`FK追加、null許容。マイグレーション
+  `0004_category_department_group_department`）、`services.py`（新規、
+  `department_scope_ids()`・`scope_queryset_by_department()`）、`forms.py`（4フォームに
+  `department`フィールド追加、`show_department`で管理者以外は除外）、`views.py`（一覧の部署
+  フィルタ・スコープ、登録・編集・削除の部署スコープとアクセス制御、ソート順変更）、
+  `templates/masters/class_*.html`・`cat_*.html`（部署列・フィールド追加）。
+- **permissions.services**：`department_ids_for_group_scope()`追加（documents/contracts側の
+  分類・カテゴリー選択を部署でスコープ、masters側の`department_scope_ids`とは別目的）。
+- **documents/contracts**：`forms.py`（保管・検索フォームのgroup/categoryを部署スコープに）、
+  `services.py`の`can_delete()`（削除済みなら常にFalseへ変更）、`views.py`の`DeleteView`
+  （完全削除の分岐を削除、単純な論理削除のみに）、`api.py`（contracts側`edit_url`/`delete_url`
+  に`can_edit_contract`判定を追加）、`contracts/views.py`（`ContractEditView`・
+  `BulkEditStartView`・`BulkEditView`・`UploadStep1View`・`UploadStep2View`に
+  `can_edit_contract`のサーバー側ゲートを追加）、`templates/documents/search.html`・
+  `contracts/search.html`（notice=recently_deleted時に一括ボタン非表示）。
+- **core**：`notice_services.py`（`NoticeCounts`を文書/契約書別カウントに再構成）、`views.py`
+  （`can_edit_contract`をメイン画面コンテキストに追加）、`api.py`
+  （`BaseOptionListAPIView._group_items`/`_category_items`に部署スコープ追加）、
+  `templates/core/menu.html`（お知らせ2リンク化、保管枠「契約書」ボタンの権限出し分け）、
+  新規`management/commands/purge_expired_deleted_records.py`（削除済みレコードの自動物理削除
+  バッチ、日次実行想定）。
+- `static/js/common.js`（削除済みバナー文言をxlsx表記に統一、完全削除の確認ダイアログ分岐を削除）。
+
+### 設計判断の記録
+- **既存データの部署未設定(NULL)への対応**：`Group`/`Category.department`はnull許容とし、
+  非管理者の閲覧・編集スコープにも`department_id`未設定の行は含める
+  （`masters.services.scope_queryset_by_department`のdocstring参照）。department列自体が
+  今回新規追加のフィールドで、移行前の既存データ・テストデータは部署未設定になりうるため、
+  非管理者から見えなくなる・編集できなくなる退行を避ける意図的な設計。
+- **文書・契約書選択ポップアップの部署スコープは「選択可能な部署全体」で近似**：xlsx
+  「部署を複数選択できる権限の場合は、選択した部署分の分類を選択出来るようにする」は文字通りには
+  検索・保管フォームで現在選択中の部署の値に動的追従する必要があるが、popup-select側の新規JS
+  連動が必要になるため、今回は「その職員が選択可能な部署全体の和集合」を常時候補にする簡略化に
+  留めた（`permissions.services.department_ids_for_group_scope`のdocstring参照）。業務上
+  問題があれば動的追従への拡張を別途検討する。
+- **CategoryRegistView/EditView/DeleteViewはSettingsMenuAccessMixin未使用のまま**：xlsx上
+  カテゴリー管理は全ロール(管理者/所属長/一般)アクセス可のため、既存の設計方針を維持し、
+  部署スコープの追加のみ行った（GroupRegistView等と異なりmenu_key制限は付けていない）。
+
+### テスト
+`masters.tests.DepartmentScopingTests`（6件）・`permissions.tests.
+ContractVisibleDepartmentsAdminOnlyTests`（3件）・`PermissionServicesTests`の`can_edit_contract`
+系（3件）・`core.tests.PurgeExpiredDeletedRecordsCommandTests`（6件）・`core.tests.
+NoticeCountsTests.test_contract_counted_independently_of_document`・`documents/contracts.tests.
+BulkButtonsHiddenForRecentlyDeletedNoticeTests`（各2件）を新規追加。既存テストのうち
+「ゴミ箱保管中の削除ボタンで完全削除」を前提にしていたもの（`documents/contracts.tests.
+DeleteViewAjaxTests`・`DetailAPIViewTests`の一部）は新しい「削除済みは常に拒否・delete_urlは
+Noneになる」仕様に合わせて書き換えた。`python manage.py test`（全401件）・
+`manage.py check`・`makemigrations --check`（本改訂分については差分無し）で確認済み。
+
+### 自動物理削除バッチの起動用batファイル追加漏れ（2026-08-24追記）
+
+ユーザーから「自動物理削除・1週間削除不可の実装状況を確認して」と指摘を受けて再点検した際、
+`core.management.commands.purge_expired_deleted_records`本体は実装済みだったが、
+`extract_pending_pdf_text`/`cleanup_temp_uploads`に既にある起動用batファイル
+（`ja_system/bat/*.bat`、Windowsタスクスケジューラ登録前提）がこのコマンドには無いことに
+気付いた。同じ様式で[bat/purge_expired_deleted_records.bat](../../bat/purge_expired_deleted_records.bat)
+を追加した（物理削除は取り消せないため、5分間隔のOCRバッチより低頻度な日次実行を想定）。
+コマンド自体は自動実行されないため、実際の運用ではこの.batをタスクスケジューラへ登録する
+作業が別途必要（コード側の対応はここまで）。
+
+### 画像モックのみの変更点の見落としと修正（2026-08-24追記）
+
+ユーザーから「Rev1.2 画面変更の記述ありの画面は変更されているか確認して」と指摘を受けて、
+「画面変更」マーカーが付いた11箇所（メイン画面・権限管理[1][2]・分類管理[1]〜[4]・
+カテゴリー管理[1]〜[4]）を再点検した。分類管理[4]・カテゴリー管理[4]（削除画面）は
+セルのテキスト内容自体は無変更（行シフトのみ）と確認したが、**埋め込み画像そのものが
+差し替わっている箇所がありopenpyxlのセル単位diffだけでは検出できない**ことが判明したため、
+画像をMD5ハッシュで突き合わせ直したところ、メイン画面・権限管理・分類管理・カテゴリー管理の
+4シートで実際に画像が差し替わっていた（検索・閲覧・変更・保管の2シートは画像も含めて無変更を
+確認済み）。差し替わった画像を全て抽出・目視確認し、テキスト差分だけでは分からなかった以下の
+相見落としを発見・修正した：
+
+1. **分類管理一覧・カテゴリー管理一覧の列順**：モック画像は「部署」列が一番左（分類/
+   カテゴリーコード列より前）。実装は分類/カテゴリーコード列の直後に配置していたため、
+   `templates/masters/class_list.html`・`cat_list.html`で列順を修正。
+2. **分類管理削除・カテゴリー管理削除画面**：テキストは無変更だったが画像だけ「部署」の
+   表示行が追加されていた。`templates/masters/class_delete.html`・`cat_delete.html`に
+   部署表示行を追加（`GroupDeleteView`/`CategoryDeleteView`は元々`select_related("department")`
+   済みのためビュー側の変更は不要）。
+3. **権限管理一覧の「操作」列位置**：モック画像は「操作」（編集ボタン）列が「権限」列の
+   直後（フラグ列群より前、スクロール無しで見える位置）。実装はフラグ列群の後、一番右の
+   ままだったため、`templates/permissions/authority_list.html`で列順を修正
+   （sticky-col化は行っていない、単純な列順の入れ替えのみ）。
+4. **メイン画面お知らせのレイアウト**：モック画像は文書3項目・契約書3項目を左右に完全に
+   分けたブロック構成。当初はこの画像を確認できていなかったため「1行を2件数+2リンクに
+   分割」する案をユーザーに確認して実装していたが、実際のモックと異なると判明。ユーザーに
+   再確認の上、モック画像通りの左右2列ブロック構成（`<ul>`を2つ横並び、各3項目）に
+   `templates/core/menu.html`を書き換えた。`core.notice_services.NoticeCounts`
+   （文書/契約書別カウント）自体は変更不要だった。
+
+**教訓**：xlsxのセル単位diffは文言変更の検出には有効だが、「セルには埋め込まれた画像で
+実際の画面レイアウトを示し、セルのテキスト自体は変えない」改訂を見逃す。今後同種の
+改訂を受領した際は、対象シートの画像をMD5ハッシュ突き合わせで比較し、差分があれば
+必ず目視確認する（本ファイル冒頭の「画像埋め込み表」に関する過去の教訓と同種）。
+
+新規テスト：`core.tests.MenuNoticeTwoColumnLayoutTests`（2件）・`masters.tests.
+DepartmentScopingTests.test_admin_list_department_column_is_leftmost`・
+`test_delete_confirmation_shows_department`・`permissions.tests.
+AuthorityListOperationColumnPositionTests`（1件）。`python manage.py test`（全406件）・
+`manage.py check`で確認済み。
+
+## 論理削除した文書・契約書の復元機能：不要と最終確定（2026-08-24）
+
+`doc/文書管理システム_残項目_本番リリース手順書.xlsx`②要ユーザー判断事項（xlsx番号なし・
+詳細ポップアップ）／①残項目・未解決事項一覧No.2、および`doc/文書管理システム_実装と原本の
+差異一覧.xlsx`「5_未実装_保留事項」No.5で「復元機能が業務上必要かどうか確認してください」
+として未解決（🔴）のまま残っていた事項について、ユーザーへ確認したところ「復元機能は
+不要ということで対応してください」と回答があり、最終確定した。
+
+- **結論**：論理削除した文書・契約書を元に戻す（復元する）機能は実装しない。UI・ビュー・APIの
+  いずれにも復元手段を追加しない。
+- **現状の挙動（変更なし）**：ゴミ箱保管中（`is_deleted=True`）の文書・契約書は、
+  `settings.NOTICE_DELETED_THRESHOLD_MONTHS`（既定1ヶ月）経過後に
+  `core.management.commands.purge_expired_deleted_records`（日次バッチ想定）で自動的に
+  完全削除される（Rev1.2反映時に実装済み、[HTML_REIMPL_CHECKLIST.md](HTML_REIMPL_CHECKLIST.md)
+  「簡易設計指示書 Rev1.2改訂の反映」参照）。個別レコードを手動で完全削除する手段は
+  2026-08-12に追加後、2026-08-24のRev1.2反映で既に廃止済み（同上参照）。
+- **コード変更は無し**：復元機能はそもそも実装されていなかったため、この確定を受けての
+  追加のコード変更は発生しない（「実装しない」という仕様を確定させただけ）。
+
+### 更新したドキュメント
+- [CLAUDE.md](CLAUDE.md)「既知の未実装・保留事項」：復元機能の要否確認待ちだった記述を、
+  「不要と最終確定」の記述に更新。
+- `doc/文書管理システム_残項目_本番リリース手順書.xlsx`：
+  - ①残項目・未解決事項一覧 No.2（行7）：状態を🔴未解決→🟢解消済みに更新、対応区分「要業務
+    判断」→「要業務判断（解消済み）」、現状・内容/影響・リスク/備考を現状（Rev1.2反映後の
+    自動物理削除バッチのみ）に合わせて更新。
+  - ②要ユーザー判断事項 行10：状態を🔴未解決→🟢解消済みに更新、現状の実装状況・リリースへの
+    影響を更新、回答欄（H列）に「不要。現状のまま（復元機能なし、自動物理削除バッチのみ）で
+    クローズ。（2026-08-24回答）」を記入。
+  - 表紙の改訂履歴ログ（B6）に本解消を追記。①②とも🔴未解決が0件になった。
+- `doc/文書管理システム_実装と原本の差異一覧.xlsx`「5_未実装_保留事項」No.5（行6）：項目名に
+  既存の解消済み項目（No.1・No.4）と同じ「（削除・解消済み：…）」プレフィックスを付与し、
+  状態を🔴未解決→🟢解消済みに更新。
+
+### 補足：xlsx編集時の環境制約
+この2ファイルはopenpyxlでセル値・状態バッジのスタイル（既存の🟢セルからfill/font/border/
+alignmentをコピー）を直接編集する方式で更新した。ステータス列以外の集計（K〜M列・H〜J列の
+`COUNTIF`式）は数式文字列としてそのまま保持されており破損は無いが、本Windows環境には
+xlsxスキルのrecalc.py（LibreOffice経由での再計算）が要求する`AF_UNIX`ソケットが無く
+再計算を実行できなかった。Excelは既定で自動計算のため、次にExcelで開いた時点で
+COUNTIF集計は正しい値に更新される（一時的にキャッシュ値が古いままの状態でファイルが
+保存されている点のみ留意）。
+
+## 権限管理画面：Rev1.2モックの2行見出し列に合わせて修正（2026-08-24）
+
+ユーザーから「権限管理の画面でRev1_2モックで列タイトルが2行になっている列はそれに合わせて
+変更して」と指摘を受けて、埋め込み画像モック（`new_権限管理_row6_2.png`＝一覧画面、
+`new_権限管理_row86_3.png`＝編集画面、上記「画像モックのみの変更点の見落としと修正」で
+抽出済みのもの）をズームして見出し行を1セルずつ突き合わせた。
+
+- **一覧画面**（`templates/permissions/authority_list.html`）：「保存満了日変更」→
+  「保存満了日<br>変更」、「契約書情報変更」→「契約書情報<br>変更」に修正（Rev1.1時点の
+  モックでは「保存満了日変更」は1行だったため、Rev1.2で新たに2行化されたと判明）。
+  「部門間閲覧設定」「書類毎の閲覧設定」は元々2行実装済みで変更不要。
+- **編集画面**（`templates/permissions/authority_edit.html`）：同じく「保存満了日変更」
+  「契約書情報変更」を2行化。加えて「書類毎の閲覧設定」も編集画面モックでは2行
+  （「書類毎の」／「閲覧設定」）だったため`<br>`を追加。「部門間閲覧設定」は編集画面モックでは
+  **1行のまま**（一覧画面とは異なる）だったため変更しなかった——同じ項目名でも画面ごとに
+  折り返しが異なる箇所がある点に注意。
+
+`python manage.py test`（全406件）・`manage.py check`で確認済み（見た目のみの変更のためテスト
+追加は無し）。

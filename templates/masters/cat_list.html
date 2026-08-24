@@ -29,6 +29,12 @@
 
     <form method="get">
       <div class="master-search-panel">
+        {% if is_admin_viewer %}
+        <div>
+          <label style="font-weight:bold; margin-right:5px;">部署</label>
+          {{ form.department }}
+        </div>
+        {% endif %}
         <div>
           <label style="font-weight:bold; margin-right:5px;">カテゴリー名</label>
           {{ form.name }}
@@ -56,6 +62,9 @@
         <table class="data-table">
           <thead>
             <tr>
+              {% if is_admin_viewer %}
+              <th><a class="sort-link" href="{% sort_url request.GET 'department' sort_key sort_dir %}">部署{% sort_arrow 'department' sort_key sort_dir %}</a></th>
+              {% endif %}
               <th><a class="sort-link" href="{% sort_url request.GET 'code' sort_key sort_dir %}">カテゴリーコード{% sort_arrow 'code' sort_key sort_dir %}</a></th>
               <th>カテゴリー名</th>
               <th>書類管理区分</th>
@@ -67,6 +76,9 @@
           <tbody>
             {% for category in page_obj %}
               <tr>
+                {% if is_admin_viewer %}
+                <td style="text-align:left;">{{ category.department|default:"" }}</td>
+                {% endif %}
                 <td style="text-align:right;">{{ category.code }}</td>
                 <td style="text-align:left;">{{ category.name }}</td>
                 <td>{{ category.get_doc_kbn_display }}</td>

@@ -78,6 +78,21 @@ def can_download(employee, *, kind):
     raise ValueError(f"unknown kind: {kind}")
 
 
+def can_edit_contract(employee):
+    """契約書の保存・編集を行ってよいか（xlsx 権限管理!B193-198、Rev1.2で新規追加）。
+    文書側に対応するフラグは無く、文書の保存・編集は従来通り無条件で可能（documents/views.py・
+    contracts/views.pyのBulkEditStartView等docstring参照）。管理者は常に可能。
+
+    OFFの場合の制御は呼び出し側で下記2箇所に分かれる：
+    - 保存不可：メイン画面の保管枠内「契約書」ボタンを非表示（templates/core/menu.html）。
+    - 編集不可：契約書詳細ポップアップの「編集」「削除」ボタンを非表示（contracts/api.py）。
+    """
+    if get_role(employee) == PermissionRole.ADMIN:
+        return True
+    profile = get_profile(employee)
+    return bool(profile and profile.contract_edit)
+
+
 def can_edit_retention(employee):
     """保存済み文書の保存期間（保存満了日の元になる`retention_period`）を編集してよいか
     （xlsx 権限管理!B172-175(Rev1.1)「文書管理-文書-保存満了日変更」。OFFの場合、対象者は
@@ -206,6 +221,29 @@ def can_access_settings_menu_item(employee, key):
     ボタン非表示とアクセス拒否のロール判定がずれないようにする）。
     """
     return get_role(employee) in SETTINGS_MENU_VISIBLE_ROLES[key]
+
+
+def department_ids_for_group_scope(employee, *, kind):
+    """文書・契約書の保存/検索画面で選択できる分類(masters.Group)・カテゴリー(masters.Category)を
+    部署単位で絞り込むための部署ID集合を返す。`None`は無制限（管理者）。
+    （xlsx 検索・閲覧・変更!P96,P152,P470,P507「分類/カテゴリー選択は…自部署の内容を表示」
+    「※部署を複数選択できる権限の場合は、選択した部署分の分類/カテゴリーを選択出来るように
+    すること」、保管!P139,P174,P430,P459も同旨、Rev1.2で追加）。
+
+    kind="document"はcan_select_department(kind="document")と同じく管理者のみ無制限、
+    非管理者は常に自部署のみ（文書側は部署選択自体が管理者のみに単純化されているため）。
+    kind="contract"はcontract_searchable_department_ids()と同じ範囲（自部署＋閲覧部署範囲＋
+    契約書-部門間閲覧設定）を再利用する——これにより「部署を複数選択できる権限の場合」の
+    分類/カテゴリー選択肢が、選択可能な部署全体の和集合として自然に満たされる。ただし
+    検索/保管フォームで実際に選択中の部署の値には動的に追従しない（選択可能な部署全体を
+    常時候補にする簡略化。動的な追従にはpopup-select側の新規JS連動が必要になるため、
+    今回のRev1.2反映では対象外とした）。
+    """
+    if kind == "contract":
+        return contract_searchable_department_ids(employee)
+    if get_role(employee) == PermissionRole.ADMIN:
+        return None
+    return {employee.department_id}
 
 
 def visible_groups(employee, *, kind):

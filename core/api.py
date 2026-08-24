@@ -6,9 +6,16 @@ from django.views import View
 
 from core.forms import search_year_choices
 from masters.models import Category, Group
+from masters.services import scope_queryset_by_department
 from organizations.models import Department
 from organizations.services import visible_department_ids
-from permissions.services import PermissionRole, contract_searchable_department_ids, get_role, visible_groups
+from permissions.services import (
+    PermissionRole,
+    contract_searchable_department_ids,
+    department_ids_for_group_scope,
+    get_role,
+    visible_groups,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +42,7 @@ class BaseOptionListAPIView(LoginRequiredMixin, View):
         elif option_type == "group":
             items = self._group_items(request)
         elif option_type == "category":
-            items = self._category_items()
+            items = self._category_items(request)
         elif option_type == "year":
             items = self._year_items()
         else:
@@ -74,11 +81,19 @@ class BaseOptionListAPIView(LoginRequiredMixin, View):
         allowed = visible_groups(request.user, kind=self.visible_groups_kind)
         if allowed is not None:
             qs = qs.filter(pk__in=allowed.values_list("pk", flat=True))
+        # xlsx 検索・閲覧・変更/保管シート(Rev1.2)「分類選択は…自部署の内容を表示」。
+        # documents/forms.py・contracts/forms.pyのフォーム初期表示と同じ絞り込みを、
+        # ポップアップ本体のAPIでも適用する（フォーム側のqueryset差し替えだけでは
+        # popup-selectがこのAPIを直接叩くため効かない）。
+        dept_ids = department_ids_for_group_scope(request.user, kind=self.visible_groups_kind)
+        qs = scope_queryset_by_department(qs, dept_ids)
         return [{"value": g.pk, "label": g.name} for g in qs.order_by("code")]
 
-    def _category_items(self):
-        qs = Category.objects.filter(doc_kbn=self.doc_kbn, is_deleted=False).order_by("code")
-        return [{"value": c.pk, "label": c.name} for c in qs]
+    def _category_items(self, request):
+        qs = Category.objects.filter(doc_kbn=self.doc_kbn, is_deleted=False)
+        dept_ids = department_ids_for_group_scope(request.user, kind=self.visible_groups_kind)
+        qs = scope_queryset_by_department(qs, dept_ids)
+        return [{"value": c.pk, "label": c.name} for c in qs.order_by("code")]
 
     def _year_items(self):
         # xlsx 検索・閲覧・変更!B137-140「対象年選択は…今年～文書が保存されている最古の年」

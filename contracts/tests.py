@@ -296,6 +296,34 @@ class NoticeFilterTests(TestCase):
         self.assertNotIn(beyond, qs)
 
 
+class BulkButtonsHiddenForRecentlyDeletedNoticeTests(TestCase):
+    """documents.tests.BulkButtonsHiddenForRecentlyDeletedNoticeTestsと同じ理由（Rev1.2、
+    xlsx 検索・閲覧・変更!B659周辺、2026-08-24反映）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_bulk_buttons_hidden_when_notice_is_recently_deleted(self):
+        response = self.client.get("/contracts/search/", {"notice": "recently_deleted"})
+        self.assertNotContains(response, "一括ダウンロード")
+        self.assertNotContains(response, "一括編集")
+        self.assertNotContains(response, "一括選択")
+
+    def test_bulk_buttons_shown_for_normal_search(self):
+        response = self.client.get("/contracts/search/")
+        self.assertContains(response, "一括ダウンロード")
+        self.assertContains(response, "一括編集")
+        self.assertContains(response, "一括選択")
+
+
 class DeleteViewAjaxTests(TestCase):
     """documents.tests.DeleteViewAjaxTestsと同じ理由（原本フィデリティ監査で発見・修正）。"""
 
@@ -338,11 +366,13 @@ class DeleteViewAjaxTests(TestCase):
         self.assertTrue(Contract.objects.filter(pk=self.contract.pk).exists())
         self.assertTrue(self.contract.file.storage.exists(self.contract.file.name))
 
-    def test_deleting_already_trashed_contract_permanently_removes_it_and_related_files(self):
-        """documents.tests.DeleteViewAjaxTests.test_deleting_already_trashed_document_permanently_removes_it
-        と同じ理由。契約書は関連書類（RelatedFile）のファイル実体も一緒に削除されることを
-        確認する（本体はon_delete=CASCADEでDB行だけは自動的に消えるが、ファイル実体は
-        明示的に消さないと孤児として残るため）。"""
+    def test_deleting_already_trashed_contract_is_rejected(self):
+        """documents.tests.DeleteViewAjaxTests.test_deleting_already_trashed_document_is_rejected
+        と同じ理由。Rev1.2（xlsx 検索・閲覧・変更!B659,B663「削除されている契約書は、ボタンを
+        非表示とする」）で、2026-08-12にユーザー依頼で追加した「ゴミ箱保管中の契約書を削除
+        ボタンで完全削除する」機能は2026-08-24に廃止された（contracts.services.can_delete
+        docstring参照）。既に削除済みの契約書への削除操作はサーバー側でも拒否し、本体・関連書類
+        （RelatedFile）ともレコード・ファイルが残ることを確認する。"""
         from contracts.models import Contract, RelatedFile
 
         related = RelatedFile.objects.create(
@@ -357,11 +387,12 @@ class DeleteViewAjaxTests(TestCase):
         response = self.client.post(
             f"/contracts/{self.contract.pk}/delete/", HTTP_X_REQUESTED_WITH="XMLHttpRequest"
         )
-        self.assertEqual(response.json(), {"success": True, "message": "契約書を完全に削除しました。"})
-        self.assertFalse(Contract.objects.filter(pk=self.contract.pk).exists())
-        self.assertFalse(RelatedFile.objects.filter(pk=related.pk).exists())
-        self.assertFalse(self.contract.file.storage.exists(contract_file_name))
-        self.assertFalse(self.contract.file.storage.exists(related_file_name))
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["success"])
+        self.assertTrue(Contract.objects.filter(pk=self.contract.pk).exists())
+        self.assertTrue(RelatedFile.objects.filter(pk=related.pk).exists())
+        self.assertTrue(self.contract.file.storage.exists(contract_file_name))
+        self.assertTrue(self.contract.file.storage.exists(related_file_name))
 
     def test_non_ajax_request_still_redirects(self):
         response = self.client.post(f"/contracts/{self.contract.pk}/delete/")
@@ -403,6 +434,12 @@ class RelatedFilesMultiUploadTests(TestCase):
         self.employee = Employee.objects.create_user(
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
         )
         self.client.login(username="1", password="pass1234")
         self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
@@ -568,6 +605,12 @@ class BulkEditViewTests(TestCase):
         self.category = Category.objects.create(
             code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
         )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
         self.client.login(username="1", password="pass1234")
 
     def _create_contract(self, title):
@@ -706,6 +749,14 @@ class ImagePreviewTests(TestCase):
         self.category = Category.objects.create(
             code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
         )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集画面自体が403に
+        # なるため（permissions.services.can_edit_contract）付与しておく。このクラスが検証したい
+        # のはあくまで`contract_download`（プレビュー・ダウンロード）権限の方なので、
+        # 各テストではプロファイルを新規作成せずcontract_downloadだけを更新する
+        # （OneToOneのため二重作成はIntegrityErrorになる）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
         self.client.login(username="1", password="pass1234")
 
     def _upload_pending(self, filename, content, content_type):
@@ -714,41 +765,37 @@ class ImagePreviewTests(TestCase):
             {"files": [SimpleUploadedFile(filename, content, content_type=content_type)]},
         )
 
+    def _grant_contract_download(self):
+        self.employee.permission_profile.contract_download = True
+        self.employee.permission_profile.save(update_fields=["contract_download"])
+
     def test_pending_preview_without_permission_denied(self):
         self._upload_pending("a.png", b"PNGDATA", "image/png")
         response = self.client.get("/contracts/upload/step2/preview/0/")
         self.assertEqual(response.status_code, 403)
 
     def test_pending_preview_returns_uploaded_file_bytes(self):
-        PermissionProfile.objects.create(
-            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
-        )
+        self._grant_contract_download()
         self._upload_pending("a.png", b"PNGDATA", "image/png")
         response = self.client.get("/contracts/upload/step2/preview/0/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(b"".join(response.streaming_content), b"PNGDATA")
 
     def test_pending_preview_out_of_range_index_returns_404(self):
-        PermissionProfile.objects.create(
-            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
-        )
+        self._grant_contract_download()
         self._upload_pending("a.png", b"PNGDATA", "image/png")
         response = self.client.get("/contracts/upload/step2/preview/5/")
         self.assertEqual(response.status_code, 404)
 
     def test_storage2_context_flags_image_and_builds_preview_url(self):
-        PermissionProfile.objects.create(
-            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
-        )
+        self._grant_contract_download()
         self._upload_pending("a.png", b"PNGDATA", "image/png")
         response = self.client.get("/contracts/upload/step2/")
         self.assertEqual(response.context["preview_kinds"], ["image"])
         self.assertEqual(response.context["preview_urls"], ["/contracts/upload/step2/preview/0/"])
 
     def test_storage2_context_flags_pdf_and_builds_preview_url(self):
-        PermissionProfile.objects.create(
-            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
-        )
+        self._grant_contract_download()
         self._upload_pending("a.pdf", b"%PDF-1.4", "application/pdf")
         response = self.client.get("/contracts/upload/step2/")
         self.assertEqual(response.context["preview_kinds"], ["pdf"])
@@ -770,9 +817,7 @@ class ImagePreviewTests(TestCase):
         self.assertFalse(response.context["can_download"])
         self.assertContains(response, "契約書-ダウンロード」権限が必要です")
 
-        PermissionProfile.objects.create(
-            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
-        )
+        self._grant_contract_download()
         response = self.client.get(f"/contracts/{contract.pk}/edit/")
         self.assertEqual(response.context["preview_kind"], "image")
         self.assertTrue(response.context["can_download"])
@@ -793,9 +838,7 @@ class ImagePreviewTests(TestCase):
         self.assertFalse(response.context["can_download"])
         self.assertContains(response, "契約書-ダウンロード」権限が必要です")
 
-        PermissionProfile.objects.create(
-            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
-        )
+        self._grant_contract_download()
         response = self.client.get(f"/contracts/{contract.pk}/edit/")
         self.assertEqual(response.context["preview_kind"], "pdf")
         self.assertTrue(response.context["can_download"])
@@ -817,6 +860,12 @@ class ContractEditScreenAmountDisplayTests(TestCase):
         self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
         self.category = Category.objects.create(
             code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
         )
         self.client.login(username="1", password="pass1234")
 
@@ -857,6 +906,12 @@ class EditScreenYearFieldTests(TestCase):
         self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
         self.category = Category.objects.create(
             code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
         )
         self.client.login(username="1", password="pass1234")
         self.old_year = datetime.date.today().year - 10
@@ -1000,20 +1055,27 @@ class DetailAPIViewTests(TestCase):
         self.assertEqual(data["related_files"], ["付属資料.pdf"])
         self.assertNotIn(related.file.name, data["related_files"])
 
-    def test_deleted_contract_yields_null_edit_url_but_keeps_delete_url(self):
-        """documents.tests.DetailAPIViewTests.test_deleted_document_yields_null_edit_url_but_keeps_delete_url
+    def test_deleted_contract_yields_null_edit_and_delete_urls(self):
+        """documents.tests.DetailAPIViewTests.test_deleted_document_yields_null_edit_and_delete_urls
         と同じ理由（ユーザー報告2026-08-12：削除済み契約書一覧の詳細ポップアップで「変更」が
-        404になっていた。delete_urlは別のユーザー依頼でゴミ箱保管中からの完全削除に対応した
-        ためNoneにならない）。"""
+        404になっていた）。delete_urlもRev1.2（xlsx 検索・閲覧・変更!B659,B663「削除されている
+        契約書は、ボタンを非表示とする」）でNoneになるよう変更した
+        （contracts.services.can_delete docstring参照。以前は「ゴミ箱保管中の削除ボタンで
+        完全削除」機能のため常に返していたが、その機能は廃止した）。"""
         self.contract.is_deleted = True
         self.contract.save(update_fields=["is_deleted"])
 
         response = self.client.get(f"/contracts/api/{self.contract.pk}/")
         data = response.json()
         self.assertIsNone(data["edit_url"])
-        self.assertEqual(data["delete_url"], f"/contracts/{self.contract.pk}/delete/")
+        self.assertIsNone(data["delete_url"])
 
     def test_non_deleted_contract_still_has_edit_and_delete_urls(self):
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がONでないとedit_urlがNoneになる
+        # ため（permissions.services.can_edit_contract）付与しておく。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
         response = self.client.get(f"/contracts/api/{self.contract.pk}/")
         data = response.json()
         self.assertEqual(data["edit_url"], f"/contracts/{self.contract.pk}/edit/")
@@ -1031,8 +1093,9 @@ class DetailAPIViewTests(TestCase):
         data = response.json()
         self.assertIsNone(data["delete_url"])
 
-    def test_deleted_contract_past_delete_window_still_has_delete_url(self):
-        """ゴミ箱保管中（is_deleted=True）は1週間制限と無関係に常に削除可能。"""
+    def test_deleted_contract_past_delete_window_yields_null_delete_url(self):
+        """ゴミ箱保管中（is_deleted=True）は1週間制限を待つまでもなく、Rev1.2で削除不可
+        （delete_url None）になる（contracts.services.can_delete docstring参照）。"""
         from contracts.models import Contract
 
         Contract.objects.filter(pk=self.contract.pk).update(
@@ -1040,7 +1103,7 @@ class DetailAPIViewTests(TestCase):
         )
         response = self.client.get(f"/contracts/api/{self.contract.pk}/")
         data = response.json()
-        self.assertEqual(data["delete_url"], f"/contracts/{self.contract.pk}/delete/")
+        self.assertIsNone(data["delete_url"])
 
 
 class DeleteViewWindowTests(TestCase):
@@ -1097,6 +1160,12 @@ class UploadFileIOErrorTests(TestCase):
         self.employee = Employee.objects.create_user(
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
         )
         self.client.login(username="1", password="pass1234")
 
@@ -1172,6 +1241,12 @@ class UploadStep2ImmediateExtractionTests(TestCase):
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
         self.client.login(username="1", password="pass1234")
         self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
         self.category = Category.objects.create(
@@ -1231,6 +1306,12 @@ class ContractEditViewFileHandlingTests(TestCase):
         self.employee = Employee.objects.create_user(
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
         )
         self.client.login(username="1", password="pass1234")
         self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
@@ -1323,6 +1404,12 @@ class ChunkUploadAPITests(TestCase):
         self.employee = Employee.objects.create_user(
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        # Rev1.2で追加された「契約書-契約書-契約書情報変更」がOFFだと保管・編集操作が
+        # 403になるため（permissions.services.can_edit_contract）、この一般的なテスト用職員には
+        # 付与しておく（権限そのものを検証する専用テストは別途 contract_edit を明示的に扱う）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
         )
         self.client.login(username="1", password="pass1234")
 

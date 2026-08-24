@@ -123,12 +123,10 @@ class SearchYearChoicesTests(TestCase):
         self.assertEqual(search_year_choices("document"), [(current, f"{current} 年")])
 
 
-class MenuButtonVisibilityTests(TestCase):
-    """screen-menuは原本HTML同様、メニューボタン（検索・閲覧・変更/保管の文書・契約書）を
-    部署設定に関わらず常に表示する静的な画面である（organizations.MenuItemSettingは
-    screen-other-main-editの設定値保持のみに使い、メイン画面の表示制御には連動させない。
-    一度連動させる変更を入れたが、未設定部署でボタンが全て消え原本の見た目から大きく逸脱したため
-    撤回した、2026-08-19ユーザー指摘）。
+class MenuNoticeTwoColumnLayoutTests(TestCase):
+    """Rev1.2の埋め込み画像モック（メイン画面シート、セル文字列では検出できず画像ハッシュ突き合わせで
+    発見）は、文書3項目・契約書3項目を左右に分けたブロック構成だった。テキストのみの1行2件数案は
+    実際のモックと異なると判明したため、モック通りの2列構成に修正した（2026-08-24）。
     """
 
     def setUp(self):
@@ -141,13 +139,75 @@ class MenuButtonVisibilityTests(TestCase):
         )
         self.client.login(username="1", password="pass1234")
 
-    def test_menu_always_shows_all_search_and_storage_buttons(self):
+    def test_document_and_contract_notices_rendered_as_separate_lists(self):
+        response = self.client.get("/")
+        content = response.content.decode("utf-8")
+        # 文書側の3項目
+        self.assertIn("有効期限切れの文書が", content)
+        self.assertIn("有効期限切れまで", content)
+        self.assertIn("ヶ月以内の文書が", content)
+        self.assertIn("ヶ月内で削除された文書が", content)
+        # 契約書側の3項目（文書と合体した1行ではなく独立した文言であること）
+        self.assertIn("有効期限切れの契約書が", content)
+        self.assertIn("ヶ月以内の契約書が", content)
+        self.assertIn("ヶ月内で削除された契約書が", content)
+        # 1行に「文書がX件、契約書がY件」と合体させる旧案の文言が残っていないこと
+        self.assertNotIn("、契約書が", content)
+
+    def test_notice_area_contains_two_ul_blocks(self):
+        response = self.client.get("/")
+        content = response.content.decode("utf-8")
+        notice_area = content.split('class="notice-area"')[1]
+        self.assertEqual(notice_area.count("<ul"), 2)
+
+
+class MenuButtonVisibilityTests(TestCase):
+    """screen-menuは原本HTML同様、メニューボタン（検索・閲覧・変更/保管の文書・契約書）を
+    部署設定に関わらず常に表示する静的な画面である（organizations.MenuItemSettingは
+    screen-other-main-editの設定値保持のみに使い、メイン画面の表示制御には連動させない。
+    一度連動させる変更を入れたが、未設定部署でボタンが全て消え原本の見た目から大きく逸脱したため
+    撤回した、2026-08-19ユーザー指摘）。
+
+    ただしRev1.2で「保管枠内『契約書』ボタン」のみ、権限管理「契約書-契約書-契約書情報変更」
+    （permissions.services.can_edit_contract）による表示制御が別途追加された
+    （xlsx 権限管理!B196-197「保存不可…メイン画面の保管枠内「契約書」ボタンを非表示にする」）。
+    これは部署設定とは無関係の職員単位の権限制御のため、上記の「部署設定には連動させない」
+    方針とは矛盾しない。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_menu_always_shows_search_and_document_storage_buttons(self):
         from django.urls import reverse
 
         response = self.client.get("/")
         self.assertContains(response, f"window.location.href='{reverse('documents:search')}'")
         self.assertContains(response, f"window.location.href='{reverse('contracts:search')}'")
         self.assertContains(response, f"window.location.href='{reverse('documents:upload_step1')}'")
+
+    def test_contract_storage_button_hidden_without_contract_edit_permission(self):
+        """Rev1.2で追加。契約書-契約書-契約書情報変更がOFF（PermissionProfile未設定含む）の
+        職員には保管枠内「契約書」ボタンを表示しない。"""
+        from django.urls import reverse
+
+        response = self.client.get("/")
+        self.assertNotContains(response, f"window.location.href='{reverse('contracts:upload_step1')}'")
+
+    def test_contract_storage_button_shown_with_contract_edit_permission(self):
+        from django.urls import reverse
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
+        response = self.client.get("/")
         self.assertContains(response, f"window.location.href='{reverse('contracts:upload_step1')}'")
 
 
@@ -228,24 +288,36 @@ class NoticeCountsTests(TestCase):
         doc.save()
         return doc
 
+    def _create_contract(self, expiry_date, is_deleted=False, deleted_at=None):
+        from contracts.models import Contract
+
+        contract = Contract(
+            title="テスト契約書", department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.employee,
+            expiry_date=expiry_date, is_deleted=is_deleted, deleted_at=deleted_at,
+        )
+        contract.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        contract.save()
+        return contract
+
     def test_expired_document_counted(self):
         today = timezone.localdate()
         self._create_document(expiry_date=today - datetime.timedelta(days=1))
         counts = get_notice_counts(self.employee)
-        self.assertEqual(counts.expired, 1)
-        self.assertEqual(counts.expiring_soon, 0)
+        self.assertEqual(counts.expired_documents, 1)
+        self.assertEqual(counts.expiring_soon_documents, 0)
 
     def test_expiring_soon_within_threshold_counted(self):
         today = timezone.localdate()
         self._create_document(expiry_date=today + datetime.timedelta(days=5))
         counts = get_notice_counts(self.employee)
-        self.assertEqual(counts.expiring_soon, 1)
+        self.assertEqual(counts.expiring_soon_documents, 1)
 
     def test_expiring_far_in_future_not_counted(self):
         today = timezone.localdate()
         self._create_document(expiry_date=today + datetime.timedelta(days=400))
         counts = get_notice_counts(self.employee)
-        self.assertEqual(counts.expiring_soon, 0)
+        self.assertEqual(counts.expiring_soon_documents, 0)
 
     def test_recently_deleted_counted(self):
         now = timezone.now()
@@ -255,7 +327,7 @@ class NoticeCountsTests(TestCase):
             deleted_at=now,
         )
         counts = get_notice_counts(self.employee)
-        self.assertEqual(counts.recently_deleted, 1)
+        self.assertEqual(counts.recently_deleted_documents, 1)
 
     def test_other_department_document_not_counted_for_staff(self):
         """一般職員（`can_select_department`がFalse）は自部署以外の文書がカウントされない
@@ -268,7 +340,7 @@ class NoticeCountsTests(TestCase):
         other_doc.department = other_department
         other_doc.save()
         counts = get_notice_counts(self.employee)
-        self.assertEqual(counts.expired, 0)
+        self.assertEqual(counts.expired_documents, 0)
 
     @override_settings(NOTICE_EXPIRING_THRESHOLD_MONTHS=6, NOTICE_DELETED_THRESHOLD_MONTHS=1)
     def test_expiring_and_deleted_thresholds_are_independent(self):
@@ -287,8 +359,130 @@ class NoticeCountsTests(TestCase):
             deleted_at=timezone.now() - datetime.timedelta(days=90),
         )
         counts = get_notice_counts(self.employee)
-        self.assertEqual(counts.expiring_soon, 1)
-        self.assertEqual(counts.recently_deleted, 0)
+        self.assertEqual(counts.expiring_soon_documents, 1)
+        self.assertEqual(counts.recently_deleted_documents, 0)
+
+    def test_contract_counted_independently_of_document(self):
+        """Rev1.2（xlsx メイン画面!C42-46「文書、契約書」）で契約書も集計対象になったことを確認する。"""
+        today = timezone.localdate()
+        self._create_document(expiry_date=today - datetime.timedelta(days=1))
+        self._create_contract(expiry_date=today - datetime.timedelta(days=1))
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expired_documents, 1)
+        self.assertEqual(counts.expired_contracts, 1)
+
+
+@override_settings(NOTICE_DELETED_THRESHOLD_MONTHS=1)
+class PurgeExpiredDeletedRecordsCommandTests(TestCase):
+    """core.management.commands.purge_expired_deleted_records（Rev1.2、2026-08-24追加）。
+    xlsx メイン画面!B50-51「"直近Xヵ月"で設定されているXヵ月が既に経過している文書、契約書は
+    自動的に物理削除を行うこと」に対応する日次バッチ。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+
+    def _create_document(self, deleted_at):
+        from documents.models import Document
+
+        doc = Document(
+            title="テスト", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=timezone.localdate() + datetime.timedelta(days=100),
+            is_deleted=True, deleted_at=deleted_at,
+        )
+        doc.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        doc.save()
+        return doc
+
+    def _create_contract(self, deleted_at):
+        from contracts.models import Contract
+
+        contract_group = Group.objects.create(code="C1", name="契約分類", doc_kbn=DocKbn.CONTRACT)
+        contract_category = Category.objects.create(
+            code="C01", name="契約カテゴリー", group=contract_group, doc_kbn=DocKbn.CONTRACT
+        )
+        contract = Contract(
+            title="テスト契約書", department=self.department, group=contract_group, category=contract_category,
+            year=2026, uploader=self.employee,
+            expiry_date=timezone.localdate() + datetime.timedelta(days=100),
+            is_deleted=True, deleted_at=deleted_at,
+        )
+        contract.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        contract.save()
+        return contract
+
+    def test_document_past_threshold_is_purged(self):
+        from documents.models import Document
+
+        old_doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        file_name = old_doc.file.name
+
+        call_command("purge_expired_deleted_records")
+
+        self.assertFalse(Document.objects.filter(pk=old_doc.pk).exists())
+        self.assertFalse(old_doc.file.storage.exists(file_name))
+
+    def test_document_within_threshold_survives(self):
+        from documents.models import Document
+
+        recent_doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=5))
+
+        call_command("purge_expired_deleted_records")
+
+        self.assertTrue(Document.objects.filter(pk=recent_doc.pk).exists())
+
+    def test_non_deleted_document_never_purged(self):
+        """is_deleted=Falseの文書は対象外（deleted_atも通常Noneのため対象になりようがないが、
+        念のためqueryset自体の条件を確認する）。"""
+        from documents.models import Document
+
+        old_doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        old_doc.is_deleted = False
+        old_doc.save(update_fields=["is_deleted"])
+
+        call_command("purge_expired_deleted_records")
+
+        self.assertTrue(Document.objects.filter(pk=old_doc.pk).exists())
+
+    def test_contract_past_threshold_is_purged(self):
+        from contracts.models import Contract
+
+        old_contract = self._create_contract(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        file_name = old_contract.file.name
+
+        call_command("purge_expired_deleted_records")
+
+        self.assertFalse(Contract.objects.filter(pk=old_contract.pk).exists())
+        self.assertFalse(old_contract.file.storage.exists(file_name))
+
+    def test_contract_related_file_purged_with_contract(self):
+        from contracts.models import Contract, RelatedFile
+
+        old_contract = self._create_contract(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        related = RelatedFile.objects.create(
+            contract=old_contract, file=ContentFile(b"REL", name="付属資料.pdf"), display_order=0
+        )
+        related_file_name = related.file.name
+
+        call_command("purge_expired_deleted_records")
+
+        self.assertFalse(Contract.objects.filter(pk=old_contract.pk).exists())
+        self.assertFalse(RelatedFile.objects.filter(pk=related.pk).exists())
+        self.assertFalse(old_contract.file.storage.exists(related_file_name))
 
 
 class IsExpiringSoonTests(TestCase):

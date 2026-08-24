@@ -19,11 +19,26 @@ class Group(models.Model):
     permissions.PermissionProfileの分類表示範囲制御（doc_visible_groups等）からも参照される。
     削除は論理削除（xlsx 分類管理!B204「分類マスタから論理削除とする」、保存済みデータに
     影響しないこと）。一覧の削除ボタンは紐づく文書件数が0件のときのみ有効（xlsx 分類管理!B68）。
+
+    `department`はRev1.2（2026-08-24反映）で追加。分類マスタが部署単位で管理されるようになり、
+    一覧・登録・編集は管理者は全部署、それ以外は自部署のみ（xlsx 分類管理!B73-75）。登録・編集
+    画面の「部署」プルダウンは管理者のみ表示され、非管理者が作成した分類は自動的に自部署が
+    設定される（masters/views.py参照）。移行前に作成された既存データは部署未設定
+    （null）のままになりうるため、参照整合性を壊さないようnull許容にしている
+    （on_delete=PROTECTはCategory.groupと同じ方針）。
     """
 
     code = models.CharField("分類コード", max_length=20)
     name = models.CharField("分類名", max_length=100)
     doc_kbn = models.CharField("書類管理区分", max_length=10, choices=DocKbn.choices)
+    department = models.ForeignKey(
+        "organizations.Department",
+        verbose_name="部署",
+        on_delete=models.PROTECT,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
     is_deleted = models.BooleanField("削除済み", default=False)
 
     created_at = models.DateTimeField("作成日時", auto_now_add=True)
@@ -54,6 +69,15 @@ class Category(models.Model):
         "masters.Group", verbose_name="分類", on_delete=models.PROTECT, related_name="categories"
     )
     doc_kbn = models.CharField("書類管理区分", max_length=10, choices=DocKbn.choices)
+    # Group.departmentと同じ理由・方針（Rev1.2で追加、null許容）。
+    department = models.ForeignKey(
+        "organizations.Department",
+        verbose_name="部署",
+        on_delete=models.PROTECT,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
     is_deleted = models.BooleanField("削除済み", default=False)
 
     created_at = models.DateTimeField("作成日時", auto_now_add=True)

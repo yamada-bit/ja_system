@@ -16,7 +16,7 @@ from core.file_type_services import get_preview_kind
 from core.notice_services import is_expiring_soon
 from core.upload_views import BaseChunkUploadAPIView
 from masters.models import DocKbn
-from permissions.services import can_download, contract_searchable_department_ids
+from permissions.services import can_download, can_edit_contract, contract_searchable_department_ids
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ class DetailAPIView(LoginRequiredMixin, View):
 
         is_expired = contract.expiry_date < timezone.localdate()
         can_dl = can_download(request.user, kind="contract")
+        can_edit = can_edit_contract(request.user)
         soon = is_expiring_soon(contract.expiry_date)
         return JsonResponse(
             {
@@ -82,16 +83,26 @@ class DetailAPIView(LoginRequiredMixin, View):
                 "is_deleted": contract.is_deleted,
                 "can_download": can_dl,
                 # documents.api.DetailAPIViewと同じ理由（削除済み契約書に対してedit_urlを渡すと
-                # 変更が404になる）。
-                "edit_url": reverse("contracts:edit", args=[contract.pk]) if not contract.is_deleted else None,
+                # 変更が404になる）に加え、xlsx 権限管理!B193-198(Rev1.2)「契約書-契約書-契約書情報
+                # 変更」がOFFの場合は編集不可（編集画面自体もContracts.views.ContractEditViewで
+                # 同じ権限チェックをサーバー側で行う）。
+                "edit_url": (
+                    reverse("contracts:edit", args=[contract.pk])
+                    if not contract.is_deleted and can_edit
+                    else None
+                ),
                 "download_url": reverse("contracts:download", args=[contract.pk]) if can_dl else None,
                 # documents.api.DetailAPIViewと同じ理由（詳細ポップアップの実プレビュー表示用、
                 # 2026-08-13ユーザー報告対応でpreview_kindは権限に関わらず返すよう変更）。
                 "preview_url": reverse("contracts:preview", args=[contract.pk]) if can_dl else None,
                 "preview_kind": get_preview_kind(contract.display_name),
-                # documents.api.DetailAPIViewと同じ理由（ゴミ箱保管中の契約書は削除ボタンで
-                # 完全削除できるようにしたため、is_deleted=Trueの間は常に返す。is_deleted=False
-                # の場合はxlsx「初回登録から1週間以上経過で削除不可・ボタン非表示」に従いNoneにする）。
-                "delete_url": reverse("contracts:delete", args=[contract.pk]) if can_delete(contract) else None,
+                # xlsx 検索・閲覧・変更!B331,B337,B659,B663(Rev1.2)「削除済み、または初回登録から
+                # 1週間以上経過しているものは削除不可・ボタン非表示」に加え、B198「契約書-契約書-
+                # 契約書情報変更」がOFFの場合も削除不可にする（xlsx B198「編集不可…検索・閲覧画面の
+                # 検索結果一覧の明細ダブルクリック後に開く契約書詳細画面の「編集」「削除」ボタンを
+                # 非表示にする」）。
+                "delete_url": (
+                    reverse("contracts:delete", args=[contract.pk]) if can_delete(contract) and can_edit else None
+                ),
             }
         )

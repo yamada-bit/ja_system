@@ -4,6 +4,7 @@ import unicodedata
 from django import forms
 
 from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
+from organizations.models import Department
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +15,19 @@ class GroupSearchForm(forms.Form):
     """screen-class-list検索パネル（xlsx 分類管理!B35-36(Rev1.1)「分類名はカテゴリー名の部分一致
     検索とする(スペース区切りの複合検索は考慮しない)」。旧仕様は分類名がプルダウン選択だったが、
     Rev1.1でCategorySearchForm.nameと同じテキスト部分一致検索に変更された）。
+
+    `department`はRev1.2で追加（xlsx 分類管理!B35「「部署」プルダウン ※権限：管理者のみ表示」）。
+    フィールド自体は常に定義するが、テンプレート側で管理者以外には表示しない
+    （masters/views.py GroupListView.get, templates/masters/class_list.html参照）。
     """
 
+    department = forms.ModelChoiceField(
+        label="部署",
+        queryset=Department.objects.order_by("branch_code", "section_code"),
+        required=False,
+        empty_label="(全て)",
+        widget=forms.Select(attrs={"style": "padding:4px; width:150px;"}),
+    )
     name = forms.CharField(
         label="分類名",
         required=False,
@@ -30,19 +42,37 @@ class GroupSearchForm(forms.Form):
 
 
 class GroupForm(forms.ModelForm):
-    """screen-class-regist/edit。xlsx B119/B161「分類コードの重複登録・重複更新は不可」に対応。"""
+    """screen-class-regist/edit。xlsx B119/B161「分類コードの重複登録・重複更新は不可」に対応。
+
+    `department`はRev1.2で追加（xlsx 分類管理!B116「「部署」プルダウン ※権限：管理者のみ表示」）。
+    `show_department=False`の場合はフィールド自体をself.fieldsから外し、呼び出し側
+    （masters/views.py GroupRegistView/GroupEditView）が非管理者操作時に
+    `form.instance.department = employee.department`を明示的にセットしてから保存する
+    （permissions.forms.AuthorityEditFormのcontract_visible_departments扱いと同じパターン）。
+    """
 
     # 原本index.html:2733-2759「書類管理区分」selectは空選択肢が無く、常に先頭の「文書管理」が
     # 暗黙に選択された状態（未選択で送信されることが無い）。Django ModelFormの既定では必須の
     # choiceフィールドにも自動でBLANK_CHOICE_DASH（---------）が追加され、原本に無い選択肢が
     # 増える上に未選択のまま送信すると必須エラーになってしまうため、choicesを明示して排除する。
     doc_kbn = forms.ChoiceField(label="書類管理区分", choices=DocKbn.choices)
+    department = forms.ModelChoiceField(
+        label="部署",
+        queryset=Department.objects.order_by("branch_code", "section_code"),
+        required=True,
+        widget=forms.Select(attrs={"style": "padding:4px; width:150px;"}),
+    )
 
     class Meta:
         model = Group
-        fields = ["code", "name", "doc_kbn"]
-        labels = {"code": "分類コード", "name": "分類名", "doc_kbn": "書類管理区分"}
+        fields = ["code", "name", "doc_kbn", "department"]
+        labels = {"code": "分類コード", "name": "分類名", "doc_kbn": "書類管理区分", "department": "部署"}
         widgets = {"code": forms.TextInput(attrs={"style": "width:100px;"})}
+
+    def __init__(self, *args, show_department=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not show_department:
+            del self.fields["department"]
 
     def clean_code(self):
         code = self.cleaned_data["code"]
@@ -59,8 +89,19 @@ class GroupForm(forms.ModelForm):
 
 
 class CategorySearchForm(forms.Form):
-    """screen-cat-list検索パネル（xlsx B36「カテゴリー名の部分一致検索」）。"""
+    """screen-cat-list検索パネル（xlsx B36「カテゴリー名の部分一致検索」）。
 
+    `department`はRev1.2で追加（xlsx カテゴリー管理!B35「「部署」プルダウン ※権限：管理者のみ
+    表示」）。GroupSearchForm.department参照。
+    """
+
+    department = forms.ModelChoiceField(
+        label="部署",
+        queryset=Department.objects.order_by("branch_code", "section_code"),
+        required=False,
+        empty_label="(全て)",
+        widget=forms.Select(attrs={"style": "padding:4px; width:150px;"}),
+    )
     name = forms.CharField(
         label="カテゴリー名",
         required=False,
@@ -84,26 +125,40 @@ class CategorySearchForm(forms.Form):
 class CategoryForm(forms.ModelForm):
     """screen-cat-regist/edit（xlsx B111「分類管理」メニューで設定した分類名リストを表示、
     B119/B155「カテゴリーコードの重複登録・重複更新は不可」）。
+
+    `department`はRev1.2で追加（xlsx カテゴリー管理!B109「「部署」プルダウン ※権限：管理者のみ
+    表示」）。GroupForm.department・show_departmentと同じパターン。
     """
 
     # GroupFormのdoc_kbnと同じ理由（原本index.html:2890-2923に空選択肢が無い）。
     doc_kbn = forms.ChoiceField(label="書類管理区分", choices=DocKbn.choices)
+    department = forms.ModelChoiceField(
+        label="部署",
+        queryset=Department.objects.order_by("branch_code", "section_code"),
+        required=True,
+        widget=forms.Select(attrs={"style": "padding:4px; width:150px;"}),
+    )
 
     class Meta:
         model = Category
-        fields = ["code", "name", "group", "doc_kbn"]
-        labels = {"code": "カテゴリーコード", "name": "カテゴリー名", "group": "分類", "doc_kbn": "書類管理区分"}
+        fields = ["code", "name", "group", "doc_kbn", "department"]
+        labels = {
+            "code": "カテゴリーコード", "name": "カテゴリー名", "group": "分類",
+            "doc_kbn": "書類管理区分", "department": "部署",
+        }
         widgets = {
             "code": forms.TextInput(attrs={"style": "width:100px;"}),
             "group": forms.Select(attrs={"style": "padding:4px; width:150px;"}),
         }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, show_department=True, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["group"].queryset = Group.objects.filter(is_deleted=False).order_by("code")
         # 「分類」も原本は空選択肢が無く常に先頭の分類が暗黙選択された状態のため、
         # ModelChoiceFieldの既定の空ラベル（'---------'）を明示的に外す。
         self.fields["group"].empty_label = None
+        if not show_department:
+            del self.fields["department"]
 
     def clean_code(self):
         code = self.cleaned_data["code"]

@@ -502,10 +502,12 @@ function renderDetailPopup(data, kind) {
   const label = kind === "document" ? "文書" : "契約書";
   const banner = document.getElementById("detail-alert-banner");
   // バナーの配色は原本index.html:1195-1203のclickNoticeLink()に対応（赤=期限切れ/まもなく期限、
-  // 紫=削除済み/ゴミ箱）。「まもなく更新月」（原本index.html:1146）は、原本モックでは静的演出
+  // 紫=削除済み）。「まもなく更新月」（原本index.html:1146）は、原本モックでは静的演出
   // だったため実データ上の判定基準（core.notice_services.is_expiring_soon）を新設して対応した。
+  // 削除済みの文言はxlsx 検索・閲覧・変更!B348,B675(Rev1.2)「本文書/本契約書は削除されています」
+  // に合わせた（2026-08-24、完全削除機能廃止に伴い「ゴミ箱保管中」表記もやめた）。
   if (data.is_deleted) {
-    banner.textContent = `この${label}は削除済み（ゴミ箱保管中）です`;
+    banner.textContent = `本${label}は削除されています`;
     banner.style.backgroundColor = "#efe5fd";
     banner.style.borderColor = "#b388ff";
     banner.style.color = "#4a148c";
@@ -631,17 +633,15 @@ function renderDetailPopup(data, kind) {
     editBtn.title = "削除済みのため変更できません";
     editBtn.onclick = null;
   }
-  // 削除ボタン（ユーザー依頼2026-08-12）：documents/contracts.views.DeleteView.postが
-  // is_deletedの値で論理削除／完全削除を出し分けるため、editBtnと違いis_deletedかどうかに
-  // 関わらずdata.delete_urlさえあれば常にクリック可能にする（ゴミ箱保管中の文書は
-  // このボタンで完全削除できる）。data.delete_urlがNoneになるのは、保存から1週間以上
+  // 削除ボタン。data.delete_urlがNoneになるのは、既に削除済み、または保存から1週間以上
   // 経過した文書・契約書（documents/contracts.services.can_delete）の場合
-  // （xlsx 保管!B300,B581「初回登録から1週間以上経過しているものは削除不可。ボタンを
-  // 非表示にする」）。
+  // （xlsx 検索・閲覧・変更!B331,B337,B659,B663,B339-340,B664-665「削除済み、または初回登録から
+  // 1週間以上経過しているものは削除不可。ボタンを非表示にする」、Rev1.2で削除済みの条件が追加され、
+  // 2026-08-24に完全削除機能〈ユーザー依頼2026-08-12〉は廃止した）。
   const deleteBtn = document.getElementById("detail-delete-btn");
   if (data.delete_url) {
     deleteBtn.style.display = "";
-    deleteBtn.onclick = () => triggerDeleteFromDetail(data.delete_url, kind, data.is_deleted);
+    deleteBtn.onclick = () => triggerDeleteFromDetail(data.delete_url, kind);
   } else {
     deleteBtn.style.display = "none";
     deleteBtn.onclick = null;
@@ -653,17 +653,11 @@ function renderDetailPopup(data, kind) {
   if (detailBox) centerPdfScroll(detailBox);
 }
 
-function triggerDeleteFromDetail(deleteUrl, kind, isDeleted) {
-  // documents/contracts.views.DeleteViewは、is_deleted=Falseのレコードに対しては論理削除
-  // （ゴミ箱への移動）、既にゴミ箱保管中（is_deleted=True）のレコードに対しては完全削除、と
-  // 挙動が異なる（ユーザー依頼2026-08-12）。原本index.html:1126の確認文言「この文書データを
-  // 完全に削除してもよろしいですか？」は常に固定だったが、実際の挙動がゴミ箱移動でしかない
-  // 通常状態のレコードにこの文言を出すと「完全に削除される」と誤解させるため、is_deletedで
-  // 文言を出し分ける（原本フィデリティより実挙動との整合を優先）。
-  const confirmMessage = isDeleted
-    ? "この文書データを完全に削除してもよろしいですか？"
-    : "この文書データをゴミ箱に移動してもよろしいですか？";
-  if (!confirm(confirmMessage)) return;
+function triggerDeleteFromDetail(deleteUrl, kind) {
+  // documents/contracts.views.DeleteViewは論理削除のみを行う（Rev1.2で完全削除機能
+  // 〈ユーザー依頼2026-08-12〉は廃止した。上記renderDetailPopup()のコメント参照）。
+  const label = kind === "document" ? "文書" : "契約書";
+  if (!confirm(`この${label}データを削除してもよろしいですか？`)) return;
   // documents/contracts双方のDeleteViewは`X-Requested-With`ヘッダーを見てJsonResponseを
   // 返すよう対応済み（原本フィデリティ監査で発見：以前はredirect()のHTMLをr.json()で
   // パースしようとして例外になり、削除自体は成功してもポップアップを閉じる・完了通知・

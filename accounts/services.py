@@ -79,6 +79,7 @@ def reset_permission_profile_if_needed(
     flag_fields = [
         "doc_retention_edit",
         "doc_download",
+        "contract_edit",
         "contract_download",
         "eapproval_view_setting",
         "eapproval_doc_name_manage",

@@ -12,47 +12,59 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class NoticeCounts:
-    expired: int
-    expiring_soon: int
-    recently_deleted: int
+    expired_documents: int
+    expired_contracts: int
+    expiring_soon_documents: int
+    expiring_soon_contracts: int
+    recently_deleted_documents: int
+    recently_deleted_contracts: int
 
 
 def get_notice_counts(employee) -> NoticeCounts:
     """screen-menuの「お知らせ」3件（有効期限切れ／有効期限切れまでXヶ月以内／直近Xヶ月内で削除）を
     集計する（xlsx メイン画面!C42-46）。
 
-    3件とも表示文言は「文書」で、件数はこの関数の通り文書(Document)基準に統一している。原本HTML
-    確定版のJS（`clickNoticeLink()`）は2件目（有効期限切れまでXヶ月以内）のリンク押下時のみ
-    `transitionToSearch('contract')`（契約書検索へ）を呼んでおり、表示文言・件数集計と遷移先が
-    食い違う原本特有の矛盾があった（SCREENS_INVENTORY_WAVE1.md参照）。以前は原本フィデリティ優先で
-    その遷移先をそのまま踏襲していたが、実運用で「バッジ件数と遷移先の検索結果件数が一致しない」
-    との指摘を受け、`templates/core/menu.html`側で3件とも文書検索（`documents:search`）へ遷移する
-    よう統一した（2026-08-13ユーザー判断）。
+    Rev1.2（2026-08-24反映）で3件とも「文書」のみから「文書、契約書」両方が対象になった
+    （xlsx C42,C44,C46「・有効期限切れの文書、契約書」等）。DocumentとContractは別モデル・
+    別検索画面のため、1行を「文書がX件」「契約書がY件」の2件数・2リンクに分割して表示する
+    方針とした（ユーザー判断、2026-08-24。1行に統合しdocuments:searchのみへ遷移させる案も
+    検討したが、2026-08-13に一度その構成にしたところ「バッジ件数と遷移先の検索結果件数が
+    一致しない」問題が起きた経緯があるため、件数と遷移先が常に1対1対応する2リンク構成を
+    選んだ）。
 
-    件数は`employee`が検索・閲覧画面で実際に見られる範囲（`can_select_department()`が
-    Falseの職員は自部署のみ）に合わせて絞り込む。以前は全部署の文書を無条件で集計しており、
-    お知らせのバッジ件数とクリック後の検索結果件数が一致しない状態だった（2026-08-13ユーザー
-    指摘）。バッジ件数は「クリックした先で実際に見える件数」と一致するのが利用者の基本的な
-    期待であるため、検索画面側の絞り込みに合わせる方を採用した。
+    件数は`employee`が検索・閲覧画面で実際に見られる範囲に合わせて絞り込む（以前からのdocuments
+    側の方針を契約書側にも適用。documents側はcan_select_department()、契約書側は
+    contract_searchable_department_ids()——検索画面の部署絞り込みと同じ関数を使う）。
     """
-    from permissions.services import can_select_department
+    from contracts.models import Contract
+    from permissions.services import can_select_department, contract_searchable_department_ids
 
     today = timezone.localdate()
     soon_limit = add_months(today, settings.NOTICE_EXPIRING_THRESHOLD_MONTHS)
     deleted_since = add_months(today, -settings.NOTICE_DELETED_THRESHOLD_MONTHS)
 
-    qs = Document.objects.all()
+    doc_qs = Document.objects.all()
     if not can_select_department(employee):
-        qs = qs.filter(department=employee.department)
+        doc_qs = doc_qs.filter(department=employee.department)
 
-    expired = qs.filter(is_deleted=False, expiry_date__lt=today).count()
-    expiring_soon = qs.filter(
-        is_deleted=False, expiry_date__gte=today, expiry_date__lte=soon_limit
-    ).count()
-    recently_deleted = qs.filter(is_deleted=True, deleted_at__date__gte=deleted_since).count()
+    contract_qs = Contract.objects.all()
+    contract_dept_ids = contract_searchable_department_ids(employee)
+    if contract_dept_ids is not None:
+        contract_qs = contract_qs.filter(department_id__in=contract_dept_ids)
 
     return NoticeCounts(
-        expired=expired, expiring_soon=expiring_soon, recently_deleted=recently_deleted
+        expired_documents=doc_qs.filter(is_deleted=False, expiry_date__lt=today).count(),
+        expired_contracts=contract_qs.filter(is_deleted=False, expiry_date__lt=today).count(),
+        expiring_soon_documents=doc_qs.filter(
+            is_deleted=False, expiry_date__gte=today, expiry_date__lte=soon_limit
+        ).count(),
+        expiring_soon_contracts=contract_qs.filter(
+            is_deleted=False, expiry_date__gte=today, expiry_date__lte=soon_limit
+        ).count(),
+        recently_deleted_documents=doc_qs.filter(is_deleted=True, deleted_at__date__gte=deleted_since).count(),
+        recently_deleted_contracts=contract_qs.filter(
+            is_deleted=True, deleted_at__date__gte=deleted_since
+        ).count(),
     )
 
 

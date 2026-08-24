@@ -20,7 +20,7 @@ from core.notice_services import get_notice_counts
 from masters.models import SystemSetting
 from organizations.models import Department, MenuItemSetting
 from permissions.models import PermissionRole
-from permissions.services import get_role, visible_settings_menu_items
+from permissions.services import can_edit_contract, get_role, visible_settings_menu_items
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,9 @@ class MenuView(LoginRequiredMixin, TemplateView):
         # NOTICE_DELETED_THRESHOLD_MONTHS）を表示するようにする（2026-08-13ユーザー指摘）。
         context["notice_expiring_threshold_months"] = settings.NOTICE_EXPIRING_THRESHOLD_MONTHS
         context["notice_deleted_threshold_months"] = settings.NOTICE_DELETED_THRESHOLD_MONTHS
+        # xlsx 権限管理!B196-197(Rev1.2)「保存不可…メイン画面の保管枠内「契約書」ボタンを
+        # 非表示にする」。文書側に対応するフラグは無いため、文書の保管ボタンは常に表示のまま。
+        context["can_edit_contract"] = can_edit_contract(self.request.user)
         return context
 
 

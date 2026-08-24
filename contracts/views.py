@@ -27,7 +27,7 @@ from core import bulk_edit_services, upload_services
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
 from core.text_extraction_services import try_immediate_text_layer_extraction
-from permissions.services import can_download, can_select_department
+from permissions.services import can_download, can_edit_contract, can_select_department
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,21 @@ BULK_EDIT_SESSION_KEY = "contracts_bulk_edit"
 
 
 class UploadStep1View(LoginRequiredMixin, View):
+    """screen-storage1（契約書）。xlsx 権限管理!B196-197(Rev1.2)「保存不可…メイン画面の
+    保管枠内「契約書」ボタンを非表示にする」に対応し、URL直叩き対策としてサーバー側でも拒否する
+    （templates/core/menu.htmlのボタン非表示と同じ判定、permissions.services.can_edit_contract）。
+    """
+
     template_name = "contracts/storage1.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        if not can_edit_contract(request.user):
+            logger.warning(
+                "契約書情報変更権限が無いユーザーによる保管画面アクセスを拒否しました: employee_no=%s",
+                request.user.employee_no,
+            )
+            raise PermissionDenied("契約書を保存する権限がありません。")
+        return super().dispatch(request, *args, **kwargs)
 
     def get(self, request):
         upload_services.clear_pending_files(request.session, PENDING_SESSION_KEY)
@@ -77,6 +91,16 @@ class UploadStep2View(LoginRequiredMixin, View):
 
     template_name = "contracts/storage2.html"
     form_id = "contracts_upload_step2"
+
+    def dispatch(self, request, *args, **kwargs):
+        # UploadStep1View.dispatchと同じ理由（保管フロー全体をURL直叩きから守る）。
+        if not can_edit_contract(request.user):
+            logger.warning(
+                "契約書情報変更権限が無いユーザーによる保管画面アクセスを拒否しました: employee_no=%s",
+                request.user.employee_no,
+            )
+            raise PermissionDenied("契約書を保存する権限がありません。")
+        return super().dispatch(request, *args, **kwargs)
 
     def get(self, request):
         pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
@@ -217,10 +241,26 @@ class UploadStep2View(LoginRequiredMixin, View):
 
 
 class ContractEditView(LoginRequiredMixin, UpdateView):
+    """screen-storage2（契約書編集）。Rev1.2で追加された「契約書-契約書-契約書情報変更」
+    （xlsx 権限管理!B193-198）がOFFの職員は編集不可（documents側に対応するフラグは無く、
+    文書の編集は従来通り無条件で可能。permissions.services.can_edit_contract参照）。
+    """
+
     model = Contract
     template_name = "contracts/edit.html"
     context_object_name = "contract"
     form_id = "contracts_edit"
+
+    def dispatch(self, request, *args, **kwargs):
+        if not can_edit_contract(request.user):
+            logger.warning(
+                "契約書情報変更権限が無いユーザーによる編集アクセスを拒否しました: "
+                "employee_no=%s contract_id=%s",
+                request.user.employee_no,
+                kwargs.get("pk"),
+            )
+            raise PermissionDenied("契約書を編集する権限がありません。")
+        return super().dispatch(request, *args, **kwargs)
 
     def get_object(self, queryset=None):
         return get_object_or_404(
@@ -340,12 +380,18 @@ class ContractEditView(LoginRequiredMixin, UpdateView):
 
 class BulkEditStartView(LoginRequiredMixin, View):
     """screen-search「一括編集」ボタン（契約書側）。documents.views.BulkEditStartViewと同じ設計
-    （詳細はそちらのdocstring参照）。編集権限自体はContractEditView・検索詳細ポップアップの
-    「変更」ボタンと同じくログイン済み・未削除であれば誰でも編集できる前提のため、can_downloadの
-    ような追加の権限判定は行わない。
+    （詳細はそちらのdocstring参照）だが、Rev1.2で追加された「契約書-契約書-契約書情報変更」
+    がOFFの職員は一括編集も不可（ContractEditView.dispatchと同じ判定、
+    permissions.services.can_edit_contract参照）。
     """
 
     def post(self, request):
+        if not can_edit_contract(request.user):
+            logger.warning(
+                "契約書情報変更権限が無いユーザーによる一括編集開始を拒否しました: employee_no=%s",
+                request.user.employee_no,
+            )
+            raise PermissionDenied("契約書を編集する権限がありません。")
         pks = request.POST.getlist("pks")
         if not pks:
             messages.error(request, "編集する契約書を選択してください。")
@@ -378,11 +424,22 @@ class BulkEditStartView(LoginRequiredMixin, View):
 class BulkEditView(LoginRequiredMixin, View):
     """一括編集ウィザード本体（契約書側）。documents.views.BulkEditViewと同じ設計・同じ
     save-as-you-go方式（詳細はそちらのdocstring参照）。ContractEditViewと同じく関連書類の
-    追加・削除もステップの保存に含まれる。
+    追加・削除もステップの保存に含まれる。BulkEditStartView.postと同じくRev1.2の
+    「契約書-契約書-契約書情報変更」がOFFの職員はアクセス不可
+    （URL直叩き対策、dispatchで一元的に判定する）。
     """
 
     template_name = "contracts/edit.html"
     form_id = "contracts_bulk_edit"
+
+    def dispatch(self, request, *args, **kwargs):
+        if not can_edit_contract(request.user):
+            logger.warning(
+                "契約書情報変更権限が無いユーザーによる一括編集アクセスを拒否しました: employee_no=%s",
+                request.user.employee_no,
+            )
+            raise PermissionDenied("契約書を編集する権限がありません。")
+        return super().dispatch(request, *args, **kwargs)
 
     def _state(self, request):
         state = bulk_edit_services.get_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
@@ -691,18 +748,19 @@ class BulkDownloadView(LoginRequiredMixin, View):
 
 
 class DeleteView(LoginRequiredMixin, View):
-    """詳細ポップアップ「削除」ボタン。documents.views.DeleteViewと同じ理由（ユーザー依頼
-    2026-08-12）で、まだ論理削除されていない契約書は論理削除、既に「ゴミ箱保管中」の契約書は
-    DBレコード・ファイル実体（本体＋関連書類）ごと完全削除する。AJAX呼び出し時はJsonResponseを
-    返す（fetch().then(r=>r.json())とのプロトコル不整合の修正）。
+    """詳細ポップアップ「削除」ボタン。論理削除（is_deleted=True）のみを行う。
+
+    documents.views.DeleteViewと同じ理由（2026-08-12にユーザー依頼で追加した「ゴミ箱保管中の
+    契約書を削除ボタンで完全削除する」機能を、Rev1.2改訂〈xlsx 検索・閲覧・変更!B659,B663
+    「削除されている契約書は、ボタンを非表示とする」〉でユーザー判断によりxlsx優先とし、
+    2026-08-24に廃止した）。AJAX呼び出し時はJsonResponseを返す
+    （fetch().then(r=>r.json())とのプロトコル不整合の修正）。
     """
 
     def post(self, request, pk):
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
         try:
-            # documents.views.DeleteViewと同じ理由。is_deleted=Falseで絞らず取得し、
-            # ゴミ箱保管中の契約書も完全削除の対象にできるようにする。
             contract = get_object_or_404(Contract.objects.prefetch_related("related_files"), pk=pk)
         except Http404:
             # documents.views.DeleteViewと同じ理由（common.js側はfetch().then(r=>r.json())で
@@ -712,31 +770,24 @@ class DeleteView(LoginRequiredMixin, View):
             raise
 
         if not can_delete(contract):
-            # xlsx 保管!B300,B581・検索・閲覧・変更!B664-665「初回登録から1週間以上経過している
-            # ものは削除不可。ボタンを非表示にする」。documents.views.DeleteViewと同じ理由で
-            # サーバー側でも拒否する。
+            # xlsx 検索・閲覧・変更!B659,B663,B664-665「削除済みの契約書、および初回登録から
+            # 1週間以上経過しているものは削除不可。ボタンを非表示にする」。
+            # documents.views.DeleteViewと同じ理由でサーバー側でも拒否する。
             logger.warning(
-                "保存から1週間経過した契約書への削除操作を拒否しました: employee_no=%s contract_id=%s",
+                "削除できない契約書への削除操作を拒否しました: employee_no=%s contract_id=%s is_deleted=%s",
                 request.user.employee_no,
                 pk,
+                contract.is_deleted,
             )
+            message = "この契約書は既に削除されています。" if contract.is_deleted else "保存から1週間以上経過した契約書は削除できません。"
             if is_ajax:
-                return JsonResponse(
-                    {"success": False, "message": "保存から1週間以上経過した契約書は削除できません。"}, status=403
-                )
-            raise PermissionDenied("保存から1週間以上経過した契約書は削除できません。")
+                return JsonResponse({"success": False, "message": message}, status=403)
+            raise PermissionDenied(message)
 
-        was_already_deleted = contract.is_deleted
-        # contract.delete()はDB上のRelatedFile行をon_delete=CASCADEで一緒に消すが、
-        # ファイル実体までは自動削除されないため、削除される前に一覧を確保しておく必要がある。
-        related_files = list(contract.related_files.all()) if was_already_deleted else []
         try:
-            if was_already_deleted:
-                contract.delete()
-            else:
-                contract.is_deleted = True
-                contract.deleted_at = timezone.now()
-                contract.save(update_fields=["is_deleted", "deleted_at"])
+            contract.is_deleted = True
+            contract.deleted_at = timezone.now()
+            contract.save(update_fields=["is_deleted", "deleted_at"])
         except DBError:
             logger.exception("契約書の削除処理に失敗しました: contract_id=%s", pk)
             if is_ajax:
@@ -746,36 +797,12 @@ class DeleteView(LoginRequiredMixin, View):
             messages.error(request, "削除に失敗しました。もう一度お試しください。")
             return redirect("contracts:search")
 
-        if was_already_deleted:
-            # documents.views.DeleteViewと同じ理由（DBレコード削除が成功した後にファイル実体を
-            # 削除し、削除失敗はログに残した上で握りつぶす）。契約書本体に加え、関連書類の
-            # ファイル実体もここでまとめて削除する。
-            try:
-                contract.file.delete(save=False)
-            except OSError:
-                logger.exception("完全削除時のファイル実体削除に失敗しました: contract_id=%s", pk)
-            for related in related_files:
-                try:
-                    related.file.delete(save=False)
-                except OSError:
-                    logger.exception(
-                        "完全削除時の関連書類ファイル実体削除に失敗しました: contract_id=%s related_file_id=%s",
-                        pk,
-                        related.pk,
-                    )
-            audit_services.log(
-                employee=request.user,
-                action="検索・閲覧画面 完全削除",
-                event_message=f"契約書「{contract.title}」を完全に削除しました。",
-            )
-            success_message = "契約書を完全に削除しました。"
-        else:
-            audit_services.log(
-                employee=request.user,
-                action="検索・閲覧画面 削除",
-                event_message=f"契約書「{contract.title}」を削除しました。",
-            )
-            success_message = "契約書を削除しました。"
+        audit_services.log(
+            employee=request.user,
+            action="検索・閲覧画面 削除",
+            event_message=f"契約書「{contract.title}」を削除しました。",
+        )
+        success_message = "契約書を削除しました。"
 
         if is_ajax:
             return JsonResponse({"success": True, "message": success_message})

@@ -744,11 +744,13 @@ class BulkDownloadView(LoginRequiredMixin, View):
 
 
 class DeleteView(LoginRequiredMixin, View):
-    """詳細ポップアップ「削除」ボタン。まだ論理削除されていない文書は論理削除（is_deleted=True）
-    にし、既に「ゴミ箱保管中」（is_deleted=True）の文書はDBレコード・ファイル実体ごと完全削除する
-    （ユーザー依頼2026-08-12。原本index.html:1126のconfirm文言「この文書データを完全に削除しても
-    よろしいですか？」は元々このビューが常に論理削除にしていたため実態と乖離していたが、
-    ゴミ箱保管中からの削除に限り文言通りの完全削除にすることで解消する）。
+    """詳細ポップアップ「削除」ボタン。論理削除（is_deleted=True）のみを行う。
+
+    2026-08-12にユーザー依頼で「ゴミ箱保管中（is_deleted=True）の文書は削除ボタンで完全削除できる」
+    機能を追加していたが、Rev1.2改訂（xlsx 検索・閲覧・変更!B331,B337「削除されている文書は、
+    ボタンを非表示とする」）でユーザー判断によりxlsx優先とし、2026-08-24に完全削除機能は廃止した
+    （documents.services.can_delete docstring参照。完全削除自体は自動物理削除バッチ
+    〈core.management.commands.purge_expired_deleted_records〉に一本化）。
 
     原本index.html:1125-1131のtriggerDeleteFromDetail()はfetch()の完了を待って
     ポップアップを閉じる・完了アラート・一覧再描画を行う設計だが、本ビューは元々常に
@@ -762,9 +764,6 @@ class DeleteView(LoginRequiredMixin, View):
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
         try:
-            # is_deleted=Falseで絞らず取得する（ゴミ箱保管中の文書も完全削除の対象として
-            # 扱えるようにするため。以前はここでis_deleted=Falseフィルタしており、
-            # ゴミ箱保管中の文書に対する削除操作が常に404になっていた）。
             document = get_object_or_404(Document, pk=pk)
         except Http404:
             # common.js側はfetch().then(r=>r.json())で応答をJSONとしてparseするため、
@@ -775,28 +774,25 @@ class DeleteView(LoginRequiredMixin, View):
             raise
 
         if not can_delete(document):
-            # xlsx 保管!B300,B581・検索・閲覧・変更!B339-340「初回登録から1週間以上経過している
-            # ものは削除不可。ボタンを非表示にする」。UI側（common.jsのrenderDetailPopup()）は
-            # delete_urlがNoneの間ボタン自体を隠すが、API直叩き等に備えサーバー側でも拒否する。
+            # xlsx 検索・閲覧・変更!B331,B337,B339-340「削除済みの文書、および初回登録から1週間
+            # 以上経過しているものは削除不可。ボタンを非表示にする」。UI側
+            # （common.jsのrenderDetailPopup()）はdelete_urlがNoneの間ボタン自体を隠すが、
+            # API直叩き等に備えサーバー側でも拒否する。
             logger.warning(
-                "保存から1週間経過した文書への削除操作を拒否しました: employee_no=%s document_id=%s",
+                "削除できない文書への削除操作を拒否しました: employee_no=%s document_id=%s is_deleted=%s",
                 request.user.employee_no,
                 pk,
+                document.is_deleted,
             )
+            message = "この文書は既に削除されています。" if document.is_deleted else "保存から1週間以上経過した文書は削除できません。"
             if is_ajax:
-                return JsonResponse(
-                    {"success": False, "message": "保存から1週間以上経過した文書は削除できません。"}, status=403
-                )
-            raise PermissionDenied("保存から1週間以上経過した文書は削除できません。")
+                return JsonResponse({"success": False, "message": message}, status=403)
+            raise PermissionDenied(message)
 
-        was_already_deleted = document.is_deleted
         try:
-            if was_already_deleted:
-                document.delete()
-            else:
-                document.is_deleted = True
-                document.deleted_at = timezone.now()
-                document.save(update_fields=["is_deleted", "deleted_at"])
+            document.is_deleted = True
+            document.deleted_at = timezone.now()
+            document.save(update_fields=["is_deleted", "deleted_at"])
         except DBError:
             # DB接続断・制約違反等で削除が失敗した場合も、上記と同じ理由でAJAX時はJSONを返す
             # 必要がある（このexcept節が無いと非AJAX時と同じ生の500応答になりfetch側が壊れる）。
@@ -808,33 +804,13 @@ class DeleteView(LoginRequiredMixin, View):
             messages.error(request, "削除に失敗しました。もう一度お試しください。")
             return redirect("documents:search")
 
-        if was_already_deleted:
-            # document.delete()後もPython側のインスタンス自体（file等の属性）は参照できる
-            # （pkのみNoneになる）。ファイル実体の削除はDBレコード削除が成功した後に行う
-            # （ファイル削除を先に行うと、DB側の削除が失敗した場合に「レコードは残っているのに
-            # ファイル実体が無い」より悪い不整合になるため）。ファイル削除の失敗自体は
-            # 完全削除というユーザー操作の主目的（DBレコードを消すこと）には本質的でないため、
-            # ログに残した上で握りつぶす（core.upload_services.clear_pending_filesと同じ設計判断。
-            # 運用上はtmp_uploadsと同様、孤児ファイルの定期クリーンアップが将来的な課題）。
-            try:
-                document.file.delete(save=False)
-            except OSError:
-                logger.exception("完全削除時のファイル実体削除に失敗しました: document_id=%s", pk)
-            audit_services.log(
-                employee=request.user,
-                action="検索・閲覧画面 完全削除",
-                event_message=f"文書「{document.title}」を完全に削除しました。",
-                personal_info_flag=document.privacy_flag,
-            )
-            success_message = "文書を完全に削除しました。"
-        else:
-            audit_services.log(
-                employee=request.user,
-                action="検索・閲覧画面 削除",
-                event_message=f"文書「{document.title}」を削除しました。",
-                personal_info_flag=document.privacy_flag,
-            )
-            success_message = "文書を削除しました。"
+        audit_services.log(
+            employee=request.user,
+            action="検索・閲覧画面 削除",
+            event_message=f"文書「{document.title}」を削除しました。",
+            personal_info_flag=document.privacy_flag,
+        )
+        success_message = "文書を削除しました。"
 
         if is_ajax:
             return JsonResponse({"success": True, "message": success_message})

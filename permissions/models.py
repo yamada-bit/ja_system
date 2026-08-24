@@ -34,6 +34,16 @@ class PermissionProfile(models.Model):
 
     電子決裁の3フラグは「※保留」（xlsx B211-215）で仕様自体が未確定だが、screen-authority-edit
     画面上に引き続きチェックボックスとして存在するためフィールドとしては保持する。
+
+    Rev1.2（2026-08-24反映）での変更：
+    - 新規権限「契約書-契約書-契約書情報変更」（`contract_edit`）を追加。文書管理側に対応する
+      フラグは無い（xlsx上も文書側は変更されておらず、文書の保存・編集は引き続き無条件で可能）。
+    - `contract_visible_departments`（契約書-部門間閲覧設定）の編集画面での表示・設定は
+      「管理者のみ」に narrow された（xlsx 権限管理!H182「※権限：管理者のみ表示」。以前は
+      管理者・所属長の双方が設定可能だった）。一覧画面の「部署」検索プルダウンも同様に
+      管理者のみ表示に変更（xlsx 権限管理!B35）。いずれもpermissions/views.py
+      AuthorityEditView/AuthorityListViewが`request.user`の役職を見てテンプレート側の表示を
+      制御する（モデル自体には制約を持たせない）。
     """
 
     employee = models.OneToOneField(
@@ -75,6 +85,15 @@ class PermissionProfile(models.Model):
         verbose_name="契約書-分類(表示)",
         related_name="+",
         blank=True,
+    )
+    contract_edit = models.BooleanField(
+        "契約書-契約書(契約書情報変更)",
+        default=False,
+        help_text=(
+            "OFFの場合、対象者は契約書の保存・編集ができない（xlsx 権限管理!B193-198、Rev1.2で新規追加）。"
+            "保存不可＝メイン画面の保管枠内「契約書」ボタン非表示、編集不可＝契約書詳細画面の「編集」"
+            "「削除」ボタン非表示、として制御する（permissions.services.can_edit_contract参照）。"
+        ),
     )
     contract_download = models.BooleanField("契約書-契約書(ダウンロード)", default=False)
 

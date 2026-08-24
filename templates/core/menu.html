@@ -36,32 +36,65 @@
         <h2>保管</h2>
         <div class="menu-buttons">
           <button type="button" onclick="window.location.href='{% url 'documents:upload_step1' %}'">文書</button>
+          {% comment %}
+            xlsx 権限管理!B193-197(Rev1.2)「契約書-契約書-契約書情報変更」がOFFの場合、
+            保存不可＝このボタンを非表示にする（permissions.services.can_edit_contract）。
+          {% endcomment %}
+          {% if can_edit_contract %}
           <button type="button" onclick="window.location.href='{% url 'contracts:upload_step1' %}'">契約書</button>
+          {% endif %}
         </div>
       </div>
     </div>
 
     <div class="notice-area">
       <h3>お知らせ</h3>
-      <ul>
-        <li>有効期限切れの文書が
-          <a href="{% url 'documents:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired }} 件</span></a>
-          あります。</li>
-        {% comment %}
-          原本index.html:1133-1149のclickNoticeLink()は、2番目のお知らせ（表示文言は「文書」）の
-          クリック時のみtransitionToSearch('contract')で契約書検索画面へ遷移していた（他の2件は
-          文書検索画面）。表示文言・件数集計（documents.Document基準）と遷移先モデルが食い違う
-          原本特有の矛盾で、以前は原本フィデリティ優先でそのまま踏襲していたが、実際の運用で
-          「バッジ件数と遷移先の検索結果件数が一致しない」との指摘を受け、3件とも文書検索へ統一
-          するようユーザー判断で変更した（2026-08-13）。
-        {% endcomment %}
-        <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の文書が
-          <a href="{% url 'documents:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon }} 件</span></a>
-          あります。</li>
-        <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された文書が
-          <a href="{% url 'documents:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted }} 件</span></a>
-          あります。</li>
-      </ul>
+      {% comment %}
+        原本index.html:1133-1149のclickNoticeLink()は、2番目のお知らせ（表示文言は「文書」）の
+        クリック時のみtransitionToSearch('contract')で契約書検索画面へ遷移していた（他の2件は
+        文書検索画面）。表示文言・件数集計（documents.Document基準）と遷移先モデルが食い違う
+        原本特有の矛盾で、以前は原本フィデリティ優先でそのまま踏襲していたが、実際の運用で
+        「バッジ件数と遷移先の検索結果件数が一致しない」との指摘を受け、2026-08-13に3件とも
+        文書検索へ統一した。Rev1.2（2026-08-24反映）で3件とも「文書、契約書」両方が対象になり
+        （xlsx メイン画面!C42-46）、埋め込み画像モック（分類管理!row6等と同様、セル文字列
+        だけでは検出できずopenpyxlでの画像ハッシュ突き合わせで発見）は文書3項目・契約書3項目を
+        左右に分けたブロック構成だったため、その通りに実装した（当初は1行を2件数・2リンクに
+        分割する案を検討したが、実際のモック画像確認後にユーザー判断で左右2列ブロックへ変更、
+        2026-08-24）。件数と遷移先は各列内で常に1対1対応するため、2026-08-13と同種の不一致は
+        再発しない。
+      {% endcomment %}
+      <div style="display:flex; gap:40px; flex-wrap:wrap;">
+        <ul style="flex:1; min-width:280px;">
+          <li>有効期限切れの文書が
+            <a href="{% url 'documents:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired_documents }} 件</span></a>
+            あります。</li>
+          <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の文書が
+            <a href="{% url 'documents:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon_documents }} 件</span></a>
+            あります。</li>
+          <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された文書が
+            <a href="{% url 'documents:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted_documents }} 件</span></a>
+            あります。</li>
+        </ul>
+        <ul style="flex:1; min-width:280px;">
+          <li>有効期限切れの契約書が
+            <a href="{% url 'contracts:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired_contracts }} 件</span></a>
+            あります。</li>
+          <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の契約書が
+            <a href="{% url 'contracts:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon_contracts }} 件</span></a>
+            あります。</li>
+          <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された契約書が
+            <a href="{% url 'contracts:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted_contracts }} 件</span></a>
+            あります。</li>
+        </ul>
+      </div>
+      {% comment %}
+        xlsx メイン画面!B50-51(Rev1.2)「＜補足：削除されている文書、契約書について＞
+        "直近Xヵ月"で設定されているXヵ月が既に経過している文書、契約書は自動的に物理削除を
+        行うこと。」。実装はcore.management.commands.purge_expired_deleted_records
+        （日次バッチ想定、extract_pending_pdf_textと同じくWindows Task Schedulerでの
+        定期実行を前提とする）。画面上はこの一文自体を表示する仕様ではないため、UIには出さない
+        （原本もxlsxの補足説明欄はモック画面上に描画されない設計メモの位置づけ）。
+      {% endcomment %}
     </div>
 
     <div class="footer-controls">
