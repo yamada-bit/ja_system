@@ -324,8 +324,8 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
 
 
 class BulkEditStartView(LoginRequiredMixin, View):
-    """screen-search「一括編集」ボタン（html4差分で初めて仕様が提示された機能、HTML_REIMPL_CHECKLIST.md
-    「検索結果一覧 一括編集の実装」参照）。BulkDownloadViewと同じpks検証パターンで選択された
+    """screen-search「一括編集」ボタン（html4差分で初めて仕様が提示された機能、
+    HTML_REIMPL_CHECKLIST_ARCHIVE.md「検索結果一覧 一括編集の実装」参照）。BulkDownloadViewと同じpks検証パターンで選択された
     文書を確認し、以後のウィザード進行に必要な最小限の状態（pkの並び順と現在位置）だけを
     セッションに積んでBulkEditViewへ渡す。編集権限自体はDocumentEditView・検索詳細ポップアップの
     「変更」ボタン（static/js/common.js、!data.is_deleted && data.edit_urlのみが条件）と同じく
@@ -375,7 +375,7 @@ class BulkEditView(LoginRequiredMixin, View):
     配列に溜めて最後に一括保存する作りだったが、ModelChoiceFieldの値はセッションへの
     JSONシリアライズに向かないため、本実装では「どのボタン（＜／次へ／更新）を押しても、
     まず今表示している内容を検証・保存してから移動する」save-as-you-go方式にしている
-    （詳細な設計判断はHTML_REIMPL_CHECKLIST.md参照）。単体編集用のトークン名
+    （詳細な設計判断はHTML_REIMPL_CHECKLIST_ARCHIVE.md参照）。単体編集用のトークン名
     （"documents_edit"）とは別の"documents_bulk_edit"を使い、別タブで単体編集中でも
     干渉しないようにする。
     """

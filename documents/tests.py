@@ -795,8 +795,8 @@ class BulkDownloadViewTests(TestCase):
 
 
 class BulkEditViewTests(TestCase):
-    """screen-search「一括編集」（html4差分で初めて仕様が提示された機能、HTML_REIMPL_CHECKLIST.md
-    「検索結果一覧 一括編集の実装」参照）。save-as-you-go方式で、各ステップの送信ごとに
+    """screen-search「一括編集」（html4差分で初めて仕様が提示された機能、
+    HTML_REIMPL_CHECKLIST_ARCHIVE.md「検索結果一覧 一括編集の実装」参照）。save-as-you-go方式で、各ステップの送信ごとに
     その文書を都度保存し、AuditLogも文書ごとに1件ずつ記録されることを確認する
     （一括ダウンロードのような集約1件ではない）。"""
 
