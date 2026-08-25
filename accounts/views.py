@@ -16,6 +16,7 @@ from accounts.csv_import_services import CsvImportError, import_staff_csv
 from accounts.forms import LoginForm, StaffCsvImportForm, StaffEditForm, StaffRegistForm, StaffSearchForm
 from accounts.models import Employee
 from accounts.services import filter_staff_queryset, reset_permission_profile_if_needed
+from core.csv_services import sanitize_csv_row
 from core.double_submit import consume_token, issue_token
 from organizations.services import departments_json
 from permissions.mixins import SettingsMenuAccessMixin
@@ -127,21 +128,25 @@ class StaffCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
              "職階コード", "職階名", "役職コード", "役職名", "退職"]
         )
         for employee in qs:
+            # employee.name等は登録時の自由入力のため、Excel等で開いた際の数式インジェクション対策
+            # としてsanitize_csv_rowを通す（audit.views.AuditLogCsvExportViewと同じ理由）。
             writer.writerow(
-                [
-                    employee.employee_no,
-                    employee.name,
-                    "",
-                    employee.department.branch_code,
-                    employee.department.branch_name,
-                    employee.department.section_code,
-                    employee.department.section_name,
-                    employee.rank,
-                    employee.get_rank_display(),
-                    employee.position,
-                    employee.get_position_display(),
-                    "1" if employee.is_retired else "",
-                ]
+                sanitize_csv_row(
+                    [
+                        employee.employee_no,
+                        employee.name,
+                        "",
+                        employee.department.branch_code,
+                        employee.department.branch_name,
+                        employee.department.section_code,
+                        employee.department.section_name,
+                        employee.rank,
+                        employee.get_rank_display(),
+                        employee.position,
+                        employee.get_position_display(),
+                        "1" if employee.is_retired else "",
+                    ]
+                )
             )
         count = qs.count()
         logger.info("職員マスタCSV出力を実行しました: employee_no=%s 件数=%s", request.user.employee_no, count)
@@ -300,6 +305,7 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         before_department_id = employee.department_id
         before_rank = employee.rank
         before_position = employee.position
+        before_is_retired = employee.is_retired
 
         form = StaffEditForm(request.POST, instance=employee)
         if not form.is_valid():
@@ -329,6 +335,10 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             department_changed=employee.department_id != before_department_id,
             rank_changed=employee.rank != before_rank,
             position_changed=employee.position != before_position,
+            # 「退職に設定した場合」なので未退職→退職の遷移のみを対象にする（xlsx B228）。
+            # 既に退職済みの職員を退職以外の理由で編集しても毎回リセットされないようにするため、
+            # employee.is_retired（現在値）ではなく遷移を渡す（accounts.services参照）。
+            retired_changed=employee.is_retired and not before_is_retired,
             actor=request.user,
         )
         logger.info("職員情報を更新しました: employee_no=%s", employee.employee_no)

@@ -65,6 +65,13 @@ class GroupFormTests(TestCase):
         form = GroupForm()
         self.assertNotIn(("", "---------"), form.fields["doc_kbn"].choices)
 
+    def test_department_has_no_blank_choice(self):
+        """department（Rev1.2追加、管理者のみ表示）もdoc_kbnと同じ理由で空選択肢
+        （'---------'）が無いこと。以前はempty_label未指定のまま残っていた
+        （コード監査で発見、2026-08-24修正）。"""
+        form = GroupForm()
+        self.assertIsNone(form.fields["department"].empty_label)
+
 
 class CategoryFormTests(TestCase):
     def setUp(self):
@@ -92,6 +99,32 @@ class CategoryFormTests(TestCase):
         form = CategoryForm()
         self.assertNotIn(("", "---------"), form.fields["doc_kbn"].choices)
         self.assertIsNone(form.fields["group"].empty_label)
+
+    def test_department_has_no_blank_choice(self):
+        """GroupFormTests.test_department_has_no_blank_choiceと同じ理由（コード監査で発見、
+        2026-08-24修正）。"""
+        form = CategoryForm()
+        self.assertIsNone(form.fields["department"].empty_label)
+
+    def test_group_queryset_scoped_to_employee_department(self):
+        """以前はgroupの選択肢が部署スコープ対象外で、非管理者が自部署では選べない他部署の
+        Groupを選択でき、department=自部署・group.department=他部署という部署をまたいだ
+        紐付けが作れてしまっていた（コード監査で発見、2026-08-24修正）。"""
+        dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        group_a = Group.objects.create(code="9001", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=dept_a)
+        group_b = Group.objects.create(code="9002", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=dept_b)
+        employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        form = CategoryForm(show_department=False, employee=employee)
+        self.assertIn(group_a, form.fields["group"].queryset)
+        self.assertNotIn(group_b, form.fields["group"].queryset)
 
     def test_fullwidth_code_converted_to_halfwidth(self):
         """xlsx カテゴリー管理!B113(Rev1.1)「半角数字のみ許可する。(全角の場合は登録時に半角へ変換)」。"""
@@ -206,6 +239,29 @@ class MasterSettingsMenuAccessControlTests(TestCase):
         self._login_as(PermissionRole.ADMIN)
         response = self.client.get("/masters/retention/")
         self.assertEqual(response.status_code, 200)
+
+    def test_category_views_actually_enforce_settings_menu_role_check(self):
+        """CategoryListView/CategoryRegistView/CategoryEditView/CategoryDeleteViewは
+        以前SettingsMenuAccessMixinを一切参照しておらず、category_managementキーの
+        ロール制限がView側で実質チェックされていなかった（現状は全ロール許可のため
+        実害は無いが、将来ロール制限を絞った際に反映されない潜在バグだった。コード監査で
+        発見、2026-08-24修正）。SETTINGS_MENU_VISIBLE_ROLESを一時的に管理者限定へ差し替えて
+        実際にチェックが働くことを確認する。
+        """
+        from unittest.mock import patch as mock_patch
+
+        employee = self._login_as(PermissionRole.STAFF)
+        group = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        with mock_patch.dict(
+            "permissions.services.SETTINGS_MENU_VISIBLE_ROLES", {"category_management": {PermissionRole.ADMIN}}
+        ):
+            self.assertEqual(self.client.get("/masters/cat/").status_code, 403)
+            self.assertEqual(self.client.get("/masters/cat/regist/").status_code, 403)
+            self.assertEqual(self.client.get(f"/masters/cat/{category.pk}/edit/").status_code, 403)
+            self.assertEqual(self.client.get(f"/masters/cat/{category.pk}/delete/").status_code, 403)
 
 
 class MasterDeleteViewTests(TestCase):
@@ -521,6 +577,56 @@ class DepartmentScopingTests(TestCase):
         self._login_as(self.dept_a, PermissionRole.MANAGER)
         response = self.client.get(f"/masters/class/{self.group_b.pk}/edit/")
         self.assertEqual(response.status_code, 404)
+
+    def test_manager_cross_department_access_logs_warning(self):
+        """部署スコープ外へのURL直叩きは、GroupDeleteView.post等の他の拒否パスと同じく
+        セキュリティ上意味のある事象としてlogger.warningに残す（以前は404のみでログが
+        無かった。コード監査で発見、2026-08-24修正）。"""
+        employee = self._login_as(self.dept_a, PermissionRole.MANAGER)
+        with self.assertLogs("masters.services", level="WARNING") as cm:
+            response = self.client.get(f"/masters/class/{self.group_b.pk}/edit/")
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(any(employee.employee_no in message for message in cm.output))
+
+    def test_manager_cannot_reach_other_department_category_edit(self):
+        """CategoryEditView._get_objectでも同じ部署スコープが効くことを確認する
+        （GroupEditViewと同じ方針）。"""
+        category_b = Category.objects.create(
+            code="B01", name="経理部カテゴリー", group=self.group_b, doc_kbn=DocKbn.DOCUMENT,
+            department=self.dept_b,
+        )
+        self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get(f"/masters/cat/{category_b.pk}/edit/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_non_admin_sort_by_department_is_ignored(self):
+        """部署列自体が非管理者には非表示のため、?sort=department直指定でも
+        並び替えを適用しない（以前はis_adminガードが無かった。コード監査で発見、
+        2026-08-24修正）。デフォルトソート（部課コード順）にフォールバックすることを確認する。"""
+        self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get("/masters/class/", {"sort": "department", "dir": "desc"})
+        self.assertEqual(response.status_code, 200)
+        # 自部署のみが見える（デフォルトソートに落ちても分類Ａだけが表示される）。
+        self.assertContains(response, "分類Ａ")
+
+    def test_group_regist_audit_log_includes_department(self):
+        """分類登録の監査ログに部署が記録されること（以前はNo./分類名/書類管理区分のみで、
+        Rev1.2で新設された権限境界に関わるdepartmentが抜けていた。コード監査で発見、
+        2026-08-24修正）。"""
+        from audit.models import AuditLog
+
+        employee = self._login_as(self.dept_a, PermissionRole.ADMIN)
+        response = self.client.get("/masters/class/regist/")
+        token = response.context["token"]
+        self.client.post(
+            "/masters/class/regist/",
+            {
+                "token": token, "code": "9", "name": "新分類", "doc_kbn": DocKbn.DOCUMENT,
+                "department": self.dept_b.pk,
+            },
+        )
+        entry = AuditLog.objects.get(action="分類管理 新規登録")
+        self.assertIn(str(self.dept_b), entry.event_message)
 
     def test_manager_registered_group_is_auto_assigned_own_department(self):
         """xlsx 分類管理!B116「「部署」プルダウン ※権限：管理者のみ表示」。非管理者の登録画面には

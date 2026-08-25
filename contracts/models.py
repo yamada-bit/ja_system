@@ -8,17 +8,20 @@ from contracts.storage_paths import (
     contract_upload_path,
     related_file_upload_path,
 )
-from core.text_normalization import normalize_for_search
+from core.models import NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin
 
 logger = logging.getLogger(__name__)
 
 
-class Contract(models.Model):
+class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Model):
     """契約書（screen-storage2/screen-search「契約書」モード）。documentsと共通するUI/JSを持つが
     フィールド構成は異なる（個人情報フラグが無い、保存期間は選択式ではなく固定年数、契約特有項目
     〈契約日・契約期間・契約更新日・契約金額・契約先名〉を持つ）。保存期間はDocument.retention_period
-    のようなFKを持たず、masters.SystemSetting.contract_retention_years（既定10年、
-    xlsx メイン画面!B48「契約書の保存期限は固定で10年」）で一律計算する。
+    のようなFKを持たず、`settings.CONTRACT_RETENTION_YEARS`（既定10年、xlsx メイン画面!B48
+    「契約書の保存期限は固定で10年」）で一律計算する（品質レビューで発見：以前はDB設定値
+    `masters.SystemSetting.contract_retention_years`を参照していたが2026-08-13に.env経由の
+    設定値へ移行済み〈config/settings/base.py参照〉で、このdocstringが追従していなかった。
+    2026-08-25修正）。
 
     `extracted_text`はdocuments.Documentと同様の理由で追加（screen-search「フリーワード」全文検索、
     2026-08-07ユーザー指示）。抽出処理自体もdocuments.Documentと同じ2段階方式
@@ -56,7 +59,7 @@ class Contract(models.Model):
 
     expiry_date = models.DateField(
         "保存満了日",
-        help_text="保存日 + masters.SystemSetting.contract_retention_years から算出して保存する",
+        help_text="保存日 + settings.CONTRACT_RETENTION_YEARS から算出して保存する",
     )
     memo = models.TextField("メモ", blank=True, default="")
     file = models.FileField("ファイル", upload_to=contract_upload_path)
@@ -67,7 +70,9 @@ class Contract(models.Model):
         help_text="ファイルから抽出した本文テキスト。フリーワード全文検索の対象",
     )
     # documents.Document.title_normalized等と同じ理由で追加（core.text_normalization参照）。
-    title_normalized = models.CharField(max_length=255, blank=True, default="", editable=False)
+    # CharField(255)からTextFieldへの変更経緯もdocuments側と同じ（NFKC正規化による文字数増加で
+    # DataErrorが起き得たため。品質レビューで発見、2026-08-25修正）。
+    title_normalized = models.TextField(blank=True, default="", editable=False)
     memo_normalized = models.TextField(blank=True, default="", editable=False)
     extracted_text_normalized = models.TextField(blank=True, default="", editable=False)
     ocr_attempted = models.BooleanField(
@@ -121,33 +126,12 @@ class Contract(models.Model):
     def __str__(self):
         return self.title
 
-    def save(self, *args, **kwargs):
-        # documents.Document.saveと同じ理由（そちらのコメント参照）。
-        self.title_normalized = normalize_for_search(self.title)
-        self.memo_normalized = normalize_for_search(self.memo)
-        self.extracted_text_normalized = normalize_for_search(self.extracted_text)
-        update_fields = kwargs.get("update_fields")
-        if update_fields is not None:
-            update_fields = set(update_fields)
-            if "title" in update_fields:
-                update_fields.add("title_normalized")
-            if "memo" in update_fields:
-                update_fields.add("memo_normalized")
-            if "extracted_text" in update_fields:
-                update_fields.add("extracted_text_normalized")
-            kwargs["update_fields"] = update_fields
-        super().save(*args, **kwargs)
-
-    @property
-    def display_name(self):
-        """編集画面のPDFモックプレビュー等での表示用（storage_paths.contract_upload_pathが
-        付与する重複防止UUIDプレフィックスを除いた、元のアップロードファイル名部分のみ返す）。
-        """
-        basename = self.file.name.rsplit("/", 1)[-1]
-        return basename.split("_", 1)[1] if "_" in basename else basename
+    # save()（*_normalizedシャドウカラムの再計算）とdisplay_nameプロパティの実体は
+    # core.models.NormalizedTextFieldsMixin/UuidPrefixedFilenameMixinに集約済み
+    # （documents.Documentとの重複をコード監査で発見、2026-08-25修正）。
 
 
-class RelatedFile(models.Model):
+class RelatedFile(UuidPrefixedFilenameMixin, models.Model):
     """契約書の関連書類（screen-storage2契約書モード「関連書類」欄）。文書管理とは別の物理ファイル
     紐付けのみで、AI-OCR等の処理対象ではない（xlsx 保管!B480）。1ファイル選択ごとに次の行が
     自動追加される形でUI上は複数選択されるため、契約書1件に対し複数レコードを持つ。
@@ -171,10 +155,5 @@ class RelatedFile(models.Model):
     def __str__(self):
         return self.file.name
 
-    @property
-    def display_name(self):
-        """一覧・編集画面でのファイル名表示用（storage_paths.related_file_upload_pathが
-        付与する重複防止UUIDプレフィックスを除いた、元のアップロードファイル名部分のみ返す）。
-        """
-        basename = self.file.name.rsplit("/", 1)[-1]
-        return basename.split("_", 1)[1] if "_" in basename else basename
+    # display_nameプロパティの実体はcore.models.UuidPrefixedFilenameMixinに集約済み
+    # （Document/Contractとの重複をコード監査で発見、2026-08-25修正）。

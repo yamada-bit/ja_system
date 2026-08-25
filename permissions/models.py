@@ -13,6 +13,29 @@ class PermissionRole(models.TextChoices):
     STAFF = "staff", "一般"
 
 
+# PermissionProfileの権限フラグ(BooleanField)・多対多(ManyToManyField)フィールドの一覧。
+# permissions/forms.py（AuthorityEditFormの入力項目）とaccounts/services.py
+# （reset_permission_profile_if_neededの安全側リセット対象）の両方がこの一覧に依存する。
+# 以前は両ファイルにハードコードされた別々のリストとして重複していたため、新しい権限フラグ追加時に
+# 片方だけ更新してもう片方（特にリセット対象）を更新し忘れる、というドリフトリスクがあった
+# （コード監査で発見、2026-08-24修正）。新しいBooleanField/ManyToManyFieldをPermissionProfileに
+# 追加する際は、このリストへの追加も忘れないこと。
+# 加えてpermissions/views.py（AuthorityCsvExportView._flags_row・CSVヘッダーのwriterow）は
+# このリストを直接参照せず各フィールドを個別に手書きしているため、このリストとは別に手動同期が
+# 必要な3箇所目（コード監査で発見、2026-08-24追記）。フラグ追加時はそちらの更新も忘れないこと。
+FLAG_FIELDS = [
+    "doc_retention_edit",
+    "doc_download",
+    "contract_edit",
+    "contract_download",
+    "eapproval_view_setting",
+    "eapproval_doc_name_manage",
+    "eapproval_retention",
+]
+
+MULTI_FIELDS = ["doc_visible_groups", "contract_visible_departments", "contract_visible_groups"]
+
+
 class PermissionProfile(models.Model):
     """権限管理（screen-authority-list/edit）。職員1名につき1レコード。
 

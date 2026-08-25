@@ -13,10 +13,10 @@ from core.file_type_services import get_preview_kind
 from core.notice_services import is_expiring_soon
 from core.upload_views import BaseChunkUploadAPIView
 from documents.models import Document
-from documents.services import can_delete
+from documents.services import can_delete, document_searchable_department_ids
 from documents.views import PENDING_SESSION_KEY
 from masters.models import DocKbn
-from permissions.services import can_download, can_select_department
+from permissions.services import can_download
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,8 @@ class DetailAPIView(LoginRequiredMixin, View):
             Document.objects.select_related("department", "group", "category", "retention_period", "uploader"),
             pk=pk,
         )
-        if not can_select_department(request.user) and document.department_id != request.user.department_id:
+        allowed_department_ids = document_searchable_department_ids(request.user)
+        if allowed_department_ids is not None and document.department_id not in allowed_department_ids:
             logger.warning(
                 "他部署の文書への不正アクセス試行: employee_no=%s document_id=%s",
                 request.user.employee_no,
@@ -94,14 +95,22 @@ class DetailAPIView(LoginRequiredMixin, View):
                 # （拡張子判定）は権限に関わらず返す。common.jsのrenderDetailPopup()側で
                 # 「画像／PDFなのに権限不足で見せられない」ケースを判別し、権限不足である旨を
                 # 明示するために必要（2026-08-13ユーザー報告対応。documents/views._pending_preview_
-                # contextと同じ考え方）。
-                "preview_url": reverse("documents:preview", args=[document.pk]) if can_dl else None,
+                # contextと同じ考え方）。download_urlと同じくis_deletedもgatingに加える
+                # （品質レビューで発見：以前はcan_dlのみでis_deleted判定が漏れており、削除済み
+                # 文書でもプレビューが表示され続けていた。documents.views.PreviewView側も
+                # is_deleted=Falseに揃えてURL直打ち対策済み。2026-08-25修正）。
+                "preview_url": (
+                    reverse("documents:preview", args=[document.pk])
+                    if can_dl and not document.is_deleted
+                    else None
+                ),
                 "preview_kind": get_preview_kind(document.display_name),
-                # delete_urlはis_deleted=Trueの間は常に返す（DeleteView.postがis_deleted=False
-                # なら論理削除、is_deleted=Trueなら完全削除、と対象の状態に応じて分岐するため。
-                # ユーザー依頼2026-08-12：ゴミ箱保管中の文書は削除ボタンで完全削除できるようにした）。
-                # is_deleted=Falseの場合はxlsx「初回登録から1週間以上経過しているものは削除不可、
-                # ボタンを非表示にする」（documents.services.can_delete）に従いNoneにする。
+                # delete_urlはxlsx 検索・閲覧・変更!B331,B337(Rev1.2)「削除されている(削除フラグが
+                # True)文書は、ボタンを非表示とする」に従いis_deleted=Trueの間は常にNoneになる
+                # （documents.services.can_delete参照。2026-08-24のRev1.2反映でゴミ箱保管中からの
+                # 完全削除機能は廃止したため、is_deleted=Trueの文書はどの操作ボタンも表示しない）。
+                # is_deleted=Falseでも「初回登録から1週間以上経過しているものは削除不可、ボタンを
+                # 非表示にする」（documents.services.can_delete）に従いNoneになる。
                 "delete_url": reverse("documents:delete", args=[document.pk]) if can_delete(document) else None,
             }
         )

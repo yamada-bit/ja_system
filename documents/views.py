@@ -6,22 +6,28 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db import Error as DBError, transaction
-from django.http import FileResponse, Http404, JsonResponse
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 from django.views.generic import UpdateView
 
 from audit import services as audit_services
-from core import bulk_edit_services, upload_services
+from core import bulk_edit_services, record_views, upload_services, upload_views
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
 from core.text_extraction_services import try_immediate_text_layer_extraction
 from documents.forms import SearchForm, UploadStep2Form
 from documents.models import Document
 from documents.search_services import build_queryset
-from documents.services import apply_document_edit, calculate_expiry_date, can_delete, expiry_date_previews
+from documents.services import (
+    apply_document_edit,
+    build_zip_archive,
+    calculate_expiry_date,
+    document_searchable_department_ids,
+    expiry_date_previews,
+    scoped_get_object_or_404,
+)
 from permissions.services import can_download, can_select_department
 
 logger = logging.getLogger(__name__)
@@ -30,45 +36,13 @@ PENDING_SESSION_KEY = "documents_pending_upload"
 BULK_EDIT_SESSION_KEY = "documents_bulk_edit"
 
 
-class UploadStep1View(LoginRequiredMixin, View):
-    """screen-storage1（文書選択）。"""
+class UploadStep1View(LoginRequiredMixin, upload_views.BaseUploadStep1View):
+    """screen-storage1（文書選択）。実体はcore.upload_views.BaseUploadStep1Viewに集約済み
+    （contracts.views.UploadStep1Viewとの重複をコード監査で発見、2026-08-25修正）。"""
 
     template_name = "documents/storage1.html"
-
-    def get(self, request):
-        # 表示のたび保留プールをクリアする（チャンク分割だけしてフォーム未送信のまま離脱した
-        # 残骸を次回に持ち越さないため。core.upload_services docstring参照）。
-        upload_services.clear_pending_files(request.session, PENDING_SESSION_KEY)
-        return render(request, self.template_name, self._context())
-
-    def post(self, request):
-        files = request.FILES.getlist("files")
-        # settings.MAX_UPLOAD_SIZE_BYTESを超える大容量ファイルはstorage1.htmlのJSが送信前に
-        # upload/chunk/へチャンク分割送信し、combine_upload_chunksが完了ごとにこのセッションキー
-        # へ直接追記する（core.upload_views.BaseChunkUploadAPIView）。そのため、通常のfile input
-        # 経由のファイルが0件でも、既にチャンク経由で登録済みのファイルがあれば処理を続行してよい。
-        existing_pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
-        if not files and not existing_pending:
-            messages.error(request, "ファイルが選択されていません。")
-            return render(request, self.template_name, self._context())
-        if files:
-            try:
-                upload_services.save_pending_files(request.session, PENDING_SESSION_KEY, files)
-            except upload_services.PendingFileStorageError:
-                # MEDIA_ROOT/tmp_uploads への一時保存に失敗（ディスク容量不足・権限エラー等）。
-                # save_pending_filesはOSErrorをPendingFileStorageErrorにラップして送出するため、
-                # ここでは後者を捕捉する必要がある（原本フィデリティ監査で発見：以前は
-                # 素のOSErrorを捕捉していたため実際には一度もこのexcept節に到達しなかった）。
-                logger.exception(
-                    "アップロードファイルの一時保存に失敗しました: employee_no=%s", request.user.employee_no
-                )
-                messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
-                return render(request, self.template_name, self._context())
-        return redirect("documents:upload_step2")
-
-    def _context(self):
-        # storage1.htmlのJSがMAX_UPLOAD_SIZE_BYTES基準でチャンク分割の要否を判定するため渡す。
-        return {"max_upload_size_bytes": settings.MAX_UPLOAD_SIZE_BYTES}
+    pending_session_key = PENDING_SESSION_KEY
+    next_url_name = "documents:upload_step2"
 
 
 class UploadStep2View(LoginRequiredMixin, View):
@@ -97,7 +71,7 @@ class UploadStep2View(LoginRequiredMixin, View):
             self.template_name,
             {
                 "form": form,
-                "file_rows": _file_rows(form, pending),
+                "file_rows": upload_views.file_rows(form, pending),
                 "token": token,
                 "mode": "create",
                 **_pending_preview_context(request, pending),
@@ -124,7 +98,7 @@ class UploadStep2View(LoginRequiredMixin, View):
                 self.template_name,
                 {
                     "form": form,
-                    "file_rows": _file_rows(form, pending),
+                    "file_rows": upload_views.file_rows(form, pending),
                     "token": token,
                     "mode": "create",
                     **_pending_preview_context(request, pending),
@@ -175,13 +149,22 @@ class UploadStep2View(LoginRequiredMixin, View):
                         personal_info_flag=document.privacy_flag,
                     )
                     created.append(document)
-        except OSError:
+        except (OSError, DBError):
             # open_pending_file()／file.save()でのファイルI/O失敗（一時ファイル欠損・ディスク
-            # 容量不足等）。transaction.atomic()によりここまでの登録はロールバックされるため、
-            # DBには一部だけ登録された不整合な状態は残らない。tmp_uploads側の一時ファイルと
-            # セッションのpendingはあえてクリアせず、利用者が保管画面２からやり直せるようにする。
+            # 容量不足等）に加え、document.save()でのDB制約違反等（IntegrityError/
+            # OperationalError等のDBError）も対象にする（品質レビューで発見：以前はOSErrorしか
+            # 捕捉しておらずDBErrorは未捕捉のまま生の500エラーになっていた）。
+            # transaction.atomic()によりDBへの登録はロールバックされ、DBには一部だけ登録された
+            # 不整合な状態は残らないが、ロールバック対象の文書について既にストレージへ書き込み
+            # 済みだったファイル実体はDBトランザクションの対象外のため孤児化する（品質レビューで
+            # 発見：DB側の不整合のみ解決されておりファイル実体側は未解決だった）。createdに
+            # 積まれた（=document.save()まで成功していた）文書のファイル実体をここで明示的に
+            # 削除して孤児ファイルを防ぐ。tmp_uploads側の一時ファイルとセッションのpendingは
+            # あえてクリアせず、利用者が保管画面２からやり直せるようにする。
+            for document in created:
+                document.file.delete(save=False)
             logger.exception(
-                "文書の保管処理中にファイルI/Oエラーが発生しました: employee_no=%s", request.user.employee_no
+                "文書の保管処理中にエラーが発生しました: employee_no=%s", request.user.employee_no
             )
             messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
             return redirect("documents:upload_step2")
@@ -215,7 +198,7 @@ class UploadStep2View(LoginRequiredMixin, View):
             self.template_name,
             {
                 "form": form,
-                "file_rows": _file_rows(form, pending),
+                "file_rows": upload_views.file_rows(form, pending),
                 "token": token,
                 "mode": "create",
                 "complete": {"created": created, "mode": "create"},
@@ -235,7 +218,11 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
     form_id = "documents_edit"
 
     def get_object(self, queryset=None):
-        return get_object_or_404(Document, pk=self.kwargs["pk"], is_deleted=False)
+        # セキュリティレビューで発見：部署スコープ外の文書へのURL直打ちを防ぐ
+        # （documents.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
+        return scoped_get_object_or_404(
+            Document.objects.filter(is_deleted=False), self.request.user, self.kwargs["pk"]
+        )
 
     def get(self, request, *args, **kwargs):
         self.object = self.get_object()
@@ -279,7 +266,19 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
                 },
             )
 
-        doc = apply_document_edit(self.object, form.cleaned_data, request.user)
+        try:
+            doc = apply_document_edit(self.object, form.cleaned_data, request.user)
+        except DBError:
+            # contracts.views.ContractEditView.postと同じ理由（品質レビューで発見：documents側は
+            # apply_document_edit()を裸で呼んでおり、DB制約違反等が未捕捉のまま生の500になって
+            # いた。2026-08-25修正）。
+            logger.exception(
+                "文書の更新処理中にDBエラーが発生しました: document_id=%s, employee_no=%s",
+                self.object.pk,
+                request.user.employee_no,
+            )
+            messages.error(request, "更新に失敗しました。もう一度お試しください。")
+            return redirect("documents:edit", pk=self.object.pk)
         audit_services.log(
             employee=request.user,
             action="保管画面２ 更新",
@@ -339,27 +338,11 @@ class BulkEditStartView(LoginRequiredMixin, View):
             messages.error(request, "編集する文書を選択してください。")
             return redirect("documents:search")
 
-        # BulkDownloadViewと同じ理由（改ざんや誤ったリンク等で数値以外が混入し得るため、
-        # 無効な値は除外しつつ不正アクセス試行の兆候として警告ログに残す）。
-        valid_pks = []
-        for p in pks:
-            try:
-                valid_pks.append(int(p))
-            except (TypeError, ValueError):
-                logger.warning(
-                    "一括編集の選択値(pks)に不正な値が含まれていたため除外しました: "
-                    "employee_no=%s value=%r",
-                    request.user.employee_no,
-                    p,
-                )
-
-        # 検索結果に表示されていた順序（=POSTされたpksの順序）をそのままウィザードの
-        # 巡回順にする。存在しない・削除済みのpkはここで静かに除外する（BulkDownloadViewが
-        # ZIPから静かに除外するのと同じ方針）。
-        existing_pks = set(
-            Document.objects.filter(pk__in=valid_pks, is_deleted=False).values_list("pk", flat=True)
+        # pks検証・部署スコープ絞り込みの実体はcore.bulk_edit_services.resolve_ordered_pksに
+        # 集約済み（contracts.views.BulkEditStartViewとの重複をコード監査で発見、2026-08-25修正）。
+        ordered_pks = bulk_edit_services.resolve_ordered_pks(
+            pks, model=Document, dept_ids_resolver=document_searchable_department_ids, employee=request.user
         )
-        ordered_pks = [pk for pk in valid_pks if pk in existing_pks]
         if not ordered_pks:
             messages.error(request, "編集する文書を選択してください。")
             return redirect("documents:search")
@@ -395,7 +378,11 @@ class BulkEditView(LoginRequiredMixin, View):
         if state is None:
             return redirect("documents:search")
 
-        self.object = get_object_or_404(Document, pk=state["pks"][state["index"]], is_deleted=False)
+        # セキュリティレビューで発見：部署スコープ外の文書へのセッション改ざん・URL直打ちを
+        # 防ぐ（documents.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
+        self.object = scoped_get_object_or_404(
+            Document.objects.filter(is_deleted=False), request.user, state["pks"][state["index"]]
+        )
         form = self._build_form()
         token = issue_token(request.session, self.form_id)
         return render(request, self.template_name, self._context(request, form, token, state))
@@ -405,7 +392,11 @@ class BulkEditView(LoginRequiredMixin, View):
         if state is None:
             return redirect("documents:search")
 
-        self.object = get_object_or_404(Document, pk=state["pks"][state["index"]], is_deleted=False)
+        # セキュリティレビューで発見：部署スコープ外の文書へのセッション改ざん・URL直打ちを
+        # 防ぐ（documents.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
+        self.object = scoped_get_object_or_404(
+            Document.objects.filter(is_deleted=False), request.user, state["pks"][state["index"]]
+        )
         submitted_token = request.POST.get("token", "")
         if not consume_token(request.session, self.form_id, submitted_token):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
@@ -416,7 +407,19 @@ class BulkEditView(LoginRequiredMixin, View):
             token = issue_token(request.session, self.form_id)
             return render(request, self.template_name, self._context(request, form, token, state))
 
-        doc = apply_document_edit(self.object, form.cleaned_data, request.user)
+        try:
+            doc = apply_document_edit(self.object, form.cleaned_data, request.user)
+        except DBError:
+            # contracts.views.BulkEditView.postと同じ理由（documents.views.DocumentEditView.post
+            # と同様、以前はDBErrorが未捕捉のまま生の500になっていた。2026-08-25修正）。
+            logger.exception(
+                "文書の一括編集処理中にDBエラーが発生しました: document_id=%s, employee_no=%s",
+                self.object.pk,
+                request.user.employee_no,
+            )
+            messages.error(request, "更新に失敗しました。もう一度お試しください。")
+            token = issue_token(request.session, self.form_id)
+            return render(request, self.template_name, self._context(request, form, token, state))
         audit_services.log(
             employee=request.user,
             action="保管画面２ 更新",
@@ -496,14 +499,6 @@ def _strip_ext(filename):
     return filename.rsplit(".", 1)[0] if "." in filename else filename
 
 
-def _file_rows(form, pending):
-    """テンプレート側で `{{ item.original_name }}` と対応する `title_N` 入力欄を並べて表示するための
-    (pendingの要素, BoundField)組を作る。title_Nはファイル数に応じて動的に追加されるフィールドのため
-    テンプレート内で名前を組み立てて引くことができず、ここでビューが束ねてから渡す。
-    """
-    return [(item, form[f"title_{i}"]) for i, item in enumerate(pending)]
-
-
 def _expiry_preview_context(form):
     """storage2.html・edit.htmlの保存満了日プレビュー用。formの`retention_period`選択肢に
     対する{pk: ISO日付文字列}を渡し、JS側はこれを引くだけで済むようにする（documents.services.
@@ -513,46 +508,17 @@ def _expiry_preview_context(form):
 
 
 def _pending_preview_context(request, pending):
-    """保管画面２のPDFモックプレビュー（storage2.html）を、対象が画像／PDFの場合のみ
-    PendingPreviewView経由の実データ<img>/<iframe>表示に切り替えるための追加コンテキスト。
-    ダウンロード権限が無いユーザーにはpreview_urlsを空にし、テンプレート側は従来の
-    モック表示のまま変わらないようにする（search.htmlのcan_download gatingと同じ方針）。
-    preview_kindsの各要素は"image"/"pdf"/""（該当無し、JS側の文字列比較のためNoneではなく
-    空文字にする）。
-    """
-    preview_kinds = [get_preview_kind(item["original_name"]) or "" for item in pending]
-    if can_download(request.user, kind="document"):
-        preview_urls = [
-            reverse("documents:upload_step2_preview", args=[i]) for i in range(len(pending))
-        ]
-    else:
-        preview_urls = []
-    return {"preview_kinds": preview_kinds, "preview_urls": preview_urls}
+    return upload_views.build_pending_preview_context(
+        request, pending, kind="document", preview_url_name="documents:upload_step2_preview"
+    )
 
 
-class PendingPreviewView(LoginRequiredMixin, View):
-    """保管画面２（登録前）のPDFモックプレビューを、選択中の保留ファイルの実データで表示する。
-    対象の文書はまだDBに保存されておりpkが存在しないため、PreviewView（pkベース）は使えず、
-    セッションの保留ファイル一覧をindexで参照する。他人がtemp_name（tmp_uploads/配下の実パスの
-    一部）を直接推測しても、保留ファイル一覧自体がリクエスト元のセッションに紐付くため
-    参照できない。
-    """
+class PendingPreviewView(LoginRequiredMixin, upload_views.BasePendingPreviewView):
+    """実体はcore.upload_views.BasePendingPreviewViewに集約済み（contracts.views.
+    PendingPreviewViewとの重複をコード監査で発見、2026-08-25修正）。"""
 
-    def get(self, request, index):
-        if not can_download(request.user, kind="document"):
-            logger.warning(
-                "プレビュー権限の無いユーザーによる試行: employee_no=%s", request.user.employee_no
-            )
-            raise PermissionDenied("プレビュー権限がありません。")
-        pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
-        if index >= len(pending):
-            raise Http404("プレビュー対象のファイルが見つかりません。")
-        item = pending[index]
-        try:
-            temp_file = upload_services.open_pending_file(item["temp_name"])
-        except upload_services.PendingFileStorageError:
-            raise Http404("プレビュー対象のファイルが見つかりません。")
-        return FileResponse(temp_file, as_attachment=False, filename=item["original_name"])
+    pending_session_key = PENDING_SESSION_KEY
+    kind = "document"
 
 
 class SearchView(LoginRequiredMixin, View):
@@ -588,237 +554,84 @@ class SearchView(LoginRequiredMixin, View):
         )
 
 
-class DownloadView(LoginRequiredMixin, View):
+class DownloadView(LoginRequiredMixin, record_views.BaseFileServeView):
     """詳細ポップアップ「ダウンロード」ボタン。要再確認No.20〜22（権限管理「文書-ダウンロード」フラグ）
-    に対応し、`permissions.services.can_download`で一元判定する。
-
-    xlsx 検索・閲覧・変更!B331(Rev1.2)「削除されている(削除フラグがTrue)文書は、ボタンを非表示と
-    する」に対応し、DocumentEditView.get_object()と同じくis_deleted=Falseでしか対象を取得できない
-    ようにする（監査で発見：documents.api.DetailAPIViewのdownload_urlはcan_download権限のみを
-    見ておりis_deleted判定が漏れていたため、削除済み文書でもダウンロードボタンが表示され続けて
-    いた）。
+    に対応し、`permissions.services.can_download`で一元判定する。実体はcore.record_views.
+    BaseFileServeViewに集約済み（contracts.views.DownloadViewとの重複をコード監査で発見、
+    2026-08-25修正）。
     """
 
-    def get(self, request, pk):
-        document = get_object_or_404(Document, pk=pk, is_deleted=False)
-        if not can_download(request.user, kind="document"):
-            logger.warning(
-                "ダウンロード権限の無いユーザーによる試行: employee_no=%s document_id=%s",
-                request.user.employee_no,
-                pk,
-            )
-            raise PermissionDenied("ダウンロード権限がありません。")
-        try:
-            response = FileResponse(
-                document.file.open("rb"), as_attachment=True, filename=document.display_name
-            )
-        except OSError:
-            # FileNotFoundError（実体欠損）だけでなくPermissionError（ロック・権限エラー等）も
-            # OSErrorのサブクラスのため、ストレージI/O境界で起こりうるOSError全般をここで
-            # 利用者向けのHttp404に変換する（監査で指摘：以前はFileNotFoundErrorのみ捕捉していた）。
-            logger.exception("ファイル実体の取得に失敗しました: document_id=%s", pk)
-            raise Http404("ファイルが見つかりません。")
-        # 原本にはない追加対応（2026-08-12）。登録・更新・削除は元々audit_services.log()で
-        # 記録されるのに、文書管理システムの核心操作である「誰がいつ閲覧・持ち出したか」の
-        # ダウンロードだけ監査ログに一切残っていなかった（未実装改善候補の棚卸しで発見）。
-        # ファイルI/O成功後（ユーザーが実際にダウンロードを受け取れる状態になった後）に記録する。
-        audit_services.log(
-            employee=request.user,
-            action="文書検索 ダウンロード",
-            event_message=f"文書「{document.title}」をダウンロードしました。",
-            personal_info_flag=document.privacy_flag,
-        )
-        return response
+    model = Document
+    kind = "document"
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    as_attachment = True
+    audit_action = "文書検索 ダウンロード"
+    entity_label = "文書"
+
+    def audit_extra_kwargs(self, obj):
+        return {"personal_info_flag": obj.privacy_flag}
 
 
-class PreviewView(LoginRequiredMixin, View):
+class PreviewView(LoginRequiredMixin, record_views.BaseFileServeView):
     """screen-search「文書イメージ」欄。原本index.htmlには実データ連携が無く固定のシミュレーション
     文言のみだったが、ユーザー要望で実ファイルのプレビュー表示に対応する。DownloadViewと同じ
-    `can_download`権限で保護した上で`as_attachment=False`（Content-Disposition: inline）で返し、
-    ブラウザ内蔵のPDF/画像ビューアで一覧画面の<iframe>に埋め込み表示できるようにする
-    （ダウンロード可否＝プレビュー可否として扱う。閲覧のみ許可し保存は禁止、という粒度の権限は
-    権限管理側に無いため区別しない）。
+    `can_download`権限で保護した上でContent-Disposition: inlineで返し、ブラウザ内蔵のPDF/画像
+    ビューアで一覧画面の<iframe>に埋め込み表示できるようにする（ダウンロード可否＝プレビュー可否
+    として扱う。閲覧のみ許可し保存は禁止、という粒度の権限は権限管理側に無いため区別しない）。
+    実体はcore.record_views.BaseFileServeViewに集約済み（contracts.views.PreviewViewとの重複を
+    コード監査で発見、2026-08-25修正）。
     """
 
-    def get(self, request, pk):
-        document = get_object_or_404(Document, pk=pk)
-        if not can_download(request.user, kind="document"):
-            logger.warning(
-                "プレビュー権限の無いユーザーによる試行: employee_no=%s document_id=%s",
-                request.user.employee_no,
-                pk,
-            )
-            raise PermissionDenied("プレビュー権限がありません。")
-        try:
-            response = FileResponse(
-                document.file.open("rb"), as_attachment=False, filename=document.display_name
-            )
-        except OSError:
-            logger.exception("ファイル実体の取得に失敗しました: document_id=%s", pk)
-            raise Http404("ファイルが見つかりません。")
-        # DownloadViewと同様の追加対応（2026-08-12）。プレビュー表示もダウンロードと同じく
-        # ファイル実体の中身に利用者がアクセスできた操作のため、同じ粒度で監査ログに残す。
-        audit_services.log(
-            employee=request.user,
-            action="文書検索 プレビュー",
-            event_message=f"文書「{document.title}」をプレビュー表示しました。",
-            personal_info_flag=document.privacy_flag,
-        )
-        return response
+    model = Document
+    kind = "document"
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    as_attachment = False
+    audit_action = "文書検索 プレビュー"
+    entity_label = "文書"
+
+    def audit_extra_kwargs(self, obj):
+        return {"personal_info_flag": obj.privacy_flag}
 
 
-class BulkDownloadView(LoginRequiredMixin, View):
+class BulkDownloadView(LoginRequiredMixin, record_views.BaseBulkDownloadView):
     """screen-search「一括ダウンロード」（xlsx 検索・閲覧・変更!B264-265、要再確認No.20）。
     原本はonclick未設定のモックだったが、権限判定(`can_download`)自体は単体ダウンロードと
     同じ要再確認No.20〜22フラグで既に解決済みのため、選択された複数文書をZIPにまとめて
     ダウンロードする機能として実装する（ZIP圧縮という技術的な実現方法自体はxlsxに明記は
     無いが、「複数ファイルの一括ダウンロード」という要求から一意に導ける一般的な実装）。
+    実体はcore.record_views.BaseBulkDownloadViewに集約済み（contracts.views.BulkDownloadViewとの
+    重複をコード監査で発見、2026-08-25修正）。
     """
 
-    def post(self, request):
-        pks = request.POST.getlist("pks")
-        if not pks:
-            messages.error(request, "ダウンロードする文書を選択してください。")
-            return redirect("documents:search")
-        if not can_download(request.user, kind="document"):
-            logger.warning(
-                "ダウンロード権限の無いユーザーによる一括ダウンロード試行: employee_no=%s",
-                request.user.employee_no,
-            )
-            raise PermissionDenied("ダウンロード権限がありません。")
+    model = Document
+    kind = "document"
+    dept_ids_resolver = staticmethod(document_searchable_department_ids)
+    zip_builder = staticmethod(build_zip_archive)
+    audit_action = "文書検索 一括ダウンロード"
+    entity_label = "文書"
+    search_url_name = "documents:search"
+    zip_filename = "documents.zip"
 
-        # pksはURLパスコンバータを経由しない生のPOST値のため、改ざんや誤ったリンク等で
-        # 数値以外が混入し得る（documents.search_services.build_queryset参照）。無効な値は
-        # 除外しつつ、不正アクセス試行の兆候として警告ログに残す。
-        valid_pks = []
-        for p in pks:
-            try:
-                valid_pks.append(int(p))
-            except (TypeError, ValueError):
-                logger.warning(
-                    "一括ダウンロードの選択値(pks)に不正な値が含まれていたため除外しました: "
-                    "employee_no=%s value=%r",
-                    request.user.employee_no,
-                    p,
-                )
-
-        import io
-        import zipfile
-
-        from django.http import HttpResponse
-
-        documents = Document.objects.filter(pk__in=valid_pks, is_deleted=False)
-        total_count = documents.count()
-        missing_count = 0
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for document in documents:
-                try:
-                    with document.file.open("rb") as fh:
-                        zf.writestr(document.file.name.rsplit("/", 1)[-1], fh.read())
-                except FileNotFoundError:
-                    # 1件のファイル実体欠損でZIP全体のダウンロードを失敗させると、欠損と無関係な
-                    # 他の正常なファイルまで利用者が受け取れなくなってしまう（「本質的でない処理の
-                    # 失敗で本処理まで巻き込まない」という設計判断）。欠損はログに残した上でスキップし、
-                    # 件数の不一致は下のmessages.warningで利用者にも案内する（監査で指摘：以前は
-                    # ログにしか残らず、利用者はZIPの中身が欠けていることに気づけなかった）。
-                    logger.exception("一括ダウンロード中にファイル実体が見つかりません: document_id=%s", document.pk)
-                    missing_count += 1
-
-        logger.info(
-            "一括ダウンロードを実行しました: employee_no=%s 件数=%s", request.user.employee_no, total_count
-        )
-        # DownloadView/PreviewViewと同様の追加対応（2026-08-12）。個々のファイル単位ではなく
-        # 一括ダウンロード1回の操作として1件だけ記録する（ZIPに含まれる文書数だけログが増殖する
-        # と操作履歴ログ本来の「画面操作の履歴」という粒度から外れるため）。個人情報書類が
-        # 1件でも含まれていればフラグを立てる。
-        audit_services.log(
-            employee=request.user,
-            action="文書検索 一括ダウンロード",
-            event_message=f"文書{total_count}件を一括ダウンロードしました。",
-            personal_info_flag=any(document.privacy_flag for document in documents),
-        )
-        if missing_count:
-            messages.warning(
-                request,
-                f"選択した{total_count}件中{missing_count}件のファイルが見つからなかったため、"
-                "ダウンロードされたZIPに含まれていません。",
-            )
-        response = HttpResponse(buffer.getvalue(), content_type="application/zip")
-        response["Content-Disposition"] = 'attachment; filename="documents.zip"'
-        return response
+    def audit_extra_kwargs(self, objects):
+        # 個人情報書類が1件でも含まれていればフラグを立てる。
+        return {"personal_info_flag": any(document.privacy_flag for document in objects)}
 
 
-class DeleteView(LoginRequiredMixin, View):
+class DeleteView(LoginRequiredMixin, record_views.BaseDeleteView):
     """詳細ポップアップ「削除」ボタン。論理削除（is_deleted=True）のみを行う。
 
     2026-08-12にユーザー依頼で「ゴミ箱保管中（is_deleted=True）の文書は削除ボタンで完全削除できる」
     機能を追加していたが、Rev1.2改訂（xlsx 検索・閲覧・変更!B331,B337「削除されている文書は、
     ボタンを非表示とする」）でユーザー判断によりxlsx優先とし、2026-08-24に完全削除機能は廃止した
     （documents.services.can_delete docstring参照。完全削除自体は自動物理削除バッチ
-    〈core.management.commands.purge_expired_deleted_records〉に一本化）。
-
-    原本index.html:1125-1131のtriggerDeleteFromDetail()はfetch()の完了を待って
-    ポップアップを閉じる・完了アラート・一覧再描画を行う設計だが、本ビューは元々常に
-    redirect()（302→200 HTML）を返しており、common.js側は`X-Requested-With`ヘッダーを
-    付けてAJAX呼び出ししているにもかかわらずJSONとしてパースしようとして例外になり、
-    削除自体は成功してもUI側のフィードバックが一切動作しないバグがあった（原本フィデリティ
-    監査で発見）。AJAXリクエストを検知した場合はJsonResponseを返すことで解消する。
+    〈core.management.commands.purge_expired_deleted_records〉に一本化）。実体はcore.record_views.
+    BaseDeleteViewに集約済み（contracts.views.DeleteViewとの重複をコード監査で発見、2026-08-25修正）。
     """
 
-    def post(self, request, pk):
-        is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    model = Document
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    entity_label = "文書"
+    search_url_name = "documents:search"
 
-        try:
-            document = get_object_or_404(Document, pk=pk)
-        except Http404:
-            # common.js側はfetch().then(r=>r.json())で応答をJSONとしてparseするため、
-            # AJAX呼び出し時にDjango標準の404 HTMLページを返すとクラスdocstring記載のバグが
-            # 別経路（対象未存在）で再発する。AJAX判定時はJSONで404を返す。
-            if is_ajax:
-                return JsonResponse({"success": False, "message": "対象の文書が見つかりません。"}, status=404)
-            raise
-
-        if not can_delete(document):
-            # xlsx 検索・閲覧・変更!B331,B337,B339-340「削除済みの文書、および初回登録から1週間
-            # 以上経過しているものは削除不可。ボタンを非表示にする」。UI側
-            # （common.jsのrenderDetailPopup()）はdelete_urlがNoneの間ボタン自体を隠すが、
-            # API直叩き等に備えサーバー側でも拒否する。
-            logger.warning(
-                "削除できない文書への削除操作を拒否しました: employee_no=%s document_id=%s is_deleted=%s",
-                request.user.employee_no,
-                pk,
-                document.is_deleted,
-            )
-            message = "この文書は既に削除されています。" if document.is_deleted else "保存から1週間以上経過した文書は削除できません。"
-            if is_ajax:
-                return JsonResponse({"success": False, "message": message}, status=403)
-            raise PermissionDenied(message)
-
-        try:
-            document.is_deleted = True
-            document.deleted_at = timezone.now()
-            document.save(update_fields=["is_deleted", "deleted_at"])
-        except DBError:
-            # DB接続断・制約違反等で削除が失敗した場合も、上記と同じ理由でAJAX時はJSONを返す
-            # 必要がある（このexcept節が無いと非AJAX時と同じ生の500応答になりfetch側が壊れる）。
-            logger.exception("文書の削除処理に失敗しました: document_id=%s", pk)
-            if is_ajax:
-                return JsonResponse(
-                    {"success": False, "message": "削除に失敗しました。もう一度お試しください。"}, status=500
-                )
-            messages.error(request, "削除に失敗しました。もう一度お試しください。")
-            return redirect("documents:search")
-
-        audit_services.log(
-            employee=request.user,
-            action="検索・閲覧画面 削除",
-            event_message=f"文書「{document.title}」を削除しました。",
-            personal_info_flag=document.privacy_flag,
-        )
-        success_message = "文書を削除しました。"
-
-        if is_ajax:
-            return JsonResponse({"success": True, "message": success_message})
-        messages.success(request, success_message)
-        return redirect("documents:search")
+    def audit_extra_kwargs(self, obj):
+        return {"personal_info_flag": obj.privacy_flag}

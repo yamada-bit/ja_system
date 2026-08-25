@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 
 from django.conf import settings
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from documents.models import Document
@@ -33,10 +34,14 @@ def get_notice_counts(employee) -> NoticeCounts:
     選んだ）。
 
     件数は`employee`が検索・閲覧画面で実際に見られる範囲に合わせて絞り込む（以前からのdocuments
-    側の方針を契約書側にも適用。documents側はcan_select_department()、契約書側は
-    contract_searchable_department_ids()——検索画面の部署絞り込みと同じ関数を使う）。
+    側の方針を契約書側にも適用。documents側はcan_select_department()で管理者以外を絞り込み対象と
+    判定した上でvisible_department_ids()、契約書側はcontract_searchable_department_ids()——
+    それぞれ検索画面の部署絞り込みと同じ関数を使う。2026-08-24、documents側がvisible_department_ids()
+    を経由せず自部署のみでフィルタしていたため、閲覧部署範囲テーブル〈部署統合・分割〉未反映の
+    まま検索画面と件数が食い違うバグを修正した）。
     """
     from contracts.models import Contract
+    from organizations.services import visible_department_ids
     from permissions.services import can_select_department, contract_searchable_department_ids
 
     today = timezone.localdate()
@@ -45,27 +50,43 @@ def get_notice_counts(employee) -> NoticeCounts:
 
     doc_qs = Document.objects.all()
     if not can_select_department(employee):
-        doc_qs = doc_qs.filter(department=employee.department)
+        # documents/search_services.pyの非管理者向け部署フィルタと同じvisible_department_ids()を使う
+        # （閲覧部署範囲テーブル〈部署統合・分割〉未反映のままだと、文書検索画面と件数が食い違う）。
+        doc_qs = doc_qs.filter(department_id__in=visible_department_ids(employee))
 
     contract_qs = Contract.objects.all()
     contract_dept_ids = contract_searchable_department_ids(employee)
     if contract_dept_ids is not None:
         contract_qs = contract_qs.filter(department_id__in=contract_dept_ids)
 
-    return NoticeCounts(
-        expired_documents=doc_qs.filter(is_deleted=False, expiry_date__lt=today).count(),
-        expired_contracts=contract_qs.filter(is_deleted=False, expiry_date__lt=today).count(),
-        expiring_soon_documents=doc_qs.filter(
-            is_deleted=False, expiry_date__gte=today, expiry_date__lte=soon_limit
-        ).count(),
-        expiring_soon_contracts=contract_qs.filter(
-            is_deleted=False, expiry_date__gte=today, expiry_date__lte=soon_limit
-        ).count(),
-        recently_deleted_documents=doc_qs.filter(is_deleted=True, deleted_at__date__gte=deleted_since).count(),
-        recently_deleted_contracts=contract_qs.filter(
-            is_deleted=True, deleted_at__date__gte=deleted_since
-        ).count(),
+    doc_expired, doc_expiring_soon, doc_recently_deleted = _expiry_counts(doc_qs, today, soon_limit, deleted_since)
+    contract_expired, contract_expiring_soon, contract_recently_deleted = _expiry_counts(
+        contract_qs, today, soon_limit, deleted_since
     )
+
+    return NoticeCounts(
+        expired_documents=doc_expired,
+        expired_contracts=contract_expired,
+        expiring_soon_documents=doc_expiring_soon,
+        expiring_soon_contracts=contract_expiring_soon,
+        recently_deleted_documents=doc_recently_deleted,
+        recently_deleted_contracts=contract_recently_deleted,
+    )
+
+
+def _expiry_counts(qs, today, soon_limit, deleted_since):
+    """expired/expiring_soon/recently_deletedの3件数を、qsに対する1回のaggregate()で算出する。
+    documents用・contracts用で同じ3条件を繰り返し書く（かつ.count()を計6回発行する）実装だったのを、
+    メイン画面という高頻度アクセス画面向けに集約した。
+    """
+    counts = qs.aggregate(
+        expired=Count("pk", filter=Q(is_deleted=False, expiry_date__lt=today)),
+        expiring_soon=Count(
+            "pk", filter=Q(is_deleted=False, expiry_date__gte=today, expiry_date__lte=soon_limit)
+        ),
+        recently_deleted=Count("pk", filter=Q(is_deleted=True, deleted_at__date__gte=deleted_since)),
+    )
+    return counts["expired"], counts["expiring_soon"], counts["recently_deleted"]
 
 
 def is_expiring_soon(expiry_date: datetime.date) -> bool:

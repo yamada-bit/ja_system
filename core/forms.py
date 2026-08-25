@@ -5,8 +5,10 @@ import re
 from django import forms
 from django.db.models import Min
 
-from masters.models import SystemSetting
+from masters.models import Category, Group, SystemSetting
+from masters.services import scope_queryset_by_department
 from organizations.models import MenuItemSetting
+from permissions.services import department_ids_for_group_scope, visible_groups
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,79 @@ def _oldest_saved_year(kind):
     from documents.models import Document
 
     return Document.objects.filter(is_deleted=False).aggregate(Min("year"))["year__min"]
+
+
+# dept_idsの「未指定（呼び出し側で計算させる）」と「Noneが明示的な計算結果（管理者＝無制限）」を
+# 区別するためのセンチネル。第二引数の既定値をNoneにすると、既に計算済みの管理者(None)を
+# 渡されたときに二重計算してしまう（dept_ids=Noneはそれ自体が有効な値のため）。
+_DEPT_IDS_UNSET = object()
+
+
+def scoped_group_and_category_querysets(*, doc_kbn, kind, employee, dept_ids=_DEPT_IDS_UNSET):
+    """documents.forms/contracts.formsのUploadStep2Form・SearchFormが共通で必要とする
+    「保管/検索フォームで選択できる分類(masters.Group)・カテゴリー(masters.Category)」の
+    クエリセットを2段階で絞り込んで返す（4フォームでほぼ同一のブロックが独立実装されて
+    いた重複を解消。コード監査で発見、2026-08-25修正）。
+
+    1. `permissions.services.visible_groups`（所属長への分類ホワイトリスト設定、
+       PermissionProfile.doc_visible_groups/contract_visible_groups）。未設定なら無制限。
+    2. Rev1.2の部署スコープ（`permissions.services.department_ids_for_group_scope`、
+       非管理者は自部署のみ）。
+
+    2は1の結果に対してAND条件で適用するため、1で他部署の分類を明示的に許可していても
+    2で対象外部署なら最終的に除外される。この優先順位はユーザーへ確認済み
+    （Rev1.2「分類/カテゴリー選択は…自部署の内容を表示」を字義通りの仕様として扱い、
+    doc_visible_groups側の他部署許可より部署スコープを常に優先する。2026-08-25確認）。
+
+    `dept_ids`を明示的に渡さない場合は`department_ids_for_group_scope(employee, kind=kind)`で
+    都度計算する。contracts.forms.SearchFormのみ、`contract_searchable_department_ids`の
+    重複クエリ発行を避けるため呼び出し側で事前計算した値（管理者ならNoneそのもの）を渡す
+    （同関数のコメント参照）。
+    """
+    allowed_groups = visible_groups(employee, kind=kind) if employee is not None else None
+    group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
+    group_qs = group_qs.filter(doc_kbn=doc_kbn, is_deleted=False)
+    category_qs = Category.objects.filter(doc_kbn=doc_kbn, is_deleted=False)
+    if employee is not None:
+        if dept_ids is _DEPT_IDS_UNSET:
+            dept_ids = department_ids_for_group_scope(employee, kind=kind)
+        group_qs = scope_queryset_by_department(group_qs, dept_ids)
+        category_qs = scope_queryset_by_department(category_qs, dept_ids)
+    return group_qs, category_qs
+
+
+# 検索フォームのタイトル/フリーワードの一致方式（AND/OR切替）。documents.forms.SearchForm/
+# contracts.forms.SearchFormが定数ごと完全に同一実装のまま重複していたため集約した
+# （品質レビューで発見、2026-08-25修正）。
+MATCH_OR = "or"
+MATCH_AND = "and"
+MATCH_CHOICES = ((MATCH_OR, "いずれかを含む"), (MATCH_AND, "すべて含む"))
+
+# RadioSelectのバインド済みフォームは、選択肢キーがdataに無いと（未送信時と区別が付かず）
+# 一切checkedを付けない。SearchFormは初回アクセス時もrequest.GETで常時バインドする方針
+# （accounts.services.filter_staff_querysetのコメント参照）のためinitialが効かず、
+# 原本index.html:383,387,395が既定でchecked状態にしているラジオが未選択表示になっていた。
+SEARCH_RADIO_DEFAULTS = {"title_match": MATCH_OR, "freeword_match": MATCH_OR, "save_day_kbn": "save"}
+
+
+def apply_radio_defaults(args, kwargs):
+    """documents.forms.SearchForm.__init__/contracts.forms.SearchForm.__init__が共通で行う、
+    RadioSelectの既定checked値の補完処理（SEARCH_RADIO_DEFAULTS参照）を集約した
+    （品質レビューで発見、2026-08-25修正）。フォームの`__init__(self, *args, **kwargs)`の
+    冒頭で`args, kwargs = apply_radio_defaults(args, kwargs)`のように呼び出し、
+    戻り値をそのまま`super().__init__(*args, **kwargs)`に渡す。
+    """
+    if args and args[0] is not None:
+        data = args[0].copy()
+        for field_name, default in SEARCH_RADIO_DEFAULTS.items():
+            data.setdefault(field_name, default)
+        args = (data,) + args[1:]
+    elif kwargs.get("data") is not None:
+        data = kwargs["data"].copy()
+        for field_name, default in SEARCH_RADIO_DEFAULTS.items():
+            data.setdefault(field_name, default)
+        kwargs["data"] = data
+    return args, kwargs
 
 
 class OtherPassForm(forms.Form):

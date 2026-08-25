@@ -101,7 +101,7 @@
               </thead>
               <tbody>
                 {% for document in page_obj %}
-                  <tr{% if forloop.counter|divisibleby:2 %} style="background-color:#E7E7E7;"{% endif %} onclick="showSearchPreview('{{ document.title|escapejs }}', '{% if can_download %}{% url 'documents:preview' document.pk %}{% endif %}', 'document', '{{ document.display_name|preview_kind }}')" ondblclick="openDetailPopup('{% url 'documents:api_detail' document.pk %}', 'document')">
+                  <tr{% if forloop.counter|divisibleby:2 %} style="background-color:#E7E7E7;"{% endif %} onclick="showSearchPreview('{{ document.title|escapejs }}', '{% if can_download and not document.is_deleted %}{% url 'documents:preview' document.pk %}{% endif %}', 'document', '{{ document.display_name|preview_kind }}')" ondblclick="openDetailPopup('{% url 'documents:api_detail' document.pk %}', 'document')">
                     <td style="text-align:center;"><input type="checkbox" class="row-checkbox" name="pks" value="{{ document.pk }}" onclick="event.stopPropagation();"></td>
                     <td style="text-align:right;">{{ document.display_no }}</td>
                     <td style="font-weight:bold; color:{% if notice %}#e74c3c{% else %}#1a0dab{% endif %};">{{ document.title }}</td>

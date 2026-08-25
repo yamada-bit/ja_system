@@ -3,24 +3,57 @@ import logging
 
 from django.conf import settings
 from django.db import transaction
-from django.utils import timezone
 
-from permissions.services import can_select_department
+from core import deletion_services, scoping_services, zip_services
+from permissions.services import can_select_department, contract_searchable_department_ids
 
 logger = logging.getLogger(__name__)
-
-# xlsx 保管!B300,B581・検索・閲覧・変更!B664-665「初回登録から1週間以上経過しているものは
-# 削除不可。ボタンを非表示にする」（documents.services.can_deleteと同じ、Rev1.1でdisabled表示
-# から非表示に変更）。
-DELETE_WINDOW_DAYS = 7
 
 
 def can_delete(contract) -> bool:
     """documents.services.can_deleteと同じ考え方（詳細はそちらのdocstring参照。Rev1.2で
-    削除済み契約書はボタン非表示に統一、完全削除機能は廃止した）。"""
-    if contract.is_deleted:
-        return False
-    return timezone.now() - contract.save_date < datetime.timedelta(days=DELETE_WINDOW_DAYS)
+    削除済み契約書はボタン非表示に統一、完全削除機能は廃止した）。
+    実体はcore.deletion_services.can_deleteに集約済み（documents.services.can_deleteとの重複を
+    コード監査で発見、2026-08-25修正）。
+    """
+    return deletion_services.can_delete(contract)
+
+
+def deletion_denial_message(contract) -> str:
+    """documents.services.deletion_denial_messageと同じ考え方（詳細はそちらのdocstring参照）。
+    実体はcore.deletion_services.deletion_denial_messageに集約済み（documents.services.
+    deletion_denial_messageとの重複をコード監査で発見、2026-08-25修正）。
+    """
+    return deletion_services.deletion_denial_message(contract, entity_name="契約書")
+
+
+def scoped_get_object_or_404(base_qs, employee, pk):
+    """契約書の詳細操作（ダウンロード・プレビュー・編集・削除・一括編集）で、部署スコープ
+    （`permissions.services.contract_searchable_department_ids`）外のpkへのURL直打ちを404にしつつ、
+    セキュリティ上意味のある事象としてlogger.warningに残す共通ヘルパー。
+
+    セキュリティレビューで発見：`contracts.api.DetailAPIView`・検索一覧
+    （`contracts.search_services.build_queryset`）は部署スコープを適用済みだったが、
+    `DownloadView`/`PreviewView`/`ContractEditView`/`DeleteView`/一括編集の各ビューには
+    適用されておらず、`contract_download`/`contract_edit`権限さえあれば部署をまたいだ
+    直接pkアクセスで他部署の契約書を閲覧・編集・削除できてしまっていた（2026-08-25修正）。
+
+    実体はcore.scoping_services.scoped_get_object_or_404に集約済み（documents.services.
+    scoped_get_object_or_404との重複をコード監査で発見、2026-08-25修正）。
+    """
+    return scoping_services.scoped_get_object_or_404(
+        base_qs, employee, pk, dept_ids_resolver=contract_searchable_department_ids, entity_name="契約書"
+    )
+
+
+def build_zip_archive(contracts) -> tuple[bytes, int]:
+    """documents.services.build_zip_archiveと同じ考え方（詳細はそちらのdocstring参照）。
+    views.BulkDownloadView.postのZIP構築を分離する（規約準拠監査で発見：documents側は既に
+    分離済みだったが、contracts側は同型のビジネスロジックがビューに直書きされたまま
+    残っていた。2026-08-25修正）。実体はcore.zip_services.build_zip_archiveに集約済み
+    （documents.services.build_zip_archiveとの重複をコード監査で発見、2026-08-25修正）。
+    """
+    return zip_services.build_zip_archive(contracts, entity_label="contract")
 
 
 def apply_contract_edit(contract, cleaned_data, employee, remove_ids, new_related_files):

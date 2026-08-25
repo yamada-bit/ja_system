@@ -10,7 +10,7 @@ from django.views import View
 
 from contracts.models import Contract
 from contracts.services import can_delete
-from contracts.views import PENDING_SESSION_KEY
+from contracts.views import PENDING_SESSION_KEY, RequiresContractEditMixin
 from core.api import BaseOptionListAPIView
 from core.file_type_services import get_preview_kind
 from core.notice_services import is_expiring_soon
@@ -27,9 +27,17 @@ class OptionListAPIView(BaseOptionListAPIView):
     department_kind = "contract"
 
 
-class ChunkUploadAPIView(BaseChunkUploadAPIView):
+class ChunkUploadAPIView(RequiresContractEditMixin, BaseChunkUploadAPIView):
     """screen-storage1（契約書）のチャンク分割アップロードAPI。documents側と同様
-    PENDING_SESSION_KEYはcontracts.views.UploadStep1Viewと同一のセッションキーを使う。"""
+    PENDING_SESSION_KEYはcontracts.views.UploadStep1Viewと同一のセッションキーを使う。
+
+    UploadStep1View/UploadStep2Viewは`can_edit_contract`でサーバー側アクセス制御しているが、
+    このAPIはBaseChunkUploadAPIView（documents側と共有、documentsには契約書のような
+    保存・編集権限フラグが無いためLoginRequiredMixinのみ）をそのまま継承しており、
+    契約書側で追加された`contract_edit`権限チェックが漏れていた（コード監査で発見、
+    2026-08-24修正）。UploadStep1View等と同じ判定をcontracts.views.RequiresContractEditMixin
+    経由で共有する（2026-08-25修正、詳細は同ミックスインのdocstring参照）。
+    """
 
     pending_session_key = PENDING_SESSION_KEY
 
@@ -102,7 +110,14 @@ class DetailAPIView(LoginRequiredMixin, View):
                 ),
                 # documents.api.DetailAPIViewと同じ理由（詳細ポップアップの実プレビュー表示用、
                 # 2026-08-13ユーザー報告対応でpreview_kindは権限に関わらず返すよう変更）。
-                "preview_url": reverse("contracts:preview", args=[contract.pk]) if can_dl else None,
+                # download_urlと同じくis_deletedもgatingに加える（品質レビューで発見：documents側
+                # と同型の漏れがcontracts側にもあった。contracts.views.PreviewView側もis_deleted=False
+                # に揃えてURL直打ち対策済み。2026-08-25修正）。
+                "preview_url": (
+                    reverse("contracts:preview", args=[contract.pk])
+                    if can_dl and not contract.is_deleted
+                    else None
+                ),
                 "preview_kind": get_preview_kind(contract.display_name),
                 # xlsx 検索・閲覧・変更!B331,B337,B659,B663(Rev1.2)「削除済み、または初回登録から
                 # 1週間以上経過しているものは削除不可・ボタン非表示」に加え、B198「契約書-契約書-

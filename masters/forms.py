@@ -4,6 +4,7 @@ import unicodedata
 from django import forms
 
 from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
+from masters.services import department_scope_ids, scope_queryset_by_department
 from organizations.models import Department
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,10 @@ class GroupForm(forms.ModelForm):
         label="部署",
         queryset=Department.objects.order_by("branch_code", "section_code"),
         required=True,
+        # GroupForm.doc_kbnと同じ理由（原本index.htmlに空選択肢が無い）。管理者のみ表示される
+        # フィールドのため常にrequired=Trueだが、明示しないとDjango ModelFormの既定の空ラベル
+        # （'---------'）が残ってしまう（コード監査で発見、2026-08-24修正）。
+        empty_label=None,
         widget=forms.Select(attrs={"style": "padding:4px; width:150px;"}),
     )
 
@@ -121,6 +126,17 @@ class CategorySearchForm(forms.Form):
         widget=forms.Select(attrs={"style": "padding:4px; width:150px;"}),
     )
 
+    def __init__(self, *args, employee=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if employee is not None:
+            # 「分類」絞り込み選択肢も一覧本体と同じ部署スコープに揃える（自部署では選べない
+            # 他部署の分類が検索フィルタにだけ残っているのは一貫性を欠くため。
+            # コード監査で発見、2026-08-24修正）。
+            dept_ids = department_scope_ids(employee)
+            self.fields["group"].queryset = scope_queryset_by_department(
+                Group.objects.filter(is_deleted=False), dept_ids
+            )
+
 
 class CategoryForm(forms.ModelForm):
     """screen-cat-regist/edit（xlsx B111「分類管理」メニューで設定した分類名リストを表示、
@@ -136,6 +152,8 @@ class CategoryForm(forms.ModelForm):
         label="部署",
         queryset=Department.objects.order_by("branch_code", "section_code"),
         required=True,
+        # GroupForm.departmentと同じ理由（コード監査で発見、2026-08-24修正）。
+        empty_label=None,
         widget=forms.Select(attrs={"style": "padding:4px; width:150px;"}),
     )
 
@@ -151,9 +169,17 @@ class CategoryForm(forms.ModelForm):
             "group": forms.Select(attrs={"style": "padding:4px; width:150px;"}),
         }
 
-    def __init__(self, *args, show_department=True, **kwargs):
+    def __init__(self, *args, show_department=True, employee=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["group"].queryset = Group.objects.filter(is_deleted=False).order_by("code")
+        group_qs = Group.objects.filter(is_deleted=False)
+        if employee is not None:
+            # 「部署」フィールド（department）と同じ部署スコープを「分類」（group）の選択肢にも
+            # 適用する。以前はgroupが無制限だったため、非管理者が自部署では選べない他部署の
+            # Groupを選択でき、department=自部署・group.department=他部署という部署をまたいだ
+            # 紐付けが作れてしまっていた（コード監査で発見、2026-08-24修正）。
+            dept_ids = department_scope_ids(employee)
+            group_qs = scope_queryset_by_department(group_qs, dept_ids)
+        self.fields["group"].queryset = group_qs.order_by("code")
         # 「分類」も原本は空選択肢が無く常に先頭の分類が暗黙選択された状態のため、
         # ModelChoiceFieldの既定の空ラベル（'---------'）を明示的に外す。
         self.fields["group"].empty_label = None

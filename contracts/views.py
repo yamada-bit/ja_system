@@ -6,8 +6,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db import Error as DBError, transaction
-from django.http import FileResponse, Http404, JsonResponse
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
@@ -19,15 +18,21 @@ from contracts.models import Contract, RelatedFile
 from contracts.search_services import build_queryset
 from contracts.services import (
     apply_contract_edit,
+    build_zip_archive,
     calculate_expiry_date,
-    can_delete,
     parse_remove_related_ids,
+    scoped_get_object_or_404,
 )
-from core import bulk_edit_services, upload_services
+from core import bulk_edit_services, record_views, upload_services, upload_views
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
 from core.text_extraction_services import try_immediate_text_layer_extraction
-from permissions.services import can_download, can_edit_contract, can_select_department
+from permissions.services import (
+    can_download,
+    can_edit_contract,
+    can_select_department,
+    contract_searchable_department_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,72 +40,77 @@ PENDING_SESSION_KEY = "contracts_pending_upload"
 BULK_EDIT_SESSION_KEY = "contracts_bulk_edit"
 
 
-class UploadStep1View(LoginRequiredMixin, View):
+class RequiresContractEditMixin(LoginRequiredMixin):
+    """xlsx 権限管理!B196-198(Rev1.2)「契約書-契約書-契約書情報変更」がOFFの職員による
+    保存・編集系画面へのURL直打ちをサーバー側でも拒否する共通ミックスイン。
+
+    品質レビューで発見：この判定を`dispatch()`で個別に持っていた5クラス
+    （UploadStep1View/UploadStep2View/ContractEditView/BulkEditView、contracts.api.
+    ChunkUploadAPIView）はいずれも`class Foo(LoginRequiredMixin, View)`のように
+    LoginRequiredMixinを直接の基底クラスにしつつ、そのクラス自身が`dispatch()`を
+    オーバーライドしてcan_edit_contract判定→`super().dispatch()`という順で呼んでいた。
+    Pythonのメソッド解決はまず「自分自身が定義したdispatch()」を使うため、この構造では
+    can_edit_contractの判定がLoginRequiredMixinの認証チェックより先に走ってしまう。
+    未ログイン（AnonymousUser）でこれらのURLに直接アクセスすると、can_edit_contract内部の
+    `employee.permission_profile`アクセスがAnonymousUserには存在しない属性のため
+    AttributeErrorとなり、本来期待されるログイン画面へのリダイレクトの代わりに500エラーに
+    なっていた。
+
+    `request.user.is_authenticated`を自前でも確認し、未認証時はcan_edit_contractを呼ばずに
+    そのまま`super().dispatch()`へ委ねる（LoginRequiredMixin自身の認証チェックへ進み、
+    ログイン画面へリダイレクトする）。
+
+    このミックスイン自体がLoginRequiredMixinを継承するため、`class Foo(RequiresContractEditMixin,
+    View)`のようにLoginRequiredMixinを併記しなくても、MRO上に必ずLoginRequiredMixinが
+    含まれることが保証される（セキュリティレビューで発見：以前はLoginRequiredMixinを
+    自前で継承していない構造だったため、将来このミックスインだけを付けてLoginRequiredMixinを
+    書き忘れると、is_authenticatedチェック自体は残るため500エラーにはならないものの、
+    未認証ユーザーがログイン画面へリダイレクトされずそのままView本体に到達してしまう
+    〈静かな認証バイパス〉になり得た。2026-08-25修正。あわせて5クラスに重複していた
+    ほぼ同一の判定ブロックも1箇所に集約した）。
+
+    そのため各ビュー側では`class Foo(RequiresContractEditMixin, View)`のように
+    LoginRequiredMixinの併記を省略する（`class Foo(LoginRequiredMixin, RequiresContractEditMixin,
+    View)`と併記するとLoginRequiredMixinの継承順序が矛盾しMRO解決エラーになるため、
+    併記しないことが必須になる。`ChunkUploadAPIView(RequiresContractEditMixin,
+    BaseChunkUploadAPIView)`のようにLoginRequiredMixinを継承した別クラスと組み合わせる場合は
+    従来通り問題なく解決できる）。
+    """
+
+    def dispatch(self, request, *args, **kwargs):
+        if request.user.is_authenticated and not can_edit_contract(request.user):
+            logger.warning(
+                "契約書情報変更権限が無いユーザーによるアクセスを拒否しました: "
+                "employee_no=%s path=%s",
+                request.user.employee_no,
+                request.path,
+            )
+            raise PermissionDenied("契約書を保存・編集する権限がありません。")
+        return super().dispatch(request, *args, **kwargs)
+
+
+class UploadStep1View(RequiresContractEditMixin, upload_views.BaseUploadStep1View):
     """screen-storage1（契約書）。xlsx 権限管理!B196-197(Rev1.2)「保存不可…メイン画面の
     保管枠内「契約書」ボタンを非表示にする」に対応し、URL直叩き対策としてサーバー側でも拒否する
-    （templates/core/menu.htmlのボタン非表示と同じ判定、permissions.services.can_edit_contract）。
+    （templates/core/menu.htmlのボタン非表示と同じ判定、RequiresContractEditMixin参照）。
+    実体はcore.upload_views.BaseUploadStep1Viewに集約済み（documents.views.UploadStep1Viewとの
+    重複をコード監査で発見、2026-08-25修正）。
     """
 
     template_name = "contracts/storage1.html"
-
-    def dispatch(self, request, *args, **kwargs):
-        if not can_edit_contract(request.user):
-            logger.warning(
-                "契約書情報変更権限が無いユーザーによる保管画面アクセスを拒否しました: employee_no=%s",
-                request.user.employee_no,
-            )
-            raise PermissionDenied("契約書を保存する権限がありません。")
-        return super().dispatch(request, *args, **kwargs)
-
-    def get(self, request):
-        upload_services.clear_pending_files(request.session, PENDING_SESSION_KEY)
-        return render(request, self.template_name, self._context())
-
-    def post(self, request):
-        files = request.FILES.getlist("files")
-        # documents.views.UploadStep1View.postと同じ理由：大容量ファイルはstorage1.htmlのJSが
-        # upload/chunk/へチャンク分割送信し、combine_upload_chunksがこのセッションキーへ直接
-        # 追記済みのため、通常のfile inputが0件でもチャンク経由で登録済みなら処理を続行する。
-        existing_pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
-        if not files and not existing_pending:
-            messages.error(request, "ファイルが選択されていません。")
-            return render(request, self.template_name, self._context())
-        if files:
-            try:
-                upload_services.save_pending_files(request.session, PENDING_SESSION_KEY, files)
-            except upload_services.PendingFileStorageError:
-                # MEDIA_ROOT/tmp_uploads への一時保存に失敗（ディスク容量不足・権限エラー等）。
-                # documents.views.UploadStep1Viewと同じ理由（save_pending_filesはOSErrorを
-                # PendingFileStorageErrorにラップして送出するため、これを捕捉する必要がある）。
-                logger.exception(
-                    "アップロードファイルの一時保存に失敗しました: employee_no=%s", request.user.employee_no
-                )
-                messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
-                return render(request, self.template_name, self._context())
-        return redirect("contracts:upload_step2")
-
-    def _context(self):
-        return {"max_upload_size_bytes": settings.MAX_UPLOAD_SIZE_BYTES}
+    pending_session_key = PENDING_SESSION_KEY
+    next_url_name = "contracts:upload_step2"
 
 
-class UploadStep2View(LoginRequiredMixin, View):
+class UploadStep2View(RequiresContractEditMixin, View):
     """screen-storage2（契約書モード・登録）。関連書類の添付は、バッチ内ファイルが1件の場合のみ
     対応する（複数契約書を一括登録するバッチに対して関連書類をどう振り分けるかはHTML/xlsxに
-    明記が無いため、あいまいさを避けるスコープ限定）。
+    明記が無いため、あいまいさを避けるスコープ限定）。保管フロー全体のURL直叩き対策は
+    RequiresContractEditMixin参照。
     """
 
     template_name = "contracts/storage2.html"
     form_id = "contracts_upload_step2"
-
-    def dispatch(self, request, *args, **kwargs):
-        # UploadStep1View.dispatchと同じ理由（保管フロー全体をURL直叩きから守る）。
-        if not can_edit_contract(request.user):
-            logger.warning(
-                "契約書情報変更権限が無いユーザーによる保管画面アクセスを拒否しました: employee_no=%s",
-                request.user.employee_no,
-            )
-            raise PermissionDenied("契約書を保存する権限がありません。")
-        return super().dispatch(request, *args, **kwargs)
 
     def get(self, request):
         pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
@@ -117,7 +127,7 @@ class UploadStep2View(LoginRequiredMixin, View):
             self.template_name,
             {
                 "form": form,
-                "file_rows": _file_rows(form, pending),
+                "file_rows": upload_views.file_rows(form, pending),
                 "token": token,
                 "mode": "create",
                 **_pending_preview_context(request, pending),
@@ -143,7 +153,7 @@ class UploadStep2View(LoginRequiredMixin, View):
                 self.template_name,
                 {
                     "form": form,
-                    "file_rows": _file_rows(form, pending),
+                    "file_rows": upload_views.file_rows(form, pending),
                     "token": token,
                     "mode": "create",
                     **_pending_preview_context(request, pending),
@@ -157,6 +167,7 @@ class UploadStep2View(LoginRequiredMixin, View):
         titles = form.titles(len(pending))
         save_date = timezone.now()
         created = []
+        created_related = []
         try:
             # 複数契約書を1回のリクエストでまとめて登録するため、途中の1件（本体または
             # 関連書類）でファイルI/O例外が起きた場合に一部だけDBへコミット済みという
@@ -190,19 +201,30 @@ class UploadStep2View(LoginRequiredMixin, View):
                     # 文書ごとに独立した関連書類欄（storage2.htmlのrelated_files_{doc_index}）を持つ
                     # （原本フィデリティ監査で発見：以前は1件登録時のみ許可していた）。
                     for i, related in enumerate(request.FILES.getlist(f"related_files_{doc_index}")):
-                        RelatedFile.objects.create(contract=contract, file=related, display_order=i)
+                        created_related.append(
+                            RelatedFile.objects.create(contract=contract, file=related, display_order=i)
+                        )
                     audit_services.log(
                         employee=request.user,
                         action="保管画面２ 登録",
                         event_message=f"契約書「{contract.title}」を保管しました。",
                     )
                     created.append(contract)
-        except OSError:
-            # open_pending_file()／file.save()（本体・関連書類とも）でのファイルI/O失敗。
-            # transaction.atomic()によりここまでの登録はロールバックされる
-            # （documents.views.UploadStep2Viewと同じ理由）。
+        except (OSError, DBError):
+            # open_pending_file()／file.save()（本体・関連書類とも）でのファイルI/O失敗に加え、
+            # contract.save()/RelatedFile.objects.create()でのDB制約違反等（DBError）も対象にする
+            # （documents.views.UploadStep2Viewと同じ理由。品質レビューで発見：以前はOSErrorしか
+            # 捕捉しておらずDBErrorは未捕捉のまま生の500エラーになっていた）。
+            # transaction.atomic()によりDBへの登録はロールバックされるが、ロールバック対象の
+            # 契約書・関連書類について既にストレージへ書き込み済みだったファイル実体はDB
+            # トランザクションの対象外のため孤児化する。created/created_relatedに積まれた
+            # （=save()まで成功していた）ファイル実体をここで明示的に削除して孤児ファイルを防ぐ。
+            for contract in created:
+                contract.file.delete(save=False)
+            for related_file in created_related:
+                related_file.file.delete(save=False)
             logger.exception(
-                "契約書の保管処理中にファイルI/Oエラーが発生しました: employee_no=%s", request.user.employee_no
+                "契約書の保管処理中にエラーが発生しました: employee_no=%s", request.user.employee_no
             )
             messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
             return redirect("contracts:upload_step2")
@@ -230,7 +252,7 @@ class UploadStep2View(LoginRequiredMixin, View):
             self.template_name,
             {
                 "form": form,
-                "file_rows": _file_rows(form, pending),
+                "file_rows": upload_views.file_rows(form, pending),
                 "token": token,
                 "mode": "create",
                 "complete": {"created": created, "mode": "create"},
@@ -240,10 +262,10 @@ class UploadStep2View(LoginRequiredMixin, View):
         )
 
 
-class ContractEditView(LoginRequiredMixin, UpdateView):
+class ContractEditView(RequiresContractEditMixin, UpdateView):
     """screen-storage2（契約書編集）。Rev1.2で追加された「契約書-契約書-契約書情報変更」
     （xlsx 権限管理!B193-198）がOFFの職員は編集不可（documents側に対応するフラグは無く、
-    文書の編集は従来通り無条件で可能。permissions.services.can_edit_contract参照）。
+    文書の編集は従来通り無条件で可能。RequiresContractEditMixin参照）。
     """
 
     model = Contract
@@ -251,20 +273,13 @@ class ContractEditView(LoginRequiredMixin, UpdateView):
     context_object_name = "contract"
     form_id = "contracts_edit"
 
-    def dispatch(self, request, *args, **kwargs):
-        if not can_edit_contract(request.user):
-            logger.warning(
-                "契約書情報変更権限が無いユーザーによる編集アクセスを拒否しました: "
-                "employee_no=%s contract_id=%s",
-                request.user.employee_no,
-                kwargs.get("pk"),
-            )
-            raise PermissionDenied("契約書を編集する権限がありません。")
-        return super().dispatch(request, *args, **kwargs)
-
     def get_object(self, queryset=None):
-        return get_object_or_404(
-            Contract.objects.prefetch_related("related_files"), pk=self.kwargs["pk"], is_deleted=False
+        # セキュリティレビューで発見：部署スコープ外の契約書へのURL直打ちを防ぐ
+        # （contracts.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
+        return scoped_get_object_or_404(
+            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
+            self.request.user,
+            self.kwargs["pk"],
         )
 
     def get(self, request, *args, **kwargs):
@@ -378,41 +393,23 @@ class ContractEditView(LoginRequiredMixin, UpdateView):
         )
 
 
-class BulkEditStartView(LoginRequiredMixin, View):
+class BulkEditStartView(RequiresContractEditMixin, View):
     """screen-search「一括編集」ボタン（契約書側）。documents.views.BulkEditStartViewと同じ設計
     （詳細はそちらのdocstring参照）だが、Rev1.2で追加された「契約書-契約書-契約書情報変更」
-    がOFFの職員は一括編集も不可（ContractEditView.dispatchと同じ判定、
-    permissions.services.can_edit_contract参照）。
+    がOFFの職員は一括編集も不可（RequiresContractEditMixin参照）。
     """
 
     def post(self, request):
-        if not can_edit_contract(request.user):
-            logger.warning(
-                "契約書情報変更権限が無いユーザーによる一括編集開始を拒否しました: employee_no=%s",
-                request.user.employee_no,
-            )
-            raise PermissionDenied("契約書を編集する権限がありません。")
         pks = request.POST.getlist("pks")
         if not pks:
             messages.error(request, "編集する契約書を選択してください。")
             return redirect("contracts:search")
 
-        valid_pks = []
-        for p in pks:
-            try:
-                valid_pks.append(int(p))
-            except (TypeError, ValueError):
-                logger.warning(
-                    "一括編集の選択値(pks)に不正な値が含まれていたため除外しました: "
-                    "employee_no=%s value=%r",
-                    request.user.employee_no,
-                    p,
-                )
-
-        existing_pks = set(
-            Contract.objects.filter(pk__in=valid_pks, is_deleted=False).values_list("pk", flat=True)
+        # pks検証・部署スコープ絞り込みの実体はcore.bulk_edit_services.resolve_ordered_pksに
+        # 集約済み（documents.views.BulkEditStartViewとの重複をコード監査で発見、2026-08-25修正）。
+        ordered_pks = bulk_edit_services.resolve_ordered_pks(
+            pks, model=Contract, dept_ids_resolver=contract_searchable_department_ids, employee=request.user
         )
-        ordered_pks = [pk for pk in valid_pks if pk in existing_pks]
         if not ordered_pks:
             messages.error(request, "編集する契約書を選択してください。")
             return redirect("contracts:search")
@@ -421,25 +418,15 @@ class BulkEditStartView(LoginRequiredMixin, View):
         return redirect("contracts:bulk_edit")
 
 
-class BulkEditView(LoginRequiredMixin, View):
+class BulkEditView(RequiresContractEditMixin, View):
     """一括編集ウィザード本体（契約書側）。documents.views.BulkEditViewと同じ設計・同じ
     save-as-you-go方式（詳細はそちらのdocstring参照）。ContractEditViewと同じく関連書類の
-    追加・削除もステップの保存に含まれる。BulkEditStartView.postと同じくRev1.2の
-    「契約書-契約書-契約書情報変更」がOFFの職員はアクセス不可
-    （URL直叩き対策、dispatchで一元的に判定する）。
+    追加・削除もステップの保存に含まれる。BulkEditStartViewと同じくRev1.2の
+    「契約書-契約書-契約書情報変更」がOFFの職員はアクセス不可（RequiresContractEditMixin参照）。
     """
 
     template_name = "contracts/edit.html"
     form_id = "contracts_bulk_edit"
-
-    def dispatch(self, request, *args, **kwargs):
-        if not can_edit_contract(request.user):
-            logger.warning(
-                "契約書情報変更権限が無いユーザーによる一括編集アクセスを拒否しました: employee_no=%s",
-                request.user.employee_no,
-            )
-            raise PermissionDenied("契約書を編集する権限がありません。")
-        return super().dispatch(request, *args, **kwargs)
 
     def _state(self, request):
         state = bulk_edit_services.get_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
@@ -453,10 +440,12 @@ class BulkEditView(LoginRequiredMixin, View):
         if state is None:
             return redirect("contracts:search")
 
-        self.object = get_object_or_404(
-            Contract.objects.prefetch_related("related_files"),
-            pk=state["pks"][state["index"]],
-            is_deleted=False,
+        # セキュリティレビューで発見：部署スコープ外の契約書へのセッション改ざん・URL直打ちを
+        # 防ぐ（contracts.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
+        self.object = scoped_get_object_or_404(
+            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
+            request.user,
+            state["pks"][state["index"]],
         )
         form = self._build_form()
         token = issue_token(request.session, self.form_id)
@@ -467,10 +456,12 @@ class BulkEditView(LoginRequiredMixin, View):
         if state is None:
             return redirect("contracts:search")
 
-        self.object = get_object_or_404(
-            Contract.objects.prefetch_related("related_files"),
-            pk=state["pks"][state["index"]],
-            is_deleted=False,
+        # セキュリティレビューで発見：部署スコープ外の契約書へのセッション改ざん・URL直打ちを
+        # 防ぐ（contracts.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
+        self.object = scoped_get_object_or_404(
+            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
+            request.user,
+            state["pks"][state["index"]],
         )
         submitted_token = request.POST.get("token", "")
         if not consume_token(request.session, self.form_id, submitted_token):
@@ -596,7 +587,13 @@ class SearchView(LoginRequiredMixin, View):
         # request.GET or Noneは避ける（accounts.services.filter_staff_querysetのコメント参照）。
         form = SearchForm(request.GET, employee=request.user)
         qs = build_queryset(
-            form, employee=request.user, notice=notice, pks=pks, sort_key=sort_key, sort_dir=sort_dir
+            form,
+            employee=request.user,
+            notice=notice,
+            pks=pks,
+            sort_key=sort_key,
+            sort_dir=sort_dir,
+            dept_ids=form.contract_dept_ids,
         )
         paginator = Paginator(qs, self.PAGE_SIZE)
         page_obj = paginator.get_page(request.GET.get("page"))
@@ -614,165 +611,69 @@ class SearchView(LoginRequiredMixin, View):
         )
 
 
-class DownloadView(LoginRequiredMixin, View):
+class DownloadView(LoginRequiredMixin, record_views.BaseFileServeView):
     """documents.views.DownloadViewと同じ理由（xlsx 検索・閲覧・変更!B659(Rev1.2)「削除されている
     (削除フラグがTrue)契約書は、ボタンを非表示とする」）で、is_deleted=Falseでしか対象を
-    取得できないようにする。"""
-
-    def get(self, request, pk):
-        contract = get_object_or_404(Contract, pk=pk, is_deleted=False)
-        if not can_download(request.user, kind="contract"):
-            logger.warning(
-                "ダウンロード権限の無いユーザーによる試行: employee_no=%s contract_id=%s",
-                request.user.employee_no,
-                pk,
-            )
-            raise PermissionDenied("ダウンロード権限がありません。")
-        try:
-            response = FileResponse(
-                contract.file.open("rb"), as_attachment=True, filename=contract.display_name
-            )
-        except OSError:
-            # FileNotFoundError（実体欠損）だけでなくPermissionError（ロック・権限エラー等）も
-            # OSErrorのサブクラスのため、ストレージI/O境界で起こりうるOSError全般をここで
-            # 利用者向けのHttp404に変換する（documents.views.DownloadViewと同じ理由）。
-            logger.exception("ファイル実体の取得に失敗しました: contract_id=%s", pk)
-            raise Http404("ファイルが見つかりません。")
-        # documents.views.DownloadViewと同じ追加対応（2026-08-12）。登録・更新・削除は記録される
-        # のに、ダウンロード（誰がいつ持ち出したか）だけ監査ログに一切残っていなかった。
-        audit_services.log(
-            employee=request.user,
-            action="契約書検索 ダウンロード",
-            event_message=f"契約書「{contract.title}」をダウンロードしました。",
-        )
-        return response
-
-
-class PreviewView(LoginRequiredMixin, View):
-    """documents.views.PreviewView参照。screen-search（契約書モード）「文書イメージ」欄用。"""
-
-    def get(self, request, pk):
-        contract = get_object_or_404(Contract, pk=pk)
-        if not can_download(request.user, kind="contract"):
-            logger.warning(
-                "プレビュー権限の無いユーザーによる試行: employee_no=%s contract_id=%s",
-                request.user.employee_no,
-                pk,
-            )
-            raise PermissionDenied("プレビュー権限がありません。")
-        try:
-            response = FileResponse(
-                contract.file.open("rb"), as_attachment=False, filename=contract.display_name
-            )
-        except OSError:
-            logger.exception("ファイル実体の取得に失敗しました: contract_id=%s", pk)
-            raise Http404("ファイルが見つかりません。")
-        # documents.views.PreviewViewと同じ追加対応（2026-08-12）。
-        audit_services.log(
-            employee=request.user,
-            action="契約書検索 プレビュー",
-            event_message=f"契約書「{contract.title}」をプレビュー表示しました。",
-        )
-        return response
-
-
-class BulkDownloadView(LoginRequiredMixin, View):
-    """screen-search（契約書モード）「一括ダウンロード」。documents.views.BulkDownloadViewと同様
-    （xlsx 検索・閲覧・変更!B596-600「※文書管理と同じ」によりB264-265のルールを準用、
-    要再確認No.22の「契約書-ダウンロード」フラグで権限判定）。
+    取得できないようにする。実体はcore.record_views.BaseFileServeViewに集約済み
+    （documents.views.DownloadViewとの重複をコード監査で発見、2026-08-25修正）。
     """
 
-    def post(self, request):
-        pks = request.POST.getlist("pks")
-        if not pks:
-            messages.error(request, "ダウンロードする契約書を選択してください。")
-            return redirect("contracts:search")
-        if not can_download(request.user, kind="contract"):
-            logger.warning(
-                "ダウンロード権限の無いユーザーによる一括ダウンロード試行: employee_no=%s",
-                request.user.employee_no,
-            )
-            raise PermissionDenied("ダウンロード権限がありません。")
-
-        # pksはURLパスコンバータを経由しない生のPOST値のため、改ざんや誤ったリンク等で
-        # 数値以外が混入し得る（contracts.search_services.build_queryset参照）。無効な値は
-        # 除外しつつ、不正アクセス試行の兆候として警告ログに残す。
-        valid_pks = []
-        for p in pks:
-            try:
-                valid_pks.append(int(p))
-            except (TypeError, ValueError):
-                logger.warning(
-                    "一括ダウンロードの選択値(pks)に不正な値が含まれていたため除外しました: "
-                    "employee_no=%s value=%r",
-                    request.user.employee_no,
-                    p,
-                )
-
-        import io
-        import zipfile
-
-        from django.http import HttpResponse
-
-        contracts = Contract.objects.filter(pk__in=valid_pks, is_deleted=False)
-        total_count = contracts.count()
-        missing_count = 0
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for contract in contracts:
-                try:
-                    with contract.file.open("rb") as fh:
-                        zf.writestr(contract.file.name.rsplit("/", 1)[-1], fh.read())
-                except FileNotFoundError:
-                    # 1件のファイル実体欠損でZIP全体のダウンロードを失敗させない設計判断
-                    # （documents.views.BulkDownloadViewと同じ理由）。件数の不一致は下の
-                    # messages.warningで利用者にも案内する。
-                    logger.exception("一括ダウンロード中にファイル実体が見つかりません: contract_id=%s", contract.pk)
-                    missing_count += 1
-
-        logger.info(
-            "一括ダウンロードを実行しました: employee_no=%s 件数=%s", request.user.employee_no, total_count
-        )
-        # documents.views.BulkDownloadViewと同じ追加対応（2026-08-12）。ZIPに含まれる契約書数だけ
-        # ログが増殖しないよう、一括操作1回につき1件だけ記録する。
-        audit_services.log(
-            employee=request.user,
-            action="契約書検索 一括ダウンロード",
-            event_message=f"契約書{total_count}件を一括ダウンロードしました。",
-        )
-        if missing_count:
-            messages.warning(
-                request,
-                f"選択した{total_count}件中{missing_count}件のファイルが見つからなかったため、"
-                "ダウンロードされたZIPに含まれていません。",
-            )
-        response = HttpResponse(buffer.getvalue(), content_type="application/zip")
-        response["Content-Disposition"] = 'attachment; filename="contracts.zip"'
-        return response
+    model = Contract
+    kind = "contract"
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    as_attachment = True
+    audit_action = "契約書検索 ダウンロード"
+    entity_label = "契約書"
 
 
-class DeleteView(LoginRequiredMixin, View):
+class PreviewView(LoginRequiredMixin, record_views.BaseFileServeView):
+    """documents.views.PreviewView参照。screen-search（契約書モード）「文書イメージ」欄用。実体は
+    core.record_views.BaseFileServeViewに集約済み（documents.views.PreviewViewとの重複を
+    コード監査で発見、2026-08-25修正）。
+    """
+
+    model = Contract
+    kind = "contract"
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    as_attachment = False
+    audit_action = "契約書検索 プレビュー"
+    entity_label = "契約書"
+
+
+class BulkDownloadView(LoginRequiredMixin, record_views.BaseBulkDownloadView):
+    """screen-search（契約書モード）「一括ダウンロード」。documents.views.BulkDownloadViewと同様
+    （xlsx 検索・閲覧・変更!B596-600「※文書管理と同じ」によりB264-265のルールを準用、
+    要再確認No.22の「契約書-ダウンロード」フラグで権限判定）。実体はcore.record_views.
+    BaseBulkDownloadViewに集約済み（documents.views.BulkDownloadViewとの重複をコード監査で発見、
+    2026-08-25修正）。
+    """
+
+    model = Contract
+    kind = "contract"
+    dept_ids_resolver = staticmethod(contract_searchable_department_ids)
+    zip_builder = staticmethod(build_zip_archive)
+    audit_action = "契約書検索 一括ダウンロード"
+    entity_label = "契約書"
+    search_url_name = "contracts:search"
+    zip_filename = "contracts.zip"
+
+
+class DeleteView(LoginRequiredMixin, record_views.BaseDeleteView):
     """詳細ポップアップ「削除」ボタン。論理削除（is_deleted=True）のみを行う。
 
     documents.views.DeleteViewと同じ理由（2026-08-12にユーザー依頼で追加した「ゴミ箱保管中の
     契約書を削除ボタンで完全削除する」機能を、Rev1.2改訂〈xlsx 検索・閲覧・変更!B659,B663
     「削除されている契約書は、ボタンを非表示とする」〉でユーザー判断によりxlsx優先とし、
-    2026-08-24に廃止した）。AJAX呼び出し時はJsonResponseを返す
-    （fetch().then(r=>r.json())とのプロトコル不整合の修正）。
+    2026-08-24に廃止した）。実体はcore.record_views.BaseDeleteViewに集約済み（documents.views.
+    DeleteViewとの重複をコード監査で発見、2026-08-25修正）。
     """
 
-    def post(self, request, pk):
-        is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    model = Contract
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    entity_label = "契約書"
+    search_url_name = "contracts:search"
 
-        try:
-            contract = get_object_or_404(Contract.objects.prefetch_related("related_files"), pk=pk)
-        except Http404:
-            # documents.views.DeleteViewと同じ理由（common.js側はfetch().then(r=>r.json())で
-            # 応答をJSONとしてparseするため、AJAX時にHTML 404を返すと壊れる）。
-            if is_ajax:
-                return JsonResponse({"success": False, "message": "対象の契約書が見つかりません。"}, status=404)
-            raise
-
+    def extra_permission_check(self, request, obj):
         if not can_edit_contract(request.user):
             # xlsx 権限管理!B198(Rev1.2)「編集不可…検索・閲覧画面の検索結果一覧の明細ダブル
             # クリック後に開く契約書詳細画面の「編集」「削除」ボタンを非表示にする」。監査で発見：
@@ -784,91 +685,29 @@ class DeleteView(LoginRequiredMixin, View):
                 "契約書情報変更権限が無いユーザーによる削除操作を拒否しました: "
                 "employee_no=%s contract_id=%s",
                 request.user.employee_no,
-                pk,
+                obj.pk,
             )
-            message = "契約書を削除する権限がありません。"
-            if is_ajax:
-                return JsonResponse({"success": False, "message": message}, status=403)
-            raise PermissionDenied(message)
-
-        if not can_delete(contract):
-            # xlsx 検索・閲覧・変更!B659,B663,B664-665「削除済みの契約書、および初回登録から
-            # 1週間以上経過しているものは削除不可。ボタンを非表示にする」。
-            # documents.views.DeleteViewと同じ理由でサーバー側でも拒否する。
-            logger.warning(
-                "削除できない契約書への削除操作を拒否しました: employee_no=%s contract_id=%s is_deleted=%s",
-                request.user.employee_no,
-                pk,
-                contract.is_deleted,
-            )
-            message = "この契約書は既に削除されています。" if contract.is_deleted else "保存から1週間以上経過した契約書は削除できません。"
-            if is_ajax:
-                return JsonResponse({"success": False, "message": message}, status=403)
-            raise PermissionDenied(message)
-
-        try:
-            contract.is_deleted = True
-            contract.deleted_at = timezone.now()
-            contract.save(update_fields=["is_deleted", "deleted_at"])
-        except DBError:
-            logger.exception("契約書の削除処理に失敗しました: contract_id=%s", pk)
-            if is_ajax:
-                return JsonResponse(
-                    {"success": False, "message": "削除に失敗しました。もう一度お試しください。"}, status=500
-                )
-            messages.error(request, "削除に失敗しました。もう一度お試しください。")
-            return redirect("contracts:search")
-
-        audit_services.log(
-            employee=request.user,
-            action="検索・閲覧画面 削除",
-            event_message=f"契約書「{contract.title}」を削除しました。",
-        )
-        success_message = "契約書を削除しました。"
-
-        if is_ajax:
-            return JsonResponse({"success": True, "message": success_message})
-        messages.success(request, success_message)
-        return redirect("contracts:search")
+            return "契約書を削除する権限がありません。"
+        return None
 
 
 def _strip_ext(filename):
     return filename.rsplit(".", 1)[0] if "." in filename else filename
 
 
-def _file_rows(form, pending):
-    return [(item, form[f"title_{i}"]) for i, item in enumerate(pending)]
-
-
 def _pending_preview_context(request, pending):
-    """documents.views._pending_preview_contextと同じ理由（保管画面２のPDFモックプレビューを、
-    画像／PDFの場合のみPendingPreviewView経由の実データ表示に切り替える）。"""
-    preview_kinds = [get_preview_kind(item["original_name"]) or "" for item in pending]
-    if can_download(request.user, kind="contract"):
-        preview_urls = [
-            reverse("contracts:upload_step2_preview", args=[i]) for i in range(len(pending))
-        ]
-    else:
-        preview_urls = []
-    return {"preview_kinds": preview_kinds, "preview_urls": preview_urls}
+    return upload_views.build_pending_preview_context(
+        request, pending, kind="contract", preview_url_name="contracts:upload_step2_preview"
+    )
 
 
-class PendingPreviewView(LoginRequiredMixin, View):
-    """documents.views.PendingPreviewViewと同じ理由（保管画面２・登録前の保留ファイルを
-    セッションの一覧indexで参照して実データを返す）。"""
+class PendingPreviewView(RequiresContractEditMixin, upload_views.BasePendingPreviewView):
+    """実体はcore.upload_views.BasePendingPreviewViewに集約済み（documents.views.
+    PendingPreviewViewとの重複をコード監査で発見、2026-08-25修正）。UploadStep1View/
+    UploadStep2Viewと同じ保管フローの一部であるため、RequiresContractEditMixinを適用する
+    （品質レビューで発見：以前はcan_downloadのみで判定しており、セッション中にcontract_edit
+    権限を剥奪された利用者でも保留ファイルの中身を参照できてしまっていた。2026-08-25修正）。
+    """
 
-    def get(self, request, index):
-        if not can_download(request.user, kind="contract"):
-            logger.warning(
-                "プレビュー権限の無いユーザーによる試行: employee_no=%s", request.user.employee_no
-            )
-            raise PermissionDenied("プレビュー権限がありません。")
-        pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
-        if index >= len(pending):
-            raise Http404("プレビュー対象のファイルが見つかりません。")
-        item = pending[index]
-        try:
-            temp_file = upload_services.open_pending_file(item["temp_name"])
-        except upload_services.PendingFileStorageError:
-            raise Http404("プレビュー対象のファイルが見つかりません。")
-        return FileResponse(temp_file, as_attachment=False, filename=item["original_name"])
+    pending_session_key = PENDING_SESSION_KEY
+    kind = "contract"

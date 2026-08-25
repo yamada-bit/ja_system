@@ -21,6 +21,14 @@ def get_role(employee):
     return profile.role if profile else PermissionRole.STAFF
 
 
+def is_admin(employee):
+    """get_role(employee) == PermissionRole.ADMINの短縮形。masters/views.py・
+    permissions/views.py双方でこの比較がベタ書きで繰り返し重複していたため集約する
+    （コード監査で発見、2026-08-24修正。masters/views.py._is_adminはこの関数の別名になる）。
+    """
+    return get_role(employee) == PermissionRole.ADMIN
+
+
 def can_select_department(employee, *, kind="document"):
     """保管・検索画面で自部署以外の部署を選択できるか（部署名「選択」ボタンの表示可否）。
 
@@ -44,6 +52,11 @@ def contract_searchable_department_ids(employee):
     """契約書検索・保管画面で選択・閲覧してよい部署IDの一覧を返す。管理者は`None`
     （無制限を意味する）。非管理者は自部署＋閲覧部署範囲テーブル（部署統合・分割）＋
     権限管理の契約書-部門間閲覧設定で追加された部署に限定する。
+
+    対になるdocuments.services.document_searchable_department_idsはdocuments側に置いているが、
+    こちらをpermissions側に置いているのは意図的（配置理由の詳細はdocument_searchable_
+    department_idsのdocstring参照）：本関数はPermissionProfile.contract_visible_departments
+    （permissionsアプリ固有データ）に依存するため。
     """
     from organizations.services import visible_department_ids
 
@@ -241,6 +254,12 @@ def department_ids_for_group_scope(employee, *, kind):
     """
     if kind == "contract":
         return contract_searchable_department_ids(employee)
+    if kind != "document":
+        # can_download()と同じ理由：想定外のkindを"document"扱いで握りつぶさず、
+        # 呼び出し側の誤り（typo等）として早期に気付けるようにする
+        # （コード監査で発見：以前はkindを検証しておらず、"document"分岐へ暗黙に
+        # フォールスルーしていた、2026-08-24修正）。
+        raise ValueError(f"unknown kind: {kind}")
     if get_role(employee) == PermissionRole.ADMIN:
         return None
     return {employee.department_id}

@@ -3,7 +3,7 @@ import logging
 from audit import services as audit_services
 from accounts.models import Employee
 from core.text_normalization import filter_by_full_name
-from permissions.models import PermissionProfile, PermissionRole
+from permissions.models import FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ def filter_staff_queryset(form, *, sort_key=None, sort_dir="asc"):
 
 
 def reset_permission_profile_if_needed(
-    employee, *, department_changed, rank_changed, position_changed, actor
+    employee, *, department_changed, rank_changed, position_changed, retired_changed, actor
 ):
     """xlsx 職員マスタ!B228「本支所～役職いずれかが変更になった場合、又は「退職」に設定した場合、
     更新対象職員の権限設定をリセットする」に対応する。
@@ -63,12 +63,18 @@ def reset_permission_profile_if_needed(
     最も安全側（=すべての権限フラグをFalseに戻す、役職はSTAFFへ引き下げ）に倒して実装する。
     プロファイル自体が存在しない職員（権限管理でまだ設定されていない）は何もしない。
 
+    4引数とも「変更になったか」という遷移フラグである点に注意（現在の状態ではない）。
+    以前は`retired_changed`の代わりに`employee.is_retired`（保存後の現在値）を直接見ていたため、
+    既に退職済みの職員を編集するたび（氏名の誤字修正等、退職と無関係な変更でも）に毎回
+    権限がリセットされるバグがあった（コード監査で発見、2026-08-24修正）。呼び出し側は
+    department_changed等と同様、保存前後のis_retiredの差分をここに渡すこと。
+
     `actor`は本処理を引き起こした操作者（職員編集画面の操作ログインユーザー）。リセット自体が
     「権限に関わる操作」（permissions/views.pyの権限管理・手動更新と同種）のため、実行時に
     audit_services.log()で操作履歴ログへ記録する。記録主体は対象職員(employee)本人ではなく、
     permissions/views.pyの権限管理・更新と同様に操作を行った職員(actor)にする。
     """
-    if not (department_changed or rank_changed or position_changed or employee.is_retired):
+    if not (department_changed or rank_changed or position_changed or retired_changed):
         return
 
     try:
@@ -76,21 +82,11 @@ def reset_permission_profile_if_needed(
     except PermissionProfile.DoesNotExist:
         return
 
-    flag_fields = [
-        "doc_retention_edit",
-        "doc_download",
-        "contract_edit",
-        "contract_download",
-        "eapproval_view_setting",
-        "eapproval_doc_name_manage",
-        "eapproval_retention",
-    ]
-    for field in flag_fields:
+    for field in FLAG_FIELDS:
         setattr(profile, field, False)
     profile.role = PermissionRole.STAFF
-    profile.doc_visible_groups.clear()
-    profile.contract_visible_departments.clear()
-    profile.contract_visible_groups.clear()
+    for field in MULTI_FIELDS:
+        getattr(profile, field).clear()
     profile.save()
     logger.info(
         "所属/職階/役職変更または退職により権限設定をリセットしました: employee_no=%s",

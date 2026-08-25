@@ -9,6 +9,7 @@ from django.views import View
 
 from audit import services as audit_services
 from audit.forms import AuditLogSearchForm
+from core.csv_services import sanitize_csv_row
 from permissions.mixins import SettingsMenuAccessMixin
 
 logger = logging.getLogger(__name__)
@@ -52,16 +53,20 @@ class AuditLogCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         writer = csv.writer(response)
         writer.writerow(["操作日時", "職員番号", "部署名", "職員名", "操作内容", "イベントメッセージ", "個人情報"])
         for log in qs:
+            # employee_name/action/event_messageは職員の自由入力（文書タイトル等）に由来しうるため、
+            # Excel等で開いた際の数式インジェクション対策としてsanitize_csv_rowを通す。
             writer.writerow(
-                [
-                    log.timestamp.strftime("%Y/%m/%d %H:%M"),
-                    log.employee_no,
-                    log.department_name,
-                    log.employee_name,
-                    log.action,
-                    log.event_message,
-                    "1" if log.personal_info_flag else "",
-                ]
+                sanitize_csv_row(
+                    [
+                        log.timestamp.strftime("%Y/%m/%d %H:%M"),
+                        log.employee_no,
+                        log.department_name,
+                        log.employee_name,
+                        log.action,
+                        log.event_message,
+                        "1" if log.personal_info_flag else "",
+                    ]
+                )
             )
         count = qs.count()
         logger.info("操作履歴ログCSV出力を実行しました: employee_no=%s 件数=%s", request.user.employee_no, count)

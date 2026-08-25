@@ -1,32 +1,89 @@
 import datetime
-import logging
 
 from django.db.models import Case, F, IntegerField, Value, When
 from django.utils import timezone
 
+from core import deletion_services, scoping_services, zip_services
 from masters.models import RetentionPeriod, RetentionPeriodUnit, SystemSetting
+from organizations.services import visible_department_ids
 from permissions.services import can_select_department
-
-logger = logging.getLogger(__name__)
-
-# xlsx 保管!B300,B581・検索・閲覧・変更!B339-340「初回登録から1週間以上経過しているものは
-# 削除不可。ボタンを非表示にする」（Rev1.1で押下不可(disabled)表示から非表示に変更）。
-DELETE_WINDOW_DAYS = 7
 
 
 def can_delete(document) -> bool:
     """検索・閲覧画面の削除ボタン表示可否（xlsx 検索・閲覧・変更!B331,B337(Rev1.2)「削除されている
-    (削除フラグがTrue)文書は、ボタンを非表示とする」）。
+    (削除フラグがTrue)文書は、ボタンを非表示とする」。保存から1週間〈xlsx 保管!B300,B581・
+    検索・閲覧・変更!B339-340〉以上経過したものも削除不可、ボタンを非表示にする）。
 
     2026-08-12にユーザー依頼で「ゴミ箱保管中（is_deleted=True）の文書は削除ボタンで完全削除できる」
     機能を追加していたが、Rev1.2改訂でxlsxが明示的に「削除済みなら削除ボタン自体を非表示」と
     指定したため、2026-08-24のRev1.2反映時にユーザー判断でxlsx優先とし、この完全削除機能は廃止した
     （documents.views.DeleteView docstring参照。完全削除自体はcore.management.commands.
     purge_expired_deleted_records〈自動物理削除バッチ、xlsx メイン画面!B51〉に一本化）。
+
+    実体はcore.deletion_services.can_deleteに集約済み（contracts.services.can_deleteとの重複を
+    コード監査で発見、2026-08-25修正。deletion_denial_message/build_zip_archiveと同じ経緯）。
     """
-    if document.is_deleted:
-        return False
-    return timezone.now() - document.save_date < datetime.timedelta(days=DELETE_WINDOW_DAYS)
+    return deletion_services.can_delete(document)
+
+
+def deletion_denial_message(document) -> str:
+    """`can_delete(document)`がFalseの場合に利用者へ提示する拒否理由メッセージ。
+    documents.views.DeleteView.post（AJAX/非AJAX両方）で共用する（品質レビューで発見：
+    以前はビュー側でis_deletedを再判定してメッセージを組み立てており、can_delete自体が
+    判定した理由とビュー側の理由文言が別々に保守される状態だった。2026-08-25修正）。
+    実体はcore.deletion_services.deletion_denial_messageに集約済み（contracts.services.
+    deletion_denial_messageとの重複をコード監査で発見、2026-08-25修正）。
+    """
+    return deletion_services.deletion_denial_message(document, entity_name="文書")
+
+
+def document_searchable_department_ids(employee):
+    """文書の一括ダウンロード・一括編集開始で、検索一覧（search_services.build_queryset）と
+    同じ部署スコープでpkの存在確認を行うための部署ID一覧を返す。`can_select_department`が
+    真（管理者）の場合はNone（無制限）、それ以外は`organizations.services.
+    visible_department_ids`（自部署＋閲覧部署範囲）に限定する
+    （permissions.services.contract_searchable_department_idsと同じ位置付け）。
+
+    配置場所の非対称について（規約準拠監査で指摘）：対になるcontract_searchable_department_ids
+    はpermissions.services側にあるが、こちらはdocuments.services側に置いている。理由は
+    依存するデータの違いで、文書側はorganizations.services.visible_department_ids（部署の
+    閲覧範囲テーブル）のみに依存し権限管理アプリのデータを参照しないのに対し、契約書側は
+    それに加えてPermissionProfile.contract_visible_departments（権限管理「契約書-部門間閲覧
+    設定」）というpermissionsアプリ固有のデータに依存するため、循環import回避も兼ねて
+    permissions.services側に置いている。文書側に同種の権限管理データへの依存が将来追加
+    されない限り、この非対称は意図的なものとして維持する。
+    """
+    if can_select_department(employee):
+        return None
+    return set(visible_department_ids(employee))
+
+
+def scoped_get_object_or_404(base_qs, employee, pk):
+    """文書の詳細操作（ダウンロード・プレビュー・編集・削除・一括編集）で、部署スコープ
+    （`document_searchable_department_ids`）外のpkへのURL直打ちを404にしつつ、セキュリティ上
+    意味のある事象としてlogger.warningに残す共通ヘルパー。
+
+    セキュリティレビューで発見：`documents.search_services.build_queryset`は部署スコープを
+    適用済みだったが、`DownloadView`/`PreviewView`/`DocumentEditView`/`DeleteView`/一括編集の
+    各ビューには適用されておらず、`doc_download`/`doc_edit`権限さえあれば部署をまたいだ
+    直接pkアクセスで他部署の文書を閲覧・編集・削除できてしまっていた（2026-08-25修正）。
+
+    実体はcore.scoping_services.scoped_get_object_or_404に集約済み（contracts.services.
+    scoped_get_object_or_404との重複をコード監査で発見、2026-08-25修正）。
+    """
+    return scoping_services.scoped_get_object_or_404(
+        base_qs, employee, pk, dept_ids_resolver=document_searchable_department_ids, entity_name="文書"
+    )
+
+
+def build_zip_archive(documents) -> tuple[bytes, int]:
+    """views.BulkDownloadView.post用のZIPアーカイブ構築（規約準拠監査で発見：ZIP圧縮という
+    ビジネスロジックがビューに直書きされており、ファイル役割分担の慣習
+    〈ビューから分離したロジックはservices.pyに置く〉から外れていたため分離。2026-08-25修正）。
+    実体はcore.zip_services.build_zip_archiveに集約済み（contracts.services.build_zip_archiveとの
+    重複をコード監査で発見、2026-08-25修正）。
+    """
+    return zip_services.build_zip_archive(documents, entity_label="document")
 
 
 def used_retention_periods():

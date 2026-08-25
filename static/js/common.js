@@ -72,12 +72,20 @@ document.addEventListener("click", (e) => {
  * としても発火するため、Content-Disposition:inlineで返してもブラウザが自動的にダウンロード
  * を開始してしまい、「詳細ポップアップを開いた瞬間にダウンロードが実行される」という
  * 意図しない副作用になっていた。image/pdf以外はiframeへ読み込ませず、非対応の案内を出す。
+ *
+ * isDeletedは"1"/""（テンプレート側のtruthy判定用に文字列で渡す）。品質レビューで発見：
+ * PreviewView/DetailAPIViewをis_deleted=Falseでのみ取得するよう修正した際、この行クリック
+ * プレビューだけpreviewUrlをcan_downloadのみでgatingしたままだったため、メイン画面お知らせ
+ * 「直近Xヵ月以内で削除された文書/契約書」一覧から行をクリックすると404相当（iframeが空）に
+ * なっていた。previewUrl自体はテンプレート側で既にnot is_deletedをgatingに加えたが、
+ * 権限不足の文言のまま表示すると理由が伝わらないため、削除済みの場合は専用の文言を出す
+ * （2026-08-25修正）。
  */
-function showSearchPreview(title, previewUrl, kind, previewKind) {
+function showSearchPreview(title, previewUrl, kind, previewKind, isDeleted) {
   const frame = document.getElementById("search-preview-frame");
   const placeholder = document.getElementById("search-preview-placeholder");
   const titleEl = document.getElementById("search-preview-title");
-  const permissionLabel = kind === "contract" ? "契約書-ダウンロード" : "文書-ダウンロード";
+  const label = kind === "contract" ? "契約書" : "文書";
   if (previewUrl && (previewKind === "image" || previewKind === "pdf")) {
     frame.src = previewUrl;
     frame.style.display = "";
@@ -86,8 +94,10 @@ function showSearchPreview(title, previewUrl, kind, previewKind) {
     frame.style.display = "none";
     frame.removeAttribute("src");
     placeholder.style.display = "";
-    if (!previewUrl) {
-      titleEl.innerHTML = `<strong>${title}</strong><br><br>プレビューを表示するには「${permissionLabel}」権限が必要です。権限管理画面でご確認ください。`;
+    if (isDeleted) {
+      titleEl.innerHTML = `<strong>${title}</strong><br><br>本${label}は削除されているため、プレビューを表示できません。`;
+    } else if (!previewUrl) {
+      titleEl.innerHTML = `<strong>${title}</strong><br><br>プレビューを表示するには「${label}-ダウンロード」権限が必要です。権限管理画面でご確認ください。`;
     } else {
       titleEl.innerHTML = `<strong>${title}</strong><br><br>この形式のファイルはプレビュー表示に対応していません。ダウンロードしてご確認ください。`;
     }

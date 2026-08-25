@@ -5,6 +5,7 @@ from django.urls import reverse_lazy
 
 from core.widgets import PopupSelectWidget
 from organizations.models import Department
+from organizations.services import branch_choices, section_choices
 
 logger = logging.getLogger(__name__)
 
@@ -23,27 +24,8 @@ class DeptSearchForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        branches = (
-            Department.objects.order_by("branch_code")
-            .values_list("branch_code", "branch_name")
-            .distinct()
-        )
-        self.fields["branch_code"].choices = [("", "(全て)")] + [
-            (code, name) for code, name in dict(branches).items()
-        ]
-        from accounts.csv_import_services import RETIRED_SECTION_CODE
-
-        sections = (
-            Department.objects.exclude(section_code="")
-            # xlsx 部署管理!B45「(但し部署コード99の退職者は対象外)」。
-            .exclude(section_code=RETIRED_SECTION_CODE)
-            .order_by("section_code")
-            .values_list("section_code", "section_name")
-            .distinct()
-        )
-        self.fields["section_code"].choices = [("", "(全て)")] + [
-            (code, name) for code, name in dict(sections).items()
-        ]
+        self.fields["branch_code"].choices = branch_choices()
+        self.fields["section_code"].choices = section_choices()
 
 
 class DeptRegistForm(forms.ModelForm):

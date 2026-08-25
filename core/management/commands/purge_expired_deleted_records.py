@@ -22,11 +22,16 @@ from django.core.management.base import BaseCommand
 from django.db import Error as DBError
 from django.utils import timezone
 
+from audit import services as audit_services
 from contracts.models import Contract
 from core.notice_services import add_months
 from documents.models import Document
 
 logger = logging.getLogger(__name__)
+
+# 認証済みEmployeeを経由しないバッチ実行のため、audit_services.log_raw()の職員番号/職員名/部署名には
+# 固定のプレースホルダーを使う（accounts.views.LoginView.form_invalidの「(不明)」と同じ考え方）。
+BATCH_ACTOR_LABEL = "(自動バッチ)"
 
 
 class Command(BaseCommand):
@@ -47,52 +52,76 @@ class Command(BaseCommand):
 
     def _purge_documents(self, since):
         # order_by("pk")で処理順を確定させる（extract_pending_pdf_textと同じ理由）。
-        queryset = Document.objects.filter(
-            is_deleted=True, deleted_at__date__lt=since
-        ).order_by("pk")
-        purged = 0
-        failed = 0
-        for document in queryset:
-            file_field = document.file
-            searchable_file_field = document.searchable_file
-            try:
-                document.delete()
-            except DBError:
-                logger.exception("文書の物理削除に失敗しました: document_id=%s", document.pk)
-                failed += 1
-                continue
-            # documents.views.DeleteView（廃止前）と同じ理由：DBレコード削除が成功した後に
-            # ファイル実体を削除し、ファイル削除の失敗自体はログに残した上で握りつぶす
-            # （本処理の主目的はDBレコードを消すことであり孤児ファイルは実害が小さいため）。
-            self._delete_file(file_field, "document", document.pk)
-            if searchable_file_field:
-                self._delete_file(searchable_file_field, "document(searchable_file)", document.pk)
-            purged += 1
-        return purged, failed
+        queryset = Document.objects.filter(is_deleted=True, deleted_at__date__lt=since).order_by("pk")
+        return self._purge(
+            queryset,
+            kind="document",
+            event_label="文書",
+            personal_info_flag_fn=lambda obj: obj.privacy_flag,
+        )
 
     def _purge_contracts(self, since):
-        queryset = Contract.objects.filter(
-            is_deleted=True, deleted_at__date__lt=since
-        ).prefetch_related("related_files").order_by("pk")
+        queryset = (
+            Contract.objects.filter(is_deleted=True, deleted_at__date__lt=since)
+            .prefetch_related("related_files")
+            .order_by("pk")
+        )
+        return self._purge(
+            queryset,
+            kind="contract",
+            event_label="契約書",
+            # RelatedFileはon_delete=CASCADEでDBレコードは一緒に消えるが、ファイル実体までは
+            # 自動削除されないため、delete()前に一覧を確保しておく必要がある
+            # （prefetch_related済みのためクエリは増えない）。
+            extra_files_fn=lambda obj: [(related.file, related.pk) for related in obj.related_files.all()],
+        )
+
+    def _purge(self, queryset, *, kind, event_label, personal_info_flag_fn=None, extra_files_fn=None):
+        """is_deleted=Trueのqueryset1件ずつをDBレコード・ファイル実体ごと完全削除する共通処理。
+        documents/contractsで構造（クエリ→ループ→ファイル欄退避→delete()→ファイル削除→監査ログ）が
+        同一だったため集約した（documents側にはprivacy_flagが、contracts側にはrelated_filesが
+        それぞれ固有のため、personal_info_flag_fn/extra_files_fnで差分だけ注入する）。
+
+        1件ずつdelete()する設計は意図的に維持している（バルクdelete()にまとめると、1件のDB制約
+        違反等で全体がロールバックされ、ゴミ箱保管中の全対象が一切物理削除されなくなる。日次実行の
+        本バッチでは通常数件〜十数件規模のため、1件の異常が他の正常な対象の削除まで巻き込む方が、
+        バルク化によるDB往復削減より悪い結果になると判断した）。
+        """
         purged = 0
         failed = 0
-        for contract in queryset:
-            file_field = contract.file
-            searchable_file_field = contract.searchable_file
-            related_files = list(contract.related_files.all())
+        for obj in queryset:
+            # delete()が成功するとDjangoがインスタンスのpkをNoneにリセットするため、削除後の
+            # ログ・ファイル削除呼び出し用に先に控えておく（pk=Noneでログに残ると追跡できなくなる
+            # 問題への対処）。
+            obj_pk = obj.pk
+            file_field = obj.file
+            searchable_file_field = obj.searchable_file
+            extra_files = extra_files_fn(obj) if extra_files_fn else []
             try:
-                # RelatedFileはon_delete=CASCADEでDBレコードは一緒に消えるが、ファイル実体までは
-                # 自動削除されないため、delete()前に一覧を確保しておく（上のrelated_files）。
-                contract.delete()
+                obj.delete()
             except DBError:
-                logger.exception("契約書の物理削除に失敗しました: contract_id=%s", contract.pk)
+                logger.exception("%sの物理削除に失敗しました: %s_id=%s", event_label, kind, obj_pk)
                 failed += 1
                 continue
-            self._delete_file(file_field, "contract", contract.pk)
+            # documents/contracts.views.DeleteView（廃止前）と同じ理由：DBレコード削除が成功した後に
+            # ファイル実体を削除し、ファイル削除の失敗自体はログに残した上で握りつぶす
+            # （本処理の主目的はDBレコードを消すことであり孤児ファイルは実害が小さいため）。
+            self._delete_file(file_field, kind, obj_pk)
             if searchable_file_field:
-                self._delete_file(searchable_file_field, "contract(searchable_file)", contract.pk)
-            for related in related_files:
-                self._delete_file(related.file, "contract related_file", contract.pk, related_pk=related.pk)
+                self._delete_file(searchable_file_field, f"{kind}(searchable_file)", obj_pk)
+            for related_file, related_pk in extra_files:
+                self._delete_file(related_file, f"{kind} related_file", obj_pk, related_pk=related_pk)
+            # documents/contracts.views.DeleteView（廃止前）が完全削除時に残していた監査ログを、
+            # 唯一の完全削除経路になった本バッチでも引き続き記録する（CLAUDE.md「監査が必要な
+            # イベント...は一元的な記録機構（auditアプリ）を通す」）。
+            audit_services.log_raw(
+                employee_no=BATCH_ACTOR_LABEL,
+                employee_name=BATCH_ACTOR_LABEL,
+                department_name=BATCH_ACTOR_LABEL,
+                action="物理削除バッチ 完全削除",
+                event_message=f"{event_label}「{obj.title}」を完全に削除しました。",
+                personal_info_flag=personal_info_flag_fn(obj) if personal_info_flag_fn else False,
+            )
             purged += 1
         return purged, failed
 

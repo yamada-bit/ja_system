@@ -15,10 +15,9 @@ from audit import services as audit_services
 from core.double_submit import consume_token, issue_token
 from masters.forms import CategoryForm, CategorySearchForm, GroupForm, GroupSearchForm, RetentionPeriodForm
 from masters.models import Category, DocKbn, EapprovalDocName, Group, RetentionKbn, RetentionPeriod
-from masters.services import department_scope_ids, scope_queryset_by_department
+from masters.services import department_scope_ids, scope_queryset_by_department, scoped_get_object_or_404
 from permissions.mixins import SettingsMenuAccessMixin
-from permissions.models import PermissionRole
-from permissions.services import get_role
+from permissions.services import is_admin as _is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ class GroupListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         form = GroupSearchForm(request.GET)
         sort_key = request.GET.get("sort")
         sort_dir = request.GET.get("dir", "asc")
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
+        is_admin = _is_admin(request.user)
         qs = _group_queryset_with_counts()
         dept_ids = department_scope_ids(request.user)
         qs = scope_queryset_by_department(qs, dept_ids)
@@ -90,9 +89,12 @@ class GroupListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 qs = qs.filter(name__icontains=form.cleaned_data["name"])
             if form.cleaned_data.get("doc_kbn"):
                 qs = qs.filter(doc_kbn=form.cleaned_data["doc_kbn"])
-        if sort_key == "department":
+        if sort_key == "department" and is_admin:
             # xlsx B54,58: 部署名ではなく本支所コード→部課コードの複合キーでソート
             # （permissions.services.filter_authority_querysetの"department"特殊扱いと同じ理由）。
+            # 「部署」列自体が非管理者には非表示のため、is_adminでもゲートする
+            # （コード監査で発見：以前は非表示のはずの並び替えがsort=department直指定で
+            # 非管理者でも到達できた、2026-08-24修正）。
             prefix = "-" if sort_dir == "desc" else ""
             qs = qs.order_by(f"{prefix}department__branch_code", f"{prefix}department__section_code", "code")
         else:
@@ -132,7 +134,7 @@ class GroupRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     settings_menu_key = "class_management"
 
     def get(self, request):
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
+        is_admin = _is_admin(request.user)
         form = GroupForm(show_department=is_admin)
         return render(request, self.template_name, {"form": form, "token": issue_token(request.session, self.form_id)})
 
@@ -142,7 +144,7 @@ class GroupRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("masters:class_regist")
 
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
+        is_admin = _is_admin(request.user)
         form = GroupForm(request.POST, show_department=is_admin)
         if not form.is_valid():
             token = issue_token(request.session, self.form_id)
@@ -176,7 +178,10 @@ class GroupRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         audit_services.log(
             employee=request.user,
             action="分類管理 新規登録",
-            event_message=f"No.{group.code},分類名：{group.name},書類管理区分：{group.get_doc_kbn_display()}",
+            event_message=(
+                f"No.{group.code},分類名：{group.name},書類管理区分：{group.get_doc_kbn_display()},"
+                f"部署：{group.department}"
+            ),
         )
         messages.success(request, f"分類「{group.name}」を登録しました。")
         return redirect("masters:class_list")
@@ -195,14 +200,11 @@ class GroupEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     settings_menu_key = "class_management"
 
     def _get_object(self, request, pk):
-        qs = Group.objects.filter(is_deleted=False)
-        dept_ids = department_scope_ids(request.user)
-        qs = scope_queryset_by_department(qs, dept_ids)
-        return get_object_or_404(qs, pk=pk)
+        return scoped_get_object_or_404(Group.objects.filter(is_deleted=False), request.user, pk)
 
     def get(self, request, pk):
         group = self._get_object(request, pk)
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
+        is_admin = _is_admin(request.user)
         form = GroupForm(instance=group, show_department=is_admin)
         return render(
             request, self.template_name, {"form": form, "group": group, "token": issue_token(request.session, self.form_id)}
@@ -215,7 +217,7 @@ class GroupEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("masters:class_edit", pk=pk)
 
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
+        is_admin = _is_admin(request.user)
         form = GroupForm(request.POST, instance=group, show_department=is_admin)
         if not form.is_valid():
             token = issue_token(request.session, self.form_id)
@@ -239,7 +241,10 @@ class GroupEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         audit_services.log(
             employee=request.user,
             action="分類管理 更新",
-            event_message=f"No.{group.code},分類名：{group.name},書類管理区分：{group.get_doc_kbn_display()}",
+            event_message=(
+                f"No.{group.code},分類名：{group.name},書類管理区分：{group.get_doc_kbn_display()},"
+                f"部署：{group.department}"
+            ),
         )
         messages.success(request, f"分類「{group.name}」を更新しました。")
         return redirect("masters:class_list")
@@ -256,10 +261,7 @@ class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
 
     def _get_object(self, request, pk):
         # GroupEditView._get_objectと同じ理由（Rev1.2で追加、非管理者は自部署のみ）。
-        qs = _group_queryset_with_counts()
-        dept_ids = department_scope_ids(request.user)
-        qs = scope_queryset_by_department(qs, dept_ids)
-        return get_object_or_404(qs, pk=pk)
+        return scoped_get_object_or_404(_group_queryset_with_counts(), request.user, pk)
 
     def get(self, request, pk):
         group = self._get_object(request, pk)
@@ -271,7 +273,7 @@ class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 "token": issue_token(request.session, self.form_id),
                 # 一覧・登録・編集と同じゲーティング（xlsx B75「一覧の「部署」を非表示」、
                 # フィデリティ監査で発見：削除確認画面だけ条件無しで部署を表示していた）。
-                "is_admin_viewer": get_role(request.user) == PermissionRole.ADMIN,
+                "is_admin_viewer": _is_admin(request.user),
             },
         )
 
@@ -321,7 +323,7 @@ CATEGORY_SORT_FIELDS = {
 }
 
 
-class CategoryListView(LoginRequiredMixin, View):
+class CategoryListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     """screen-cat-list。1ページ100件目安（Rev1.1で50→100件）。列見出しの▲▼ソート（カテゴリーコード/分類/文書件数）は
     文書検索画面と同じsort_url/sort_arrowの仕組みを使う（2026-08-17、xlsxユーザー指示により追加）。
 
@@ -338,13 +340,14 @@ class CategoryListView(LoginRequiredMixin, View):
 
     template_name = "masters/cat_list.html"
     PAGE_SIZE = 100
+    settings_menu_key = "category_management"
 
     def get(self, request):
         # request.GET or Noneは避ける（accounts.services.filter_staff_querysetのコメント参照）。
-        form = CategorySearchForm(request.GET)
+        form = CategorySearchForm(request.GET, employee=request.user)
         sort_key = request.GET.get("sort")
         sort_dir = request.GET.get("dir", "asc")
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
+        is_admin = _is_admin(request.user)
         qs = _category_queryset_with_counts()
         dept_ids = department_scope_ids(request.user)
         qs = scope_queryset_by_department(qs, dept_ids)
@@ -360,8 +363,9 @@ class CategoryListView(LoginRequiredMixin, View):
         if sort_key == "group":
             prefix = "-" if sort_dir == "desc" else ""
             qs = qs.order_by(f"{prefix}group__code", f"{prefix}group__name", "code")
-        elif sort_key == "department":
-            # GroupListView.getの"department"特殊扱いと同じ理由（xlsx B62）。
+        elif sort_key == "department" and is_admin:
+            # GroupListView.getの"department"特殊扱いと同じ理由（xlsx B62）。is_adminゲートも
+            # GroupListView.getと同じ理由（コード監査で発見、2026-08-24修正）。
             prefix = "-" if sort_dir == "desc" else ""
             qs = qs.order_by(f"{prefix}department__branch_code", f"{prefix}department__section_code", "code")
         else:
@@ -390,7 +394,7 @@ class CategoryListView(LoginRequiredMixin, View):
         )
 
 
-class CategoryRegistView(LoginRequiredMixin, View):
+class CategoryRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     """screen-cat-regist。Rev1.2で「部署」プルダウン（管理者のみ表示）が追加された
     （xlsx B109-110）。GroupRegistViewと同じ方針（非管理者が登録するカテゴリーは自動的に
     自部署が設定される）。
@@ -398,10 +402,11 @@ class CategoryRegistView(LoginRequiredMixin, View):
 
     template_name = "masters/cat_regist.html"
     form_id = "masters_cat_regist"
+    settings_menu_key = "category_management"
 
     def get(self, request):
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
-        form = CategoryForm(show_department=is_admin)
+        is_admin = _is_admin(request.user)
+        form = CategoryForm(show_department=is_admin, employee=request.user)
         return render(request, self.template_name, {"form": form, "token": issue_token(request.session, self.form_id)})
 
     def post(self, request):
@@ -410,8 +415,8 @@ class CategoryRegistView(LoginRequiredMixin, View):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("masters:cat_regist")
 
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
-        form = CategoryForm(request.POST, show_department=is_admin)
+        is_admin = _is_admin(request.user)
+        form = CategoryForm(request.POST, show_department=is_admin, employee=request.user)
         if not form.is_valid():
             token = issue_token(request.session, self.form_id)
             return render(request, self.template_name, {"form": form, "token": token})
@@ -440,30 +445,29 @@ class CategoryRegistView(LoginRequiredMixin, View):
             action="カテゴリー管理 新規登録",
             event_message=(
                 f"No.{category.code},カテゴリー名：{category.name},"
-                f"書類管理区分：{category.get_doc_kbn_display()},分類：{category.group.name}"
+                f"書類管理区分：{category.get_doc_kbn_display()},分類：{category.group.name},"
+                f"部署：{category.department}"
             ),
         )
         messages.success(request, f"カテゴリー「{category.name}」を登録しました。")
         return redirect("masters:cat_list")
 
 
-class CategoryEditView(LoginRequiredMixin, View):
+class CategoryEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     """screen-cat-edit。GroupEditViewと同じ方針（Rev1.2で「部署」プルダウンが追加され、
     非管理者の編集対象・可視範囲を自部署のみに絞る）。"""
 
     template_name = "masters/cat_edit.html"
     form_id = "masters_cat_edit"
+    settings_menu_key = "category_management"
 
     def _get_object(self, request, pk):
-        qs = Category.objects.filter(is_deleted=False)
-        dept_ids = department_scope_ids(request.user)
-        qs = scope_queryset_by_department(qs, dept_ids)
-        return get_object_or_404(qs, pk=pk)
+        return scoped_get_object_or_404(Category.objects.filter(is_deleted=False), request.user, pk)
 
     def get(self, request, pk):
         category = self._get_object(request, pk)
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
-        form = CategoryForm(instance=category, show_department=is_admin)
+        is_admin = _is_admin(request.user)
+        form = CategoryForm(instance=category, show_department=is_admin, employee=request.user)
         return render(
             request,
             self.template_name,
@@ -477,8 +481,8 @@ class CategoryEditView(LoginRequiredMixin, View):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("masters:cat_edit", pk=pk)
 
-        is_admin = get_role(request.user) == PermissionRole.ADMIN
-        form = CategoryForm(request.POST, instance=category, show_department=is_admin)
+        is_admin = _is_admin(request.user)
+        form = CategoryForm(request.POST, instance=category, show_department=is_admin, employee=request.user)
         if not form.is_valid():
             token = issue_token(request.session, self.form_id)
             return render(request, self.template_name, {"form": form, "category": category, "token": token})
@@ -502,26 +506,25 @@ class CategoryEditView(LoginRequiredMixin, View):
             action="カテゴリー管理 更新",
             event_message=(
                 f"No.{category.code},カテゴリー名：{category.name},"
-                f"書類管理区分：{category.get_doc_kbn_display()},分類：{category.group.name}"
+                f"書類管理区分：{category.get_doc_kbn_display()},分類：{category.group.name},"
+                f"部署：{category.department}"
             ),
         )
         messages.success(request, f"カテゴリー「{category.name}」を更新しました。")
         return redirect("masters:cat_list")
 
 
-class CategoryDeleteView(LoginRequiredMixin, View):
+class CategoryDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     """screen-cat-delete。xlsx B196「カテゴリーマスタから論理削除とする」。
     GroupDeleteViewと同じ方針（Rev1.2で非管理者は自部署のカテゴリーのみ削除可）。
     """
 
     template_name = "masters/cat_delete.html"
     form_id = "masters_cat_delete"
+    settings_menu_key = "category_management"
 
     def _get_object(self, request, pk):
-        qs = _category_queryset_with_counts()
-        dept_ids = department_scope_ids(request.user)
-        qs = scope_queryset_by_department(qs, dept_ids)
-        return get_object_or_404(qs, pk=pk)
+        return scoped_get_object_or_404(_category_queryset_with_counts(), request.user, pk)
 
     def get(self, request, pk):
         category = self._get_object(request, pk)
@@ -532,7 +535,7 @@ class CategoryDeleteView(LoginRequiredMixin, View):
                 "category": category,
                 "token": issue_token(request.session, self.form_id),
                 # GroupDeleteView.getと同じ理由（一覧・登録・編集とゲーティングを揃える）。
-                "is_admin_viewer": get_role(request.user) == PermissionRole.ADMIN,
+                "is_admin_viewer": _is_admin(request.user),
             },
         )
 

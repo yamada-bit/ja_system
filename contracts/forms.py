@@ -5,17 +5,20 @@ from decimal import Decimal, InvalidOperation
 from django import forms
 from django.urls import reverse_lazy
 
-from core.forms import search_year_choices, year_choices_with_existing
+from core.forms import (
+    MATCH_AND,
+    MATCH_CHOICES,
+    MATCH_OR,
+    SEARCH_RADIO_DEFAULTS,
+    apply_radio_defaults,
+    scoped_group_and_category_querysets,
+    search_year_choices,
+    year_choices_with_existing,
+)
 from core.widgets import InlineRadioSelect, PopupSelectWidget
 from masters.models import Category, DocKbn, Group
-from masters.services import scope_queryset_by_department
 from organizations.models import Department
-from permissions.services import (
-    can_select_department,
-    contract_searchable_department_ids,
-    department_ids_for_group_scope,
-    visible_groups,
-)
+from permissions.services import can_select_department, contract_searchable_department_ids
 
 logger = logging.getLogger(__name__)
 
@@ -142,15 +145,10 @@ class UploadStep2Form(forms.Form):
             # ログインユーザーの部署名をセット」は新規登録画面のみ。編集画面は既存契約書の
             # 部署をContractEditView._build_formがinitialで渡すため、ここで上書きしない）。
             self.initial["department"] = employee.department_id
-        allowed_groups = visible_groups(employee, kind="contract") if employee else None
-        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
-        group_qs = group_qs.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
-        category_qs = Category.objects.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
         # xlsx 保管!P430,P459(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
-        if employee is not None:
-            dept_ids = department_ids_for_group_scope(employee, kind="contract")
-            group_qs = scope_queryset_by_department(group_qs, dept_ids)
-            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        group_qs, category_qs = scoped_group_and_category_querysets(
+            doc_kbn=DocKbn.CONTRACT, kind="contract", employee=employee
+        )
         self.fields["group"].queryset = group_qs
         self.fields["group"].widget.queryset = group_qs
         self.fields["category"].queryset = category_qs
@@ -164,15 +162,6 @@ class UploadStep2Form(forms.Form):
 
     def titles(self, file_count):
         return [self.cleaned_data[f"title_{i}"] for i in range(file_count)]
-
-
-MATCH_OR = "or"
-MATCH_AND = "and"
-MATCH_CHOICES = ((MATCH_OR, "いずれかを含む"), (MATCH_AND, "すべて含む"))
-
-# documents.forms.SEARCH_RADIO_DEFAULTS参照。バインド済みRadioSelectはdataにキーが
-# 無いとchecked無しになるため、原本index.htmlの既定checked状態を補う。
-SEARCH_RADIO_DEFAULTS = {"title_match": MATCH_OR, "freeword_match": MATCH_OR, "save_day_kbn": "save"}
 
 
 class SearchForm(forms.Form):
@@ -251,23 +240,28 @@ class SearchForm(forms.Form):
     )
 
     def __init__(self, *args, employee=None, **kwargs):
-        if args and args[0] is not None:
-            data = args[0].copy()
-            for field_name, default in SEARCH_RADIO_DEFAULTS.items():
-                data.setdefault(field_name, default)
-            args = (data,) + args[1:]
-        elif kwargs.get("data") is not None:
-            data = kwargs["data"].copy()
-            for field_name, default in SEARCH_RADIO_DEFAULTS.items():
-                data.setdefault(field_name, default)
-            kwargs["data"] = data
+        # 実体はcore.forms.apply_radio_defaultsに集約済み（documents.forms.SearchFormとの重複を
+        # コード監査で発見、2026-08-25修正）。
+        args, kwargs = apply_radio_defaults(args, kwargs)
         super().__init__(*args, **kwargs)
         # xlsx 検索・閲覧・変更!B499「※文書管理と同じ」（B137-140「今年～契約書が保存されている
         # 最古の年」）。
         self.fields["year"].choices = search_year_choices(DocKbn.CONTRACT)
 
+        # contract_searchable_department_ids()は内部でDepartmentViewScope・
+        # contract_visible_departments(M2M)の2クエリを発行するため、下のgroup/category絞り込みでも
+        # 同じ範囲が必要な箇所（department_ids_for_group_scope(kind="contract")は内部でこの関数を
+        # そのまま呼ぶだけ）は使い回す。以前は同じ内容を2回計算しており、検索画面を開くたびに
+        # 本来2クエリで済むところを4クエリ発行していた（コード監査で発見、2026-08-24修正）。
+        contract_dept_ids = contract_searchable_department_ids(employee) if employee is not None else None
+        # views.SearchView.getが検索一覧クエリ（search_services.build_queryset）にも同じ範囲を
+        # 渡して使い回せるよう、計算済みの値をフォームインスタンスに保持しておく（効率性レビューで
+        # 発見：フォーム側で1回・build_queryset側でまた1回、計4クエリを検索画面表示のたびに
+        # 発行していた。上のコメントが「2026-08-24修正」と主張していたのはフォーム内部の
+        # 重複だけで、build_queryset側との重複は未解消だった。2026-08-25修正）。
+        self.contract_dept_ids = contract_dept_ids
         if employee is not None and employee.department_id:
-            allowed_ids = contract_searchable_department_ids(employee)
+            allowed_ids = contract_dept_ids
             if allowed_ids is not None:
                 # xlsx 検索・閲覧・変更!B417-418,421-423(Rev1.1)「閲覧部署範囲テーブルを参照し...
                 # 自動セットする」「権限が"管理者"。または契約書-部門間閲覧設定に設定がある場合に
@@ -279,15 +273,12 @@ class SearchForm(forms.Form):
                 self.fields["department"].initial = list(allowed_ids)
                 if not can_select_department(employee, kind="contract"):
                     self.fields["department"].disabled = True
-        allowed_groups = visible_groups(employee, kind="contract") if employee else None
-        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
-        group_qs = group_qs.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
-        category_qs = Category.objects.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False)
         # xlsx 検索・閲覧・変更!P470,P507(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
-        if employee is not None:
-            dept_ids = department_ids_for_group_scope(employee, kind="contract")
-            group_qs = scope_queryset_by_department(group_qs, dept_ids)
-            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        # department_ids_for_group_scope(kind="contract")を経由せず、上で計算済みの
+        # contract_dept_idsをそのまま使う（上のコメント参照）。
+        group_qs, category_qs = scoped_group_and_category_querysets(
+            doc_kbn=DocKbn.CONTRACT, kind="contract", employee=employee, dept_ids=contract_dept_ids
+        )
         self.fields["group"].queryset = group_qs
         self.fields["group"].widget.queryset = group_qs
         self.fields["category"].queryset = category_qs

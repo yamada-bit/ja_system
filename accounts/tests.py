@@ -1,4 +1,5 @@
 import io
+from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -184,6 +185,7 @@ class ResetPermissionProfileTests(TestCase):
             department_changed=False,
             rank_changed=False,
             position_changed=False,
+            retired_changed=False,
             actor=self.employee,
         )
         self.profile.refresh_from_db()
@@ -196,6 +198,7 @@ class ResetPermissionProfileTests(TestCase):
             department_changed=True,
             rank_changed=False,
             position_changed=False,
+            retired_changed=False,
             actor=self.employee,
         )
         self.profile.refresh_from_db()
@@ -211,6 +214,7 @@ class ResetPermissionProfileTests(TestCase):
             department_changed=True,
             rank_changed=False,
             position_changed=False,
+            retired_changed=False,
             actor=self.employee,
         )
         entry = AuditLog.objects.get(action="権限管理 自動リセット")
@@ -224,11 +228,31 @@ class ResetPermissionProfileTests(TestCase):
             department_changed=False,
             rank_changed=False,
             position_changed=False,
+            retired_changed=True,
             actor=self.employee,
         )
         self.profile.refresh_from_db()
         self.assertEqual(self.profile.role, PermissionRole.STAFF)
         self.assertFalse(self.profile.doc_download)
+
+    def test_no_reset_for_already_retired_employee_with_unrelated_change(self):
+        """retired_changed引数を新設する前は、employee.is_retired（現在値）を直接見ていたため、
+        既に退職済みの職員を編集するたび（退職と無関係な変更でも）毎回リセットされるバグがあった
+        （コード監査で発見、2026-08-24修正）。退職済みだがretired_changed=Falseの場合、
+        他のフラグも全てFalseならリセットされないことを確認する回帰テスト。"""
+        self.employee.is_retired = True
+        self.employee.save(update_fields=["is_retired"])
+        reset_permission_profile_if_needed(
+            self.employee,
+            department_changed=False,
+            rank_changed=False,
+            position_changed=False,
+            retired_changed=False,
+            actor=self.employee,
+        )
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.role, PermissionRole.ADMIN)
+        self.assertTrue(self.profile.doc_download)
 
     def test_no_profile_is_noop(self):
         """権限プロファイル未設定の職員は何もしない（例外を出さない）。"""
@@ -237,7 +261,8 @@ class ResetPermissionProfileTests(TestCase):
             department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
         reset_permission_profile_if_needed(
-            other, department_changed=True, rank_changed=False, position_changed=False, actor=self.employee
+            other, department_changed=True, rank_changed=False, position_changed=False,
+            retired_changed=False, actor=self.employee,
         )
         self.assertFalse(PermissionProfile.objects.filter(employee=other).exists())
         # プロファイルが無くリセット自体が発生しないため、監査ログも記録されないこと。
@@ -328,6 +353,17 @@ class StaffCsvExportViewTests(TestCase):
         self.assertEqual(entry.employee_no, "1111")
         self.assertTrue(entry.personal_info_flag)
 
+    def test_export_escapes_formula_prefixed_name(self):
+        """氏名が「=」等で始まる場合、Excel等で開いた際の数式インジェクション対策として
+        シングルクォートを付与する（2026-08-24追加、core.csv_services.sanitize_csv_row参照）。"""
+        Employee.objects.create_user(
+            employee_no="3333", name="=cmd|'/c calc'!A1", password="x", department=self.department,
+            rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        response = self.client.get("/accounts/staff/csv/")
+        content = response.content.decode("utf-8-sig")
+        self.assertIn("'=cmd|'/c calc'!A1", content)
+
 
 class StaffSettingsMenuAccessControlTests(TestCase):
     """設定メニュー「職員マスタ」は管理者のみ表示・利用可（xlsx 設定メニュー!B46以降）。
@@ -373,6 +409,26 @@ class StaffSettingsMenuAccessControlTests(TestCase):
         self._login_as(PermissionRole.ADMIN)
         response = self.client.get("/accounts/staff/")
         self.assertEqual(response.status_code, 200)
+
+    def test_manager_cannot_access_staff_csv_export(self):
+        self._login_as(PermissionRole.MANAGER)
+        response = self.client.get("/accounts/staff/csv/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_cannot_access_staff_csv_import(self):
+        self._login_as(PermissionRole.STAFF)
+        response = self.client.get("/accounts/staff/csv/import/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_manager_cannot_access_staff_regist(self):
+        self._login_as(PermissionRole.MANAGER)
+        response = self.client.get("/accounts/staff/regist/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_cannot_access_staff_edit(self):
+        self._login_as(PermissionRole.STAFF)
+        response = self.client.get(f"/accounts/staff/{self.target.pk}/edit/")
+        self.assertEqual(response.status_code, 403)
 
 
 class StaffRegistEditAuditLogTests(TestCase):
@@ -634,6 +690,86 @@ class ImportStaffCsvServiceTests(TestCase):
         self.assertEqual(summary.created, 1)
         self.assertEqual(len(summary.errors), 1)
         self.assertTrue(Employee.objects.filter(employee_no="0832").exists())
+
+    def test_invalid_rank_code_is_rejected(self):
+        """StaffRegistForm/StaffEditFormはChoiceFieldで職階コードを検証するが、CSV取込は
+        Employee.save()を直接呼ぶためchoices検証を経由しない。手動フォームと同じ検証を行う
+        （コード監査で発見、2026-08-24修正）。"""
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,XX,不正,0"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(summary.created, 0)
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("職階コード", summary.errors[0])
+        self.assertFalse(Employee.objects.filter(employee_no="0832").exists())
+
+    def test_invalid_position_code_is_rejected(self):
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,XX,不正,20,考査役,0"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(summary.created, 0)
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("役職コード", summary.errors[0])
+        self.assertFalse(Employee.objects.filter(employee_no="0832").exists())
+
+    def test_column_count_mismatch_is_rejected(self):
+        # 所属長フラグ列が欠落した10列の行（正しくは11列）。
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("列数", summary.errors[0])
+
+    def test_empty_file_raises(self):
+        empty = SimpleUploadedFile("staff.csv", b"", content_type="text/csv")
+        with self.assertRaises(CsvImportError):
+            import_staff_csv(empty, actor=self.actor)
+
+    def test_invalid_encoding_raises(self):
+        # Shift-JISのバイト列はUTF-8として不正な並びになるため、utf-8-sigでのdecodeが失敗する。
+        bad_bytes = SimpleUploadedFile("staff.csv", b"\x82\xa0\x82\xa2\x82\xa4", content_type="text/csv")
+        with self.assertRaises(CsvImportError):
+            import_staff_csv(bad_bytes, actor=self.actor)
+
+    def test_unexpected_exception_shows_generic_message_not_raw_text(self):
+        """行処理中に想定外の例外（バグ等）が起きた場合、生の例外メッセージをそのまま
+        利用者に見せず、汎用的な日本語メッセージを返す（コード監査で発見、2026-08-24修正）。"""
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役,0"])
+        with patch("accounts.csv_import_services._upsert_department", side_effect=RuntimeError("boom")):
+            summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("予期しないエラー", summary.errors[0])
+        self.assertNotIn("boom", summary.errors[0])
+
+    def test_manager_flag_does_not_promote_employee_who_just_retired(self):
+        """退職とマネージャー昇格が同じ行に含まれる場合、退職によるSTAFFへのリセットを
+        所属長フラグが上書きしないことを確認する（コード監査で発見、2026-08-24修正）。"""
+        department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        employee = Employee.objects.create_user(
+            employee_no="0832", name="農協 太郎", password="x",
+            department=department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=employee, role=PermissionRole.STAFF)
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,99,退職,16,課長,20,考査役,1"])
+        import_staff_csv(upload, actor=self.actor)
+        employee.refresh_from_db()
+        self.assertTrue(employee.is_retired)
+        self.assertEqual(employee.permission_profile.role, PermissionRole.STAFF)
+
+    def test_manager_flag_promotion_creates_audit_log(self):
+        """所属長フラグによる昇格もreset_permission_profile_if_neededと同様に権限に関わる操作の
+        ため、audit_services.log()で記録する（コード監査で発見、2026-08-24修正）。"""
+        department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        employee = Employee.objects.create_user(
+            employee_no="0832", name="農協 太郎", password="x",
+            department=department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=employee, role=PermissionRole.STAFF)
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役,1"])
+        import_staff_csv(upload, actor=self.actor)
+        entry = AuditLog.objects.get(action="職員マスタ CSV取込 所属長昇格")
+        self.assertIn("0832", entry.event_message)
 
 
 class StaffCsvImportViewTests(TestCase):

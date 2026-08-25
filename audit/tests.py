@@ -5,6 +5,7 @@ from django.test import TestCase
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from audit.services import log as audit_log
+from audit.services import log_raw as audit_log_raw
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
 
@@ -43,6 +44,35 @@ class AuditLogServiceTests(TestCase):
                 audit_log(employee=self.employee, action="テスト", event_message="テスト")
             except Exception:
                 self.fail("audit_log()は例外を伝播させてはならない")
+        self.assertEqual(AuditLog.objects.count(), 0)
+
+    def test_log_raw_creates_record_without_employee_instance(self):
+        """log_raw()は認証済みEmployeeインスタンスを経由できない場面向け（core.management.commands.
+        purge_expired_deleted_records、accounts.views.LoginView.form_invalid等）。log()を介さず
+        職員番号/職員名/部署名を直接指定してもAuditLogが作成されることを確認する。
+        """
+        audit_log_raw(
+            employee_no="(自動バッチ)",
+            employee_name="(自動バッチ)",
+            department_name="(自動バッチ)",
+            action="物理削除バッチ 完全削除",
+            event_message="文書「テスト」を完全に削除しました。",
+            personal_info_flag=True,
+        )
+        entry = AuditLog.objects.get()
+        self.assertEqual(entry.employee_no, "(自動バッチ)")
+        self.assertEqual(entry.action, "物理削除バッチ 完全削除")
+        self.assertTrue(entry.personal_info_flag)
+
+    def test_log_raw_failure_does_not_raise(self):
+        with mock.patch("audit.services.AuditLog.objects.create", side_effect=Exception("db down")):
+            try:
+                audit_log_raw(
+                    employee_no="1", employee_name="不明", department_name="不明",
+                    action="テスト", event_message="テスト",
+                )
+            except Exception:
+                self.fail("log_raw()は例外を伝播させてはならない")
         self.assertEqual(AuditLog.objects.count(), 0)
 
 
@@ -103,6 +133,14 @@ class AuditLogListViewTests(TestCase):
             action="文書 ダウンロード", event_message="ファイル名：規定一覧", personal_info_flag=True,
         )
 
+    def test_no_filter_returns_all_records(self):
+        """audit/views.py・audit/services.pyのコメントが警告する「request.GET or Noneにすると
+        初回アクセス時にフォームが未バインド扱いになりフィルタが一切効かなくなる」回帰の検知テスト。
+        パラメータ無しGETで全件表示されることを確認する。"""
+        response = self.client.get("/audit/")
+        self.assertContains(response, "文書 ダウンロード")
+        self.assertContains(response, "ログイン</td>")
+
     def test_filter_by_employee_name(self):
         response = self.client.get("/audit/", {"employee_name": "山田"})
         self.assertContains(response, "文書 ダウンロード")
@@ -141,6 +179,29 @@ class AuditLogListViewTests(TestCase):
         # 一覧テーブルの行を特定できる文言で絞り込み結果を確認する。
         self.assertNotContains(response, "ログイン</td>")
 
+    def test_pagination_splits_across_pages(self):
+        """CLAUDE.md「一覧画面のページネーションはDjango Paginatorで実装する」の動作確認
+        （AuditLogListView.PAGE_SIZE=100超のデータで2ページ目に分かれること）。setUpの2件に
+        加え、100件ちょうどでpage=2が1件になるよう99件追加する。
+        """
+        AuditLog.objects.bulk_create(
+            [
+                AuditLog(
+                    employee_no=str(100 + i), employee_name=f"追加太郎{i}", department_name="本店|総務部",
+                    action="ログイン", event_message="ログイン", personal_info_flag=False,
+                )
+                for i in range(99)
+            ]
+        )
+        self.assertEqual(AuditLog.objects.count(), 101)
+
+        page1 = self.client.get("/audit/")
+        self.assertEqual(len(page1.context["page_obj"]), 100)
+        self.assertEqual(page1.context["page_obj"].paginator.num_pages, 2)
+
+        page2 = self.client.get("/audit/", {"page": "2"})
+        self.assertEqual(len(page2.context["page_obj"]), 1)
+
 
 class AuditLogCsvExportViewTests(TestCase):
     def setUp(self):
@@ -162,6 +223,15 @@ class AuditLogCsvExportViewTests(TestCase):
             action="文書 ダウンロード", event_message="ファイル名：規定一覧", personal_info_flag=True,
         )
 
+    def test_csv_export_with_no_matching_rows_returns_header_only(self):
+        """検索条件に一致するレコードが無い場合、ヘッダー行のみのCSVを返すこと
+        （フィルタ側で例外にならず正常系として完結することの確認）。"""
+        response = self.client.get("/audit/csv/", {"employee_name": "存在しない職員"})
+        content = response.content.decode("utf-8-sig")
+        lines = [line for line in content.splitlines() if line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("操作日時,職員番号,部署名,職員名,操作内容,イベントメッセージ,個人情報", lines[0])
+
     def test_csv_export_contains_filtered_rows(self):
         """一覧画面と同じ検索条件（絞込み結果）をCSV化する（accounts.StaffCsvExportViewと同方針）。"""
         response = self.client.get("/audit/csv/", {"employee_name": "山田"})
@@ -169,6 +239,18 @@ class AuditLogCsvExportViewTests(TestCase):
         content = response.content.decode("utf-8-sig")
         self.assertIn("山田花子", content)
         self.assertNotIn("ログイン,ログイン", content)
+
+    def test_csv_export_escapes_formula_prefixed_employee_name(self):
+        """職員名が「=」等で始まる場合、CSVインジェクション対策としてシングルクォートを付与し、
+        Excel側にテキストとして扱わせる（2026-08-24追加、core.csv_services.sanitize_csv_row参照）。"""
+        AuditLog.objects.create(
+            employee_no="3", employee_name="=cmd|'/c calc'!A1", department_name="本店|総務部",
+            action="文書 登録", event_message="文書「テスト」を保管しました。",
+            personal_info_flag=False,
+        )
+        response = self.client.get("/audit/csv/")
+        content = response.content.decode("utf-8-sig")
+        self.assertIn("'=cmd|'/c calc'!A1", content)
 
     def test_csv_export_records_audit_log(self):
         """CSV出力自体も職員名等の個人情報を含む一覧のファイル出力のため、監査ログに記録する。"""

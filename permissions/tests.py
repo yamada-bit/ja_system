@@ -165,6 +165,36 @@ class PermissionServicesTests(TestCase):
         )
         self.assertTrue(can_edit_retention(self.employee))
 
+    def test_is_admin(self):
+        """masters/views.py・permissions/views.py双方でget_role(employee) == PermissionRole.ADMIN
+        がベタ書きで重複していたため集約したヘルパー（コード監査で発見、2026-08-24修正）。"""
+        from permissions.services import is_admin
+
+        self.assertFalse(is_admin(self.employee))
+        profile = PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.MANAGER)
+        self.assertFalse(is_admin(self.employee))
+        profile.role = PermissionRole.ADMIN
+        profile.save()
+        self.assertTrue(is_admin(self.employee))
+
+    def test_department_ids_for_group_scope_invalid_kind_raises(self):
+        """can_download()と同じ理由：想定外のkindを"document"扱いで握りつぶさない
+        （コード監査で発見、2026-08-24修正）。"""
+        from permissions.services import department_ids_for_group_scope
+
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        with self.assertRaises(ValueError):
+            department_ids_for_group_scope(self.employee, kind="unknown")
+
+    def test_department_ids_for_group_scope_document_kind(self):
+        from permissions.services import department_ids_for_group_scope
+
+        self.assertEqual(
+            department_ids_for_group_scope(self.employee, kind="document"), {self.department.pk}
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.assertIsNone(department_ids_for_group_scope(self.employee, kind="document"))
+
 
 class AuthoritySettingsMenuAccessControlTests(TestCase):
     """設定メニュー「権限管理」は管理者/所属長のみ表示・利用可（xlsx 設定メニュー!B46以降）。
@@ -476,6 +506,17 @@ class AuthorityCsvExportViewTests(TestCase):
         entry = AuditLog.objects.get(action="権限管理 CSV出力")
         self.assertEqual(entry.employee_no, "1")
         self.assertTrue(entry.personal_info_flag)
+
+    def test_export_escapes_formula_prefixed_name(self):
+        """氏名が「=」等で始まる場合、Excel等で開いた際の数式インジェクション対策として
+        シングルクォートを付与する（2026-08-24追加、core.csv_services.sanitize_csv_row参照）。"""
+        Employee.objects.create_user(
+            employee_no="9", name="=cmd|'/c calc'!A1", password="x", department=self.department,
+            rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        response = self.client.get("/permissions/csv/")
+        content = response.content.decode("utf-8-sig")
+        self.assertIn("'=cmd|'/c calc'!A1", content)
 
 
 class AuthorityListOperationColumnPositionTests(TestCase):

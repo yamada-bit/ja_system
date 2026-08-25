@@ -4,7 +4,13 @@ from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from organizations.forms import DeptEditForm, DeptRegistForm
 from organizations.models import Department, DepartmentViewScope
-from organizations.services import apply_dept_action, visible_department_ids
+from organizations.services import (
+    apply_dept_action,
+    branch_choices,
+    departments_json,
+    section_choices,
+    visible_department_ids,
+)
 from permissions.models import PermissionProfile, PermissionRole
 
 
@@ -147,6 +153,36 @@ class DeptSettingsMenuAccessControlTests(TestCase):
         response = self.client.get("/organizations/")
         self.assertEqual(response.status_code, 200)
 
+    def test_manager_cannot_access_dept_regist(self):
+        self._login_as(PermissionRole.MANAGER)
+        response = self.client.get("/organizations/regist/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_cannot_access_dept_edit(self):
+        self._login_as(PermissionRole.STAFF)
+        response = self.client.get(f"/organizations/{self.department.pk}/edit/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_manager_cannot_access_option_list_api(self):
+        """organizations.api.OptionListAPIViewはLoginRequiredMixinのみでdept_management限定に
+        なっておらず、非管理者でも/organizations/api/options/を直叩きすれば全部署一覧を取得
+        できてしまっていた（コード監査で発見、2026-08-24修正）。"""
+        self._login_as(PermissionRole.MANAGER)
+        response = self.client.get("/organizations/api/options/", {"type": "dept"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_can_access_option_list_api(self):
+        self._login_as(PermissionRole.ADMIN)
+        response = self.client.get("/organizations/api/options/", {"type": "dept"})
+        self.assertEqual(response.status_code, 200)
+
+    def test_anonymous_option_list_api_redirects_to_login_not_500(self):
+        """SettingsMenuAccessMixinを多重継承で挟み込まずdispatch()内で明示チェックしているため、
+        未ログイン時にget_role()へAnonymousUserが渡りAttributeErrorで落ちないことを確認する。"""
+        response = self.client.get("/organizations/api/options/", {"type": "dept"})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response.url)
+
 
 class DeptRegistEditAuditLogTests(TestCase):
     """部署管理の新規登録・更新もmasters/permissions系の登録・更新ビューと同様に
@@ -269,6 +305,35 @@ class ApplyDeptActionTests(TestCase):
         )
         self.assertEqual(set(visible_department_ids(employee)), {self.dept_x.pk, self.dept_y.pk})
 
+    def test_action_is_updated_when_same_pair_reached_via_different_action(self):
+        """以前はget_or_createのdefaultsが新規作成時にしか適用されず、先にsplitで作られた
+        (viewer, visible)組を後からmergeで実行してもactionが古い値のまま残っていた
+        （コード監査で発見、2026-08-24修正）。update_or_createで常に最新のactionに揃うことを
+        確認する。"""
+        # SPLIT(department=dept_y, targets=[dept_x]) → viewer=dept_x, visible=dept_y（分割の方向は
+        # viewer=対象部署、visible=分割元＝department）。
+        apply_dept_action(self.dept_y, DepartmentViewScope.ACTION_SPLIT, [self.dept_x])
+        scope = DepartmentViewScope.objects.get(viewer_department=self.dept_x, visible_department=self.dept_y)
+        self.assertEqual(scope.action, DepartmentViewScope.ACTION_SPLIT)
+
+        # MERGE(department=dept_x, targets=[dept_y]) → viewer=dept_x, visible=dept_y（統合の方向は
+        # viewer=department、visible=対象部署）。上と同じ(viewer, visible)組に別actionで到達する。
+        apply_dept_action(self.dept_x, DepartmentViewScope.ACTION_MERGE, [self.dept_y])
+        scope.refresh_from_db()
+        self.assertEqual(scope.action, DepartmentViewScope.ACTION_MERGE)
+        self.assertEqual(DepartmentViewScope.objects.count(), 1)
+
+    def test_self_referential_target_is_skipped(self):
+        """DeptEditForm.clean()が既に自己参照をエラーにしているため通常は到達しないが、
+        サービス層でも防御することを確認する（コード監査で発見、2026-08-24追加）。"""
+        apply_dept_action(self.dept_x, DepartmentViewScope.ACTION_MERGE, [self.dept_x, self.dept_y])
+        self.assertFalse(
+            DepartmentViewScope.objects.filter(viewer_department=self.dept_x, visible_department=self.dept_x).exists()
+        )
+        self.assertTrue(
+            DepartmentViewScope.objects.filter(viewer_department=self.dept_x, visible_department=self.dept_y).exists()
+        )
+
 
 class DeptEditViewMergeSplitTests(TestCase):
     """screen-dept-editから統合・分割を実行するとDepartmentViewScopeが作成されること。"""
@@ -305,3 +370,74 @@ class DeptEditViewMergeSplitTests(TestCase):
         self.assertTrue(AuditLog.objects.filter(action="部署管理 統合").exists())
         # 部署マスタからの削除は行わない（Rev1.1で論理削除から閲覧部署範囲テーブル更新へ変更）。
         self.assertTrue(Department.objects.filter(pk=self.dept_y.pk).exists())
+
+
+class BranchAndSectionChoicesTests(TestCase):
+    """organizations.services.branch_choices/section_choices（accounts.forms.StaffSearchForm・
+    organizations.forms.DeptSearchFormで共有、コード監査で発見された重複実装の解消、
+    2026-08-24）。"""
+
+    def setUp(self):
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="99", section_name="退職"
+        )
+
+    def test_branch_choices_includes_all_option_and_branches(self):
+        choices = branch_choices()
+        self.assertIn(("", "(全て)"), choices)
+        self.assertIn(("000", "本店"), choices)
+
+    def test_section_choices_excludes_retired_section_code(self):
+        choices = section_choices()
+        codes = [code for code, _ in choices]
+        self.assertIn("01", codes)
+        self.assertNotIn("99", codes)
+
+
+class DepartmentsJsonTests(TestCase):
+    def test_returns_department_fields_as_json(self):
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        import json
+
+        data = json.loads(departments_json())
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["branch_code"], "000")
+        self.assertEqual(data[0]["section_name"], "総務部")
+
+
+class DeptListViewSearchTests(TestCase):
+    """screen-dept-listの検索フィルタ・ソート（xlsx 部署管理!B53-56）。"""
+
+    def setUp(self):
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept_b = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="02", section_name="経理部"
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_filter_by_branch_code(self):
+        # "総務部"/"経理部"は検索パネルのプルダウン選択肢（絞込み対象外の全選択肢）にも
+        # 出るため、レスポンス本文の文字列検索ではなくcontext["departments"]で確認する。
+        response = self.client.get("/organizations/", {"branch_code": "999"})
+        self.assertEqual(list(response.context["departments"]), [self.dept_b])
+
+    def test_filter_by_section_code(self):
+        response = self.client.get("/organizations/", {"section_code": "01"})
+        self.assertEqual(list(response.context["departments"]), [self.dept_a])
+
+    def test_sort_by_branch_code_desc(self):
+        response = self.client.get("/organizations/", {"sort": "branch_code", "dir": "desc"})
+        departments = list(response.context["departments"])
+        self.assertEqual(departments[0].branch_code, "999")

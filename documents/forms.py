@@ -4,19 +4,22 @@ import logging
 from django import forms
 from django.urls import reverse_lazy
 
-from core.forms import search_year_choices, year_choices_with_existing
+from core.forms import (
+    MATCH_AND,
+    MATCH_CHOICES,
+    MATCH_OR,
+    SEARCH_RADIO_DEFAULTS,
+    apply_radio_defaults,
+    scoped_group_and_category_querysets,
+    search_year_choices,
+    year_choices_with_existing,
+)
 from core.widgets import InlineRadioSelect, PopupSelectWidget
 from documents.services import used_retention_periods
 from masters.models import Category, DocKbn, Group, RetentionPeriod
-from masters.services import scope_queryset_by_department
 from organizations.models import Department
 from organizations.services import visible_department_ids
-from permissions.services import (
-    can_edit_retention,
-    can_select_department,
-    department_ids_for_group_scope,
-    visible_groups,
-)
+from permissions.services import can_edit_retention, can_select_department
 
 logger = logging.getLogger(__name__)
 
@@ -133,15 +136,10 @@ class UploadStep2Form(forms.Form):
         # 文書の保存期間は編集不可（新規保管時はまだ「保存済み」ではないため対象外）。
         if edit_mode and employee is not None and not can_edit_retention(employee):
             self.fields["retention_period"].disabled = True
-        allowed_groups = visible_groups(employee, kind="document") if employee else None
-        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
-        group_qs = group_qs.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
-        category_qs = Category.objects.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
         # xlsx 保管!P139,P174(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
-        if employee is not None:
-            dept_ids = department_ids_for_group_scope(employee, kind="document")
-            group_qs = scope_queryset_by_department(group_qs, dept_ids)
-            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        group_qs, category_qs = scoped_group_and_category_querysets(
+            doc_kbn=DocKbn.DOCUMENT, kind="document", employee=employee
+        )
         self.fields["group"].queryset = group_qs
         self.fields["group"].widget.queryset = group_qs
         self.fields["category"].queryset = category_qs
@@ -155,17 +153,6 @@ class UploadStep2Form(forms.Form):
 
     def titles(self, file_count):
         return [self.cleaned_data[f"title_{i}"] for i in range(file_count)]
-
-
-MATCH_OR = "or"
-MATCH_AND = "and"
-MATCH_CHOICES = ((MATCH_OR, "いずれかを含む"), (MATCH_AND, "すべて含む"))
-
-# RadioSelectのバインド済みフォームは、選択肢キーがdataに無いと（未送信時と区別が付かず）
-# 一切checkedを付けない。SearchFormは初回アクセス時もrequest.GETで常時バインドする方針
-# （accounts.services.filter_staff_querysetのコメント参照）のためinitialが効かず、
-# 原本index.html:383,387,395が既定でchecked状態にしているラジオが未選択表示になっていた。
-SEARCH_RADIO_DEFAULTS = {"title_match": MATCH_OR, "freeword_match": MATCH_OR, "save_day_kbn": "save"}
 
 
 class SearchForm(forms.Form):
@@ -260,16 +247,9 @@ class SearchForm(forms.Form):
     def __init__(self, *args, employee=None, **kwargs):
         # ラジオ選択肢の既定checkedを原本通りに出すため、バインドされたQueryDictに
         # 該当キーが無ければ既定値を補う（フォームのbound/unbound判定自体は変えない）。
-        if args and args[0] is not None:
-            data = args[0].copy()
-            for field_name, default in SEARCH_RADIO_DEFAULTS.items():
-                data.setdefault(field_name, default)
-            args = (data,) + args[1:]
-        elif kwargs.get("data") is not None:
-            data = kwargs["data"].copy()
-            for field_name, default in SEARCH_RADIO_DEFAULTS.items():
-                data.setdefault(field_name, default)
-            kwargs["data"] = data
+        # 実体はcore.forms.apply_radio_defaultsに集約済み（contracts.forms.SearchFormとの
+        # 重複をコード監査で発見、2026-08-25修正）。
+        args, kwargs = apply_radio_defaults(args, kwargs)
         super().__init__(*args, **kwargs)
         # xlsx 検索・閲覧・変更!B137-140「今年～文書が保存されている最古の年」（IntegerFieldでは
         # なくMultipleChoiceFieldなのはPopupSelectWidgetがリスト値を扱う都合上）。
@@ -285,15 +265,10 @@ class SearchForm(forms.Form):
             self.fields["department"].initial = (
                 visible_department_ids(employee) if employee.department_id else []
             )
-        allowed_groups = visible_groups(employee, kind="document") if employee else None
-        group_qs = allowed_groups if allowed_groups is not None else Group.objects.all()
-        group_qs = group_qs.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
-        category_qs = Category.objects.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False)
         # xlsx 検索・閲覧・変更!P96,P152(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
-        if employee is not None:
-            dept_ids = department_ids_for_group_scope(employee, kind="document")
-            group_qs = scope_queryset_by_department(group_qs, dept_ids)
-            category_qs = scope_queryset_by_department(category_qs, dept_ids)
+        group_qs, category_qs = scoped_group_and_category_querysets(
+            doc_kbn=DocKbn.DOCUMENT, kind="document", employee=employee
+        )
         self.fields["group"].queryset = group_qs
         self.fields["group"].widget.queryset = group_qs
         self.fields["category"].queryset = category_qs

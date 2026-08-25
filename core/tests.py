@@ -19,6 +19,7 @@ from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from core import ocr_layout_services, pdf_text_embed_services
 from core.file_type_services import is_image_filename
+from core.csv_services import sanitize_csv_cell, sanitize_csv_row
 from core.forms import search_year_choices
 from core.notice_services import get_notice_counts, is_expiring_soon
 from core.ocr_layout_services import OcrDisabledError
@@ -35,7 +36,7 @@ from core.upload_services import (
 )
 from core.widgets import PopupSelectWidget
 from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
-from organizations.models import Department
+from organizations.models import Department, DepartmentViewScope
 from permissions.models import PermissionProfile, PermissionRole
 
 
@@ -257,6 +258,28 @@ class SettingsMenuVisibilityTests(TestCase):
         self.assertNotContains(response, ">職員マスタ<")
 
 
+class SanitizeCsvCellTests(TestCase):
+    """core.csv_services（audit/accounts/permissionsのCSV出力共通。Excel等で開いた際の
+    数式インジェクション対策、2026-08-24追加）。"""
+
+    def test_formula_prefix_is_escaped(self):
+        for prefix in ("=", "+", "-", "@", "\t", "\r"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(sanitize_csv_cell(f"{prefix}cmd|'/c calc'!A1"), f"'{prefix}cmd|'/c calc'!A1")
+
+    def test_normal_text_is_unchanged(self):
+        self.assertEqual(sanitize_csv_cell("テスト太郎"), "テスト太郎")
+
+    def test_non_string_value_is_unchanged(self):
+        self.assertEqual(sanitize_csv_cell(1), 1)
+
+    def test_empty_string_is_unchanged(self):
+        self.assertEqual(sanitize_csv_cell(""), "")
+
+    def test_sanitize_csv_row_applies_to_each_cell(self):
+        self.assertEqual(sanitize_csv_row(["=SUM(A1)", "通常値", 3]), ["'=SUM(A1)", "通常値", 3])
+
+
 class NoticeCountsTests(TestCase):
     """screen-menuの「お知らせ」3件（xlsx メイン画面!C42-46）。"""
 
@@ -361,6 +384,23 @@ class NoticeCountsTests(TestCase):
         counts = get_notice_counts(self.employee)
         self.assertEqual(counts.expiring_soon_documents, 1)
         self.assertEqual(counts.recently_deleted_documents, 0)
+
+    def test_other_department_document_counted_when_in_view_scope(self):
+        """documents/search_services.pyの非管理者向け部署フィルタと同じvisible_department_ids()を
+        使うよう修正した（2026-08-24）。閲覧部署範囲テーブル〈部署統合・分割〉に登録された他部署の
+        文書も、検索画面と同様にお知らせバッジへ計上されることを確認する。"""
+        other_department = Department.objects.create(
+            branch_code="999", branch_name="他支店", section_code="09", section_name="他部署"
+        )
+        DepartmentViewScope.objects.create(
+            viewer_department=self.department, visible_department=other_department
+        )
+        today = timezone.localdate()
+        other_doc = self._create_document(expiry_date=today - datetime.timedelta(days=1))
+        other_doc.department = other_department
+        other_doc.save()
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expired_documents, 1)
 
     def test_contract_counted_independently_of_document(self):
         """Rev1.2（xlsx メイン画面!C42-46「文書、契約書」）で契約書も集計対象になったことを確認する。"""
@@ -483,6 +523,42 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
         self.assertFalse(Contract.objects.filter(pk=old_contract.pk).exists())
         self.assertFalse(RelatedFile.objects.filter(pk=related.pk).exists())
         self.assertFalse(old_contract.file.storage.exists(related_file_name))
+
+    def test_document_purge_creates_audit_log(self):
+        """廃止されたdocuments.views.DeleteViewの完全削除ログ（action="検索・閲覧画面 完全削除"）を
+        引き続き本バッチでも記録することを確認する（CLAUDE.md「監査が必要なイベント...は一元的な
+        記録機構（auditアプリ）を通す」、2026-08-24修正）。"""
+        old_doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        title = old_doc.title
+
+        call_command("purge_expired_deleted_records")
+
+        log = AuditLog.objects.get(action="物理削除バッチ 完全削除", event_message__contains=title)
+        self.assertIn(title, log.event_message)
+
+    def test_contract_purge_creates_audit_log(self):
+        old_contract = self._create_contract(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        title = old_contract.title
+
+        call_command("purge_expired_deleted_records")
+
+        log = AuditLog.objects.get(action="物理削除バッチ 完全削除", event_message__contains=title)
+        self.assertIn(title, log.event_message)
+
+    def test_document_file_deletion_failure_logs_real_pk(self):
+        """document.delete()成功後はDjangoがpkをNoneにリセットするため、ファイル実体削除の失敗ログに
+        削除前のpkを使うよう修正した（2026-08-24。修正前はpk=Noneでログに残り追跡不能だった）。"""
+        old_doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        doc_pk = old_doc.pk
+
+        with self.assertLogs("core.management.commands.purge_expired_deleted_records", level="ERROR") as cm:
+            with patch(
+                "django.db.models.fields.files.FieldFile.delete", side_effect=OSError("simulated storage error")
+            ):
+                call_command("purge_expired_deleted_records")
+
+        self.assertTrue(any(f" pk={doc_pk} " in message for message in cm.output))
+        self.assertFalse(any(f" pk=None " in message for message in cm.output))
 
 
 class IsExpiringSoonTests(TestCase):

@@ -9,6 +9,7 @@ from django.views import View
 
 from accounts.models import Employee
 from audit import services as audit_services
+from core.csv_services import sanitize_csv_row
 from core.double_submit import consume_token, issue_token
 from permissions.forms import AuthorityEditForm, AuthoritySearchForm
 from permissions.mixins import SettingsMenuAccessMixin
@@ -18,6 +19,7 @@ from permissions.services import (
     filter_authority_queryset,
     get_profile,
     get_role,
+    is_admin,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ class AuthorityListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 "sort_key": sort_key,
                 "sort_dir": sort_dir,
                 # xlsx 権限管理!B35「「部署」プルダウン ※権限：管理者のみ表示」（Rev1.2で追加）。
-                "is_admin_viewer": get_role(request.user) == PermissionRole.ADMIN,
+                "is_admin_viewer": is_admin(request.user),
             },
         )
 
@@ -88,15 +90,20 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             # 未設定判定はpermissions.services.get_profileに一元化する
             # （AuthorityDetailViewと同じ判定ロジックを重複実装しない）。
             profile = get_profile(employee)
+            # employee.name・部署名・分類名等は自由入力に由来しうるため、Excel等で開いた際の
+            # 数式インジェクション対策としてsanitize_csv_rowを通す
+            # （audit.views.AuditLogCsvExportViewと同じ理由）。
             writer.writerow(
-                [
-                    employee.employee_no,
-                    str(employee.department),
-                    employee.name,
-                    employee.get_position_display(),
-                    profile.get_role_display() if profile else "未設定",
-                    *_flags_row(profile),
-                ]
+                sanitize_csv_row(
+                    [
+                        employee.employee_no,
+                        str(employee.department),
+                        employee.name,
+                        employee.get_position_display(),
+                        profile.get_role_display() if profile else "未設定",
+                        *_flags_row(profile),
+                    ]
+                )
             )
         count = qs.count()
         logger.info(
@@ -171,7 +178,7 @@ class AuthorityEditView(LoginRequiredMixin, View):
         """xlsx 権限管理!H182「契約書-部門間閲覧設定　※権限：管理者のみ表示」（Rev1.2で追加）。
         編集者（ログイン者）が管理者かどうかで、この項目の表示・編集可否を分ける。
         """
-        return get_role(request.user) == PermissionRole.ADMIN
+        return is_admin(request.user)
 
     def get(self, request, pk):
         profile, _ = PermissionProfile.objects.get_or_create(

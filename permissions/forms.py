@@ -6,7 +6,7 @@ from django.urls import reverse_lazy
 from core.widgets import PopupSelectWidget
 from masters.models import DocKbn, Group
 from organizations.models import Department
-from permissions.models import PermissionProfile, PermissionRole
+from permissions.models import FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +35,11 @@ class AuthoritySearchForm(forms.Form):
 # 権限管理編集フォームのON/OFFチェックボックス項目（xlsx 権限管理シート、Rev1.1でB167-215に再編）。
 # 原本index.html:2555-2565（screen-authority-edit）の列順「文書-保存満了日変更／文書-ダウンロード／
 # 契約書-ダウンロード／電子決裁3項目」に合わせている（部門間閲覧設定・分類表示は複数選択のため
-# 別途_MULTI_FIELDSで扱う）。
-_FLAG_FIELDS = [
-    "doc_retention_edit",
-    "doc_download",
-    "contract_edit",
-    "contract_download",
-    "eapproval_view_setting",
-    "eapproval_doc_name_manage",
-    "eapproval_retention",
-]
-
-_MULTI_FIELDS = ["doc_visible_groups", "contract_visible_departments", "contract_visible_groups"]
+# 別途_MULTI_FIELDSで扱う）。permissions.models.FLAG_FIELDS/MULTI_FIELDSが単一の情報源
+# （accounts.services.reset_permission_profile_if_neededの安全側リセット対象と共有、
+# 2026-08-24重複解消）のため、ここではエイリアスとして参照するだけにする。
+_FLAG_FIELDS = FLAG_FIELDS
+_MULTI_FIELDS = MULTI_FIELDS
 
 
 class AuthorityEditForm(forms.ModelForm):

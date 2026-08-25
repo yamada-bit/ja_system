@@ -3,13 +3,13 @@ import logging
 from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
-from core.text_normalization import normalize_for_search
+from core.models import NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin
 from documents.storage_paths import document_searchable_upload_path, document_upload_path
 
 logger = logging.getLogger(__name__)
 
 
-class Document(models.Model):
+class Document(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Model):
     """文書（screen-storage2/screen-search「文書」モード、screen-storage1経由でアップロード）。
 
     保管画面のフォーム項目にそのまま対応する。`extracted_text`は screen-search の「フリーワード」欄が
@@ -67,7 +67,11 @@ class Document(models.Model):
     # core.text_normalization.normalize_for_search参照）、NFKC正規化した値を保存しておき、
     # 検索時はキーワード側も同じ正規化をした上でこちらのカラムに対してicontainsする
     # （元のtitle/memo/extracted_text自体はユーザー入力・抽出結果をそのまま保持する）。
-    title_normalized = models.CharField(max_length=255, blank=True, default="", editable=False)
+    # CharField(255)で導入していたが、NFKC正規化（normalize_for_search）は文字数を増やし得る
+    # （例: 互換文字1字が複数字に展開される）ため、titleが255文字ぎりぎりの場合にDataErrorで
+    # 保存が失敗し得た（品質レビューで発見、2026-08-25修正）。他の*_normalized列と同じTextFieldにし、
+    # 上限自体を無くして原理的にオーバーフローしないようにする。
+    title_normalized = models.TextField(blank=True, default="", editable=False)
     memo_normalized = models.TextField(blank=True, default="", editable=False)
     extracted_text_normalized = models.TextField(blank=True, default="", editable=False)
     ocr_attempted = models.BooleanField(
@@ -124,32 +128,6 @@ class Document(models.Model):
     def __str__(self):
         return self.title
 
-    def save(self, *args, **kwargs):
-        # title/memo/extracted_textのいずれかを更新するsave()では、対応する
-        # *_normalizedシャドウカラムも必ず同時に再計算・永続化する。update_fieldsが
-        # 指定されたsave()（core.text_extraction_services / extract_pending_pdf_text
-        # バッチのsave(update_fields=["extracted_text"])等）ではDjangoがそこに列挙された
-        # カラムしかUPDATE文に含めないため、ここで対応する正規化カラムを追加しないと
-        # 値をセットしたつもりでもDBに反映されない。
-        self.title_normalized = normalize_for_search(self.title)
-        self.memo_normalized = normalize_for_search(self.memo)
-        self.extracted_text_normalized = normalize_for_search(self.extracted_text)
-        update_fields = kwargs.get("update_fields")
-        if update_fields is not None:
-            update_fields = set(update_fields)
-            if "title" in update_fields:
-                update_fields.add("title_normalized")
-            if "memo" in update_fields:
-                update_fields.add("memo_normalized")
-            if "extracted_text" in update_fields:
-                update_fields.add("extracted_text_normalized")
-            kwargs["update_fields"] = update_fields
-        super().save(*args, **kwargs)
-
-    @property
-    def display_name(self):
-        """編集画面のPDFモックプレビュー等での表示用（storage_paths.document_upload_pathが
-        付与する重複防止UUIDプレフィックスを除いた、元のアップロードファイル名部分のみ返す）。
-        """
-        basename = self.file.name.rsplit("/", 1)[-1]
-        return basename.split("_", 1)[1] if "_" in basename else basename
+    # save()（*_normalizedシャドウカラムの再計算）とdisplay_nameプロパティの実体は
+    # core.models.NormalizedTextFieldsMixin/UuidPrefixedFilenameMixinに集約済み
+    # （contracts.Contractとの重複をコード監査で発見、2026-08-25修正）。

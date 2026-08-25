@@ -4,6 +4,14 @@ from django.db import models
 
 logger = logging.getLogger(__name__)
 
+# 部課コード"99"は「退職」を表す特別な部課として扱う（xlsx 職員マスタ!B114-115「部課コードが
+# "99"の場合...退職扱いとする」、部署管理!B45「(但し部課コード99の退職者は対象外)」）。
+# 以前はaccounts.csv_import_services（CSV取込という末端の一機能）に定義されていたため、
+# 本来は無関係なorganizations/forms.py・accounts/forms.pyの2箇所がこれを参照するためだけに
+# 関数内ローカルimportを強いられていた（コード監査で発見、2026-08-24にDepartmentと同じ
+# organizations/models.pyへ移設）。
+RETIRED_SECTION_CODE = "99"
+
 
 class Department(models.Model):
     """部署マスタ（screen-dept-list/regist/edit）。本支所＋部課の組み合わせを1レコードとして

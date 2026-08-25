@@ -4,10 +4,10 @@ import logging
 
 from django.db import transaction
 
-from accounts.models import Employee
+from accounts.models import Employee, Position, Rank
 from accounts.services import reset_permission_profile_if_needed
 from audit import services as audit_services
-from organizations.models import Department
+from organizations.models import RETIRED_SECTION_CODE, Department
 from permissions.models import PermissionProfile, PermissionRole
 
 logger = logging.getLogger(__name__)
@@ -19,8 +19,6 @@ CSV_HEADER = [
     "職員番号", "氏名", "支所コード", "本支所名正式名称", "部課コード", "部課名",
     "役職コード", "役職名", "職階コード", "職階名", "所属長フラグ",
 ]
-
-RETIRED_SECTION_CODE = "99"
 
 
 class CsvImportError(Exception):
@@ -78,9 +76,17 @@ def import_staff_csv(file_obj, *, actor):
             continue
         try:
             _import_row(row, actor=actor, summary=summary)
-        except Exception as exc:
-            logger.exception("職員マスタCSV取込で行の処理に失敗しました: line=%s", line_no)
+        except ValueError as exc:
+            # 列数不一致・必須列欠落・コード不正等、行データ起因の想定内エラー。メッセージ自体が
+            # 日本語で利用者にわかる内容になっているためそのまま表示する。
+            logger.warning("職員マスタCSV取込で行の処理に失敗しました: line=%s error=%s", line_no, exc)
             summary.errors.append(f"{line_no}行目: {exc}")
+        except Exception:
+            # コードのバグ等、想定外の例外。生の例外メッセージ（英語・非制御下の文言になりうる）を
+            # そのまま利用者に見せず、詳細はlogger.exceptionで記録した上で汎用メッセージを返す
+            # （CLAUDE.md「利用者にわかるエラー応答を返す」）。
+            logger.exception("職員マスタCSV取込で行の処理に失敗しました（想定外エラー）: line=%s", line_no)
+            summary.errors.append(f"{line_no}行目: 処理中に予期しないエラーが発生しました。")
 
     logger.info(
         "職員マスタCSV取込を実行しました: employee_no=%s 結果=%s", actor.employee_no, summary
@@ -103,6 +109,14 @@ def _import_row(row, *, actor, summary):
 
     if not employee_no:
         raise ValueError("職員番号が空です。")
+    # StaffRegistForm/StaffEditFormはrank/positionをChoiceFieldで検証するが、CSV取込は
+    # Employee.objects.create_user()/save()を直接呼ぶためDjangoのchoices検証を経由しない
+    # （choicesはDB/save層では強制されない）。手動フォームと同じ検証をここでも行う
+    # （コード監査で発見：以前は不正コードが無検証で保存されていた、2026-08-24修正）。
+    if rank_code not in Rank.values:
+        raise ValueError(f"職階コードが不正です: {rank_code}")
+    if position_code not in Position.values:
+        raise ValueError(f"役職コードが不正です: {position_code}")
 
     with transaction.atomic():
         department = _upsert_department(branch_code, branch_name, section_code, section_name)
@@ -179,7 +193,7 @@ def _import_employee(*, employee_no, name, department, section_code, position_co
         # （accounts.services.reset_permission_profile_if_needed参照）。
         reset_permission_profile_if_needed(
             employee, department_changed=department_changed, rank_changed=rank_changed,
-            position_changed=position_changed, actor=actor,
+            position_changed=position_changed, retired_changed=is_retiring_now, actor=actor,
         )
         if is_retiring_now:
             summary.retired += 1
@@ -195,8 +209,15 @@ def _apply_manager_flag(employee, manager_flag, actor):
     """xlsx B124-125(Rev1.1)「所属長フラグが"1"の場合...後述『権限管理』権限マスタの対象者を
     『所属長』として権限更新する」。既に管理者ロールの職員は降格させない（CSV取込という
     間接的な経路で管理者権限を意図せず引き下げる事故を避けるための安全側の判断）。
+
+    退職扱いになった職員は昇格させない（同じ行でreset_permission_profile_if_neededが安全側に
+    STAFFへリセットした直後にここでMANAGERへ昇格させ直すと、退職者が所属長権限を持ったままに
+    なってしまう。HRエクスポート側で所属長フラグが退職時に再ゼロ化されていない実データが
+    あり得るため、コード側で防御する。コード監査で発見、2026-08-24修正）。
     """
     if manager_flag != "1":
+        return
+    if employee.is_retired:
         return
     profile, _ = PermissionProfile.objects.get_or_create(
         employee=employee, defaults={"role": PermissionRole.MANAGER}
@@ -207,4 +228,12 @@ def _apply_manager_flag(employee, manager_flag, actor):
         logger.info(
             "CSV取込の所属長フラグにより権限を所属長へ更新しました: employee_no=%s",
             employee.employee_no,
+        )
+        # reset_permission_profile_if_needed（accounts/services.py）と同種の「権限に関わる操作」
+        # のため、こちらもaudit_services.log()で操作履歴ログへ記録する（コード監査で発見：
+        # 以前はlogger.infoのみで、CSV取込経由の所属長昇格が/audit/画面から追跡できなかった）。
+        audit_services.log(
+            employee=actor,
+            action="職員マスタ CSV取込 所属長昇格",
+            event_message=f"職員：{employee.name}({employee.employee_no}),所属長フラグにより権限を所属長へ更新しました",
         )

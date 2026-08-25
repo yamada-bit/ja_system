@@ -1,9 +1,6 @@
 import logging
 
-from django.db.models import F, Q, Window
-from django.db.models.functions import RowNumber
-
-from core.text_normalization import normalize_for_search
+from core import search_services
 from documents.forms import MATCH_AND
 from documents.models import Document
 from organizations.services import visible_department_ids
@@ -33,49 +30,9 @@ SORT_FIELDS = {
 
 
 def apply_sort(qs, sort_key, direction):
-    # 「No.」欄はページ内の表示位置（forloop.counter）ではなく、既定表示順（保存日が新しい順）
-    # における通し番号をウィンドウ関数で付与し、その行に紐付けて表示する。原本sortTable()は
-    # DOM行を並べ替えるだけで各行のNo.セル自体の値は書き換えない（＝番号が行についてくる）ため、
-    # ページ位置で毎回振り直すと「No.列をソートしても数字自体は常に1,2,3…のままで変わらない」
-    # ように見えてしまう（2026-08-17ユーザー報告で発覚）。qs.annotate()はorder_by()より前でも
-    # 後でも最終的なSELECT列に乗るだけなので、ここで付与してから後続のorder_by()で好きな順に
-    # 並べ替えても、Window内のorder_by（既定順）に基づく値自体は変わらない。
-    qs = qs.annotate(display_no=Window(expression=RowNumber(), order_by=F("save_date").desc()))
-    field = SORT_FIELDS.get(sort_key)
-    if not field:
-        return qs.order_by("-save_date")
-    if sort_key == "no":
-        # 「No.」列は原本sortTable(1,'num',btn)と同じく、その列に表示されている数値
-        # （=display_no）そのものを昇順/降順で数値比較する。display_noは既定表示順（保存日が
-        # 新しい順）の通し番号のため、昇順ソートの結果は既定表示順と一致する（＝一見すると
-        # 並びが変わらないように見える）が、これは「行番号を行番号で並べ替える」以上、原本でも
-        # 起きる自然な結果であり不具合ではない。降順にすればすぐに逆順（並びが反転し、番号も
-        # N,N-1,…,1と表示される）になることで、ソート自体は機能していることを確認できる
-        # （2026-08-17、原本フィデリティ優先の方針によりsave_dateへの独自の向き付けから変更）。
-        prefix = "-" if direction == "desc" else ""
-        return qs.order_by(f"{prefix}display_no")
-    if sort_key == "info":
-        # 表示されている「部署名/年/カテゴリー」の並びと一致させるため3フィールド複合ソート
-        # にする（単一フィールドのbranch_codeで近似していた旧実装は表示文字列と無関係な順序に
-        # なり「ソートがおかしい」不具合だった）。
-        prefix = "-" if direction == "desc" else ""
-        return qs.order_by(
-            f"{prefix}department__section_name",
-            f"{prefix}year",
-            f"{prefix}category__name",
-            "-save_date",
-        )
-    if sort_key == "uploader":
-        # 表示されている「保管・更新者の部署名｜氏名」の並びと一致させる（氏名のみでは
-        # 部署をまたぐと表示と食い違って見えるため、部署名を優先キーにする）。
-        prefix = "-" if direction == "desc" else ""
-        return qs.order_by(
-            f"{prefix}uploader__department__section_name",
-            f"{prefix}uploader__name",
-            "-save_date",
-        )
-    prefix = "-" if direction == "desc" else ""
-    return qs.order_by(f"{prefix}{field}", "-save_date")
+    """実体はcore.search_services.apply_sortに集約済み（contracts.search_services.apply_sortとの
+    重複をコード監査で発見、2026-08-25修正。can_delete等と同じ経緯）。"""
+    return search_services.apply_sort(qs, sort_key, direction, SORT_FIELDS)
 
 
 def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort_dir="asc"):
@@ -155,44 +112,15 @@ def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort
 
 
 def _apply_word_filter(qs, field, raw_value, match_mode):
-    words = raw_value.split()
-    if not words:
-        return qs
-    # 半角全角を問わず検索できるようにするため、正規化済みシャドウカラム
-    # （Document.title_normalized等、models.Document.save参照）に対して、キーワード側も
-    # 同じ正規化をした上でicontainsする（簡易設計指示書の検索要件）。
-    normalized_field = f"{field}_normalized"
-    lookups = [Q(**{f"{normalized_field}__icontains": normalize_for_search(w)}) for w in words]
-    if match_mode == MATCH_AND:
-        combined = lookups[0]
-        for lookup in lookups[1:]:
-            combined &= lookup
-    else:
-        combined = lookups[0]
-        for lookup in lookups[1:]:
-            combined |= lookup
-    return qs.filter(combined)
+    """実体はcore.search_services.apply_word_filterに集約済み（contracts.search_services.
+    _apply_word_filterとの重複をコード監査で発見、2026-08-25修正。apply_sort等と同じ経緯）。"""
+    return search_services.apply_word_filter(qs, field, raw_value, match_mode, match_and=MATCH_AND)
 
 
 def _apply_freeword_filter(qs, raw_value, match_mode):
-    words = raw_value.split()
-    if not words:
-        return qs
-    lookups = [
-        Q(title_normalized__icontains=normalize_for_search(w))
-        | Q(memo_normalized__icontains=normalize_for_search(w))
-        | Q(extracted_text_normalized__icontains=normalize_for_search(w))
-        for w in words
-    ]
-    if match_mode == MATCH_AND:
-        combined = lookups[0]
-        for lookup in lookups[1:]:
-            combined &= lookup
-    else:
-        combined = lookups[0]
-        for lookup in lookups[1:]:
-            combined |= lookup
-    return qs.filter(combined)
+    """実体はcore.search_services.apply_freeword_filterに集約済み（contracts.search_services.
+    _apply_freeword_filterとの重複をコード監査で発見、2026-08-25修正）。"""
+    return search_services.apply_freeword_filter(qs, raw_value, match_mode, match_and=MATCH_AND)
 
 
 def _apply_notice_filter(qs, notice):

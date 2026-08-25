@@ -12,7 +12,7 @@ from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from documents.forms import SearchForm
 from documents.search_services import build_queryset
-from documents.services import calculate_expiry_date, used_retention_periods
+from documents.services import calculate_expiry_date, can_delete, used_retention_periods
 from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit, SystemSetting
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
@@ -50,6 +50,54 @@ class CalculateExpiryDateTests(TestCase):
         period = self._period(RetentionPeriodUnit.YEAR, value=1)
         result = calculate_expiry_date(datetime.date(2028, 2, 29), period)
         self.assertEqual(result, datetime.date(2029, 2, 28))
+
+
+class CanDeleteBoundaryTests(TestCase):
+    """documents.services.can_deleteのDELETE_WINDOW_DAYS境界値（テストカバレッジ棚卸しで発見：
+    「7日未満」「8日経過」は既存テストでカバーされていたが、ちょうどDELETE_WINDOW_DAYS
+    （7日）経過した瞬間の境界〈timezone.now() - save_date < 7日、の等号側〉が未検証だった）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        category = Category.objects.create(code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        from documents.models import Document
+
+        self.document = Document(
+            title="境界確認用", department=self.department, group=group, category=category,
+            year=2026, retention_period=retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1),
+        )
+        self.document.file.save("doc.pdf", ContentFile(b"dummy"), save=False)
+        self.document.save()
+
+    def test_exactly_at_window_boundary_is_not_deletable(self):
+        from documents.models import Document
+
+        Document.objects.filter(pk=self.document.pk).update(
+            save_date=timezone.now() - datetime.timedelta(days=7)
+        )
+        self.document.refresh_from_db()
+        self.assertFalse(can_delete(self.document))
+
+    def test_just_under_window_boundary_is_still_deletable(self):
+        from documents.models import Document
+
+        Document.objects.filter(pk=self.document.pk).update(
+            save_date=timezone.now() - datetime.timedelta(days=7) + datetime.timedelta(minutes=1)
+        )
+        self.document.refresh_from_db()
+        self.assertTrue(can_delete(self.document))
 
 
 class UsedRetentionPeriodsTests(TestCase):
@@ -599,8 +647,22 @@ class DeleteViewAjaxTests(TestCase):
         )
         self.assertEqual(response.status_code, 403)
         self.assertFalse(response.json()["success"])
+        self.assertEqual(response.json()["message"], "この文書は既に削除されています。")
         self.assertTrue(Document.objects.filter(pk=self.document.pk).exists())
         self.assertTrue(self.document.file.storage.exists(file_name))
+
+    def test_deleting_already_trashed_document_is_rejected_non_ajax(self):
+        """test_deleting_already_trashed_document_is_rejectedの非AJAX版
+        （テストカバレッジ棚卸しで発見：AJAX経路のみテストされ、非AJAX経路の
+        PermissionDenied発生・ステータスコードは未検証だった）。"""
+        from documents.models import Document
+
+        self.document.is_deleted = True
+        self.document.save(update_fields=["is_deleted", "deleted_at"])
+
+        response = self.client.post(f"/documents/{self.document.pk}/delete/")
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Document.objects.filter(pk=self.document.pk).exists())
 
     def test_non_ajax_request_still_redirects(self):
         response = self.client.post(f"/documents/{self.document.pk}/delete/")
@@ -685,6 +747,18 @@ class DownloadViewTests(TestCase):
         self.document.is_deleted = True
         self.document.save(update_fields=["is_deleted"])
         response = self.client.get(f"/documents/{self.document.pk}/download/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_missing_file_returns_404(self):
+        """PreviewViewTests.test_missing_file_returns_404と同型のOSError境界（テストカバレッジ
+        棚卸しで発見：DownloadView側は同じexcept OSError節を持つのに未テストだった）。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        with mock.patch(
+            "django.db.models.fields.files.FieldFile.open", side_effect=OSError("missing")
+        ):
+            response = self.client.get(f"/documents/{self.document.pk}/download/")
         self.assertEqual(response.status_code, 404)
 
 
@@ -793,6 +867,31 @@ class BulkDownloadViewTests(TestCase):
         zf = zipfile.ZipFile(BytesIO(response.content))
         self.assertEqual(len(zf.namelist()), 1)
 
+    def test_missing_file_entity_is_skipped_with_warning_but_others_succeed(self):
+        """テストカバレッジ棚卸しで発見：1件のファイル実体欠損でZIP全体を失敗させない
+        （views.BulkDownloadView.postのexcept FileNotFoundError:節）設計が未テストだった。
+        欠損分はスキップした上でmessages.warningを出し、残りは正常にZIPへ含まれることを確認する。"""
+        import zipfile
+        from io import BytesIO
+
+        from django.contrib.messages import get_messages
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        doc1 = self._create_document("present")
+        doc2 = self._create_document("missing")
+        doc2.file.delete(save=False)  # ストレージ上の実体だけ消し、DBレコードは残す
+
+        response = self.client.post("/documents/bulk-download/", {"pks": [doc1.pk, doc2.pk]})
+        self.assertEqual(response.status_code, 200)
+        zf = zipfile.ZipFile(BytesIO(response.content))
+        names = zf.namelist()
+        self.assertEqual(len(names), 1)
+        self.assertTrue(any("present" in n for n in names))
+        warnings = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("1件のファイルが見つからなかった" in m for m in warnings))
+
 
 class BulkEditViewTests(TestCase):
     """screen-search「一括編集」（html4差分で初めて仕様が提示された機能、
@@ -864,6 +963,17 @@ class BulkEditViewTests(TestCase):
         )
         self.assertRedirects(response, "/documents/bulk-edit/")
 
+    def test_start_with_all_pks_invalid_or_deleted_redirects_to_search(self):
+        """テストカバレッジ棚卸しで発見：数値以外の混入は上のテストでカバーされていたが、
+        「有効な数値pkだが全て削除済み」等でordered_pksが空になる境界は未検証だった
+        （BulkEditStartView.postの`if not ordered_pks:`分岐）。"""
+        doc = self._create_document("deleted")
+        doc.is_deleted = True
+        doc.save(update_fields=["is_deleted"])
+        response = self.client.post("/documents/bulk-edit/start/", {"pks": [doc.pk, "abc"]})
+        self.assertRedirects(response, "/documents/search/")
+        self.assertIsNone(self.client.session.get("documents_bulk_edit"))
+
     def test_direct_access_without_session_state_redirects(self):
         response = self.client.get("/documents/bulk-edit/")
         self.assertRedirects(response, "/documents/search/")
@@ -923,6 +1033,81 @@ class BulkEditViewTests(TestCase):
         get_response = self.client.get("/documents/bulk-edit/")
         self.assertContains(get_response, "1 / 2")
 
+    def test_step_db_failure_shows_error_and_does_not_update_document(self):
+        """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘1）で発見：
+        BulkEditView.postの`except DBError:`が未検証だった。ステップ再描画（200）で
+        エラーメッセージが出て、対象文書が更新されないことを確認する。"""
+        from django.contrib.messages import get_messages
+
+        from documents.models import Document
+
+        doc1 = self._create_document("doc1")
+        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk]})
+        self.client.get("/documents/bulk-edit/")
+
+        with mock.patch.object(Document, "save", side_effect=DBError("db down")):
+            response = self.client.post("/documents/bulk-edit/", self._step_data("doc1-編集後"))
+
+        self.assertEqual(response.status_code, 200)
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("更新に失敗しました" in t for t in texts))
+        doc1.refresh_from_db()
+        self.assertEqual(doc1.title, "doc1")
+
+
+class DeletedDocumentDirectAccessTests(TestCase):
+    """テストカバレッジ棚卸しで発見：DocumentEditView/BulkEditViewはDownloadViewと同じ
+    is_deleted=Falseパターンのget_object_or_404を使っているが、削除済み文書への直接URLアクセスが
+    実際に404/検索画面への案内になることは（DetailAPIViewのedit_url=None化を通じて間接的に
+    しか）検証されていなかった。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="pass1234")
+
+        from documents.models import Document
+
+        self.document = Document(
+            title="削除済み文書", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1), is_deleted=True,
+        )
+        self.document.file.save("doc.pdf", ContentFile(b"dummy"), save=False)
+        self.document.save()
+
+    def test_edit_screen_direct_access_returns_404(self):
+        response = self.client.get(f"/documents/{self.document.pk}/edit/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_bulk_edit_start_silently_excludes_deleted_pk(self):
+        """一括編集開始時、削除済み文書のpkは（BulkDownloadViewと同じ方針で）静かに除外される。"""
+        response = self.client.post("/documents/bulk-edit/start/", {"pks": [self.document.pk]})
+        self.assertRedirects(response, "/documents/search/")
+
+    def test_bulk_edit_direct_access_to_deleted_document_returns_404(self):
+        """セッション状態を直接構築してBulkEditViewへ削除済みpkを混入させた場合
+        （通常はBulkEditStartViewが除外するため到達しないはずのURL直打ち相当）も404になる。"""
+        from core import bulk_edit_services
+
+        session = self.client.session
+        bulk_edit_services.start_bulk_edit(session, "documents_bulk_edit", [self.document.pk])
+        session.save()
+        response = self.client.get("/documents/bulk-edit/")
+        self.assertEqual(response.status_code, 404)
+
 
 class PreviewViewTests(TestCase):
     """screen-search「文書イメージ」欄。原本には無い機能（ユーザー要望で追加）だが、権限は
@@ -978,6 +1163,19 @@ class PreviewViewTests(TestCase):
             "django.db.models.fields.files.FieldFile.open", side_effect=OSError("missing")
         ):
             response = self.client.get(f"/documents/{self.document.pk}/preview/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_deleted_document_preview_returns_404(self):
+        """xlsx 検索・閲覧・変更!B331(Rev1.2)「削除されている(削除フラグがTrue)文書は、ボタンを
+        非表示とする」のURL直打ち対策（品質レビューで発見：DownloadViewは既にis_deleted=False
+        パターンだったが、PreviewViewだけ漏れていたため削除済み文書の中身がプレビュー経由で
+        そのまま閲覧できていた。2026-08-25修正）。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        self.document.is_deleted = True
+        self.document.save(update_fields=["is_deleted"])
+        response = self.client.get(f"/documents/{self.document.pk}/preview/")
         self.assertEqual(response.status_code, 404)
 
 
@@ -1200,6 +1398,70 @@ class EditScreenYearFieldTests(TestCase):
         self.assertEqual(self.document.year, self.old_year)
 
 
+class DocumentEditViewDBErrorTests(TestCase):
+    """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘1）で発見：
+    DocumentEditView.postの`except DBError:`は、DeleteViewAjaxTests.
+    test_ajax_request_returns_json_error_on_db_failureと同じ書き込み失敗系分岐だが、
+    こちらは一度もDBErrorをモックした検証が無かった。messages.errorの文言・
+    リダイレクト先・DBに変更が反映されないことを確認する。"""
+
+    def setUp(self):
+        from documents.models import Document
+
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="pass1234")
+        self.document = Document(
+            title="元のタイトル", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1),
+        )
+        self.document.file.save("original.pdf", ContentFile(b"AAAA"), save=False)
+        self.document.save()
+
+    def test_edit_view_db_failure_shows_error_and_does_not_update_document(self):
+        from django.contrib.messages import get_messages
+
+        from documents.models import Document
+
+        get_response = self.client.get(f"/documents/{self.document.pk}/edit/")
+        token = get_response.context["token"]
+
+        with mock.patch.object(Document, "save", side_effect=DBError("db down")):
+            response = self.client.post(
+                f"/documents/{self.document.pk}/edit/",
+                {
+                    "token": token,
+                    "department": self.department.pk,
+                    "group": self.group.pk,
+                    "category": self.category.pk,
+                    "year": 2026,
+                    "title_0": "更新後タイトル",
+                    "retention_period": self.retention_period.pk,
+                    "privacy_flag": "False",
+                    "memo": "",
+                },
+            )
+
+        self.assertRedirects(response, f"/documents/{self.document.pk}/edit/")
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("更新に失敗しました" in t for t in texts))
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.title, "元のタイトル")
+
+
 class EditScreenRetentionPermissionTests(TestCase):
     """xlsx 権限管理!B172-175(Rev1.1)「文書管理-文書-保存満了日変更」。OFFの場合、保存済み
     文書の保存期間は編集できない（documents.forms.UploadStep2Form、permissions.services.
@@ -1338,6 +1600,88 @@ class UploadStep2FormDepartmentInitialTests(TestCase):
         self.assertTrue(form.fields["department"].disabled)
 
 
+class UploadStep2FormGroupCategoryScopeTests(TestCase):
+    """documents.forms.UploadStep2Form/SearchFormの分類(group)/カテゴリー(category)絞り込み
+    （Rev1.2部署スコープ、core.forms.scoped_group_and_category_querysets）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        self.staff = Employee.objects.create_user(
+            employee_no="1", name="一般職員", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
+        self.own_group = Group.objects.create(
+            code="A", name="自部署の分類", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        self.own_category = Category.objects.create(
+            code="001", name="自部署のカテゴリー", group=self.own_group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.other_group = Group.objects.create(
+            code="B", name="他部署の分類", doc_kbn=DocKbn.DOCUMENT, department=self.other_department
+        )
+        self.other_category = Category.objects.create(
+            code="002", name="他部署のカテゴリー", group=self.other_group, doc_kbn=DocKbn.DOCUMENT,
+            department=self.other_department,
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="x")
+
+    def test_posting_out_of_scope_group_id_is_rejected_by_form_validation(self):
+        """テストカバレッジ棚卸しで発見：分類/カテゴリーの部署スコープはクライアント側の
+        queryset絞り込み（プルダウン非表示）だけでなく、ModelChoiceField.clean()が
+        POSTされたpkそのものをqueryset外として拒否することをHTTP経由で確認する
+        （CLAUDE.mdが繰り返し警告する「クライアント側非表示≠サーバー側強制」の実証）。"""
+        self.client.post(
+            "/documents/upload/step1/",
+            {"files": [SimpleUploadedFile("a.pdf", b"dummy", content_type="application/pdf")]},
+        )
+        step2 = self.client.get("/documents/upload/step2/")
+        token = step2.context["token"]
+        response = self.client.post(
+            "/documents/upload/step2/",
+            {
+                "token": token,
+                "department": self.department.pk,
+                "group": self.other_group.pk,
+                "category": self.other_category.pk,
+                "year": 2026,
+                "retention_period": self.retention_period.pk,
+                "privacy_flag": "False",
+                "memo": "",
+                "title_0": "テスト文書",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["form"].is_valid())
+        self.assertIn("group", response.context["form"].errors)
+        self.assertIn("category", response.context["form"].errors)
+
+    def test_department_scope_overrides_cross_department_doc_visible_groups_grant(self):
+        """documents/forms.pyの部署スコープ導入時、権限管理でdoc_visible_groupsに他部署の
+        分類を明示的に許可していた場合との優先順位が未確定だった（品質レビューで発見）。
+        2026-08-25にユーザーへ確認し「部署スコープを常に優先する」で確定したため、
+        この意図した挙動を固定するリグレッションテストとして残す
+        （core.forms.scoped_group_and_category_querysets docstring参照）。"""
+        from documents.forms import UploadStep2Form
+
+        profile = PermissionProfile.objects.get(employee=self.staff)
+        profile.doc_visible_groups.add(self.own_group, self.other_group)
+
+        form = UploadStep2Form(employee=self.staff)
+        group_ids = set(form.fields["group"].queryset.values_list("pk", flat=True))
+        self.assertIn(self.own_group.pk, group_ids)
+        self.assertNotIn(self.other_group.pk, group_ids)
+
+
 class DetailAPIViewTests(TestCase):
     """popup-detail（検索・閲覧画面の一覧ダブルクリックで開く詳細ポップアップ）用のJSON API。
     2026-08-12、ユーザー依頼でpreview_url/preview_kindを追加した（documents.api.DetailAPIView）。
@@ -1434,6 +1778,39 @@ class DetailAPIViewTests(TestCase):
         self.assertEqual(data["delete_url"], f"/documents/{self.document.pk}/delete/")
         self.assertEqual(data["download_url"], f"/documents/{self.document.pk}/download/")
 
+    def test_deleted_document_yields_null_preview_url_even_with_permission(self):
+        """テストカバレッジ棚卸しで発見：download_url/edit_url/delete_urlの
+        is_deleted=Trueゲーティングはdoc_downloadあり/なし両方でテストされていたが、
+        preview_urlは常にcan_download=False（権限無し）の状態でしかテストされておらず、
+        「権限はあるがis_deletedで弾かれる」経路が未検証だった。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, doc_download=True)
+        self.document.is_deleted = True
+        self.document.save(update_fields=["is_deleted"])
+
+        response = self.client.get(f"/documents/api/{self.document.pk}/")
+        data = response.json()
+        self.assertIsNone(data["preview_url"])
+
+    def test_cross_department_document_access_is_denied(self):
+        """テストカバレッジ棚卸しで発見：DetailAPIView.getの他部署アクセス拒否分岐
+        （can_select_departmentがFalseかつdepartment不一致）が一度もテストで発火していなかった。
+        回帰時（条件の反転等）に他部署の文書メタ情報が漏れても検知できない状態だった。"""
+        other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        from documents.models import Document
+
+        other_document = Document(
+            title="他部署の文書", department=other_department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1),
+        )
+        other_document.file.save("other.pdf", ContentFile(b"dummy"), save=False)
+        other_document.save()
+
+        response = self.client.get(f"/documents/api/{other_document.pk}/")
+        self.assertEqual(response.status_code, 403)
+
     def test_document_past_delete_window_yields_null_delete_url(self):
         """xlsx 保管!B300,B581・検索・閲覧・変更!B339-340「初回登録から1週間以上経過している
         ものは削除不可。ボタンを非表示にする」（documents.services.can_delete）。"""
@@ -1457,6 +1834,134 @@ class DetailAPIViewTests(TestCase):
         response = self.client.get(f"/documents/api/{self.document.pk}/")
         data = response.json()
         self.assertIsNone(data["delete_url"])
+
+
+class DepartmentScopeAccessControlTests(TestCase):
+    """セキュリティレビューで発見：documents.search_services.build_querysetは部署スコープ
+    （organizations.services.visible_department_ids）を適用済みだったが、ダウンロード・
+    プレビュー・編集・削除・一括編集・一括ダウンロードの各ビューには適用されておらず、
+    doc_download権限さえあれば部署をまたいだ直接pkアクセスで他部署の文書を閲覧・編集・削除
+    できてしまっていた（documents.services.scoped_get_object_or_404導入で修正、2026-08-25。
+    contracts.tests.DepartmentScopeAccessControlTestsと同じ設計）。
+    """
+
+    def setUp(self):
+        self.own_department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.own_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        # 閲覧部署範囲テーブルとも未設定の、最も一般的な非管理者
+        # （document_searchable_department_ids(employee) == {own_department.pk}のみ）。
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        self.client.login(username="1", password="pass1234")
+
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        category = Category.objects.create(code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        from documents.models import Document
+
+        self.other_document = Document(
+            title="他部署の文書", department=self.other_department, group=group, category=category,
+            year=2026, retention_period=retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2036, 1, 1),
+        )
+        self.other_document.file.save("other.pdf", ContentFile(b"dummy"), save=False)
+        self.other_document.save()
+
+    def test_download_of_other_department_document_returns_404(self):
+        response = self.client.get(f"/documents/{self.other_document.pk}/download/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_preview_of_other_department_document_returns_404(self):
+        response = self.client.get(f"/documents/{self.other_document.pk}/preview/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_edit_screen_of_other_department_document_returns_404(self):
+        response = self.client.get(f"/documents/{self.other_document.pk}/edit/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_of_other_department_document_returns_404(self):
+        from documents.models import Document
+
+        response = self.client.post(
+            f"/documents/{self.other_document.pk}/delete/", HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(response.status_code, 404)
+        self.other_document.refresh_from_db()
+        self.assertFalse(self.other_document.is_deleted)
+        self.assertTrue(Document.objects.filter(pk=self.other_document.pk, is_deleted=False).exists())
+
+    def test_bulk_edit_start_silently_excludes_other_department_pk(self):
+        response = self.client.post(
+            "/documents/bulk-edit/start/", {"pks": [self.other_document.pk]}
+        )
+        self.assertRedirects(response, "/documents/search/")
+        self.assertIsNone(self.client.session.get("documents_bulk_edit"))
+
+    def test_bulk_edit_direct_access_to_other_department_document_returns_404(self):
+        """BulkEditStartViewが通常は除外するが、セッション状態を直接構築した場合
+        （URL直打ち相当）もBulkEditView自体が部署スコープを検証する。"""
+        from core import bulk_edit_services
+
+        session = self.client.session
+        bulk_edit_services.start_bulk_edit(session, "documents_bulk_edit", [self.other_document.pk])
+        session.save()
+        response = self.client.get("/documents/bulk-edit/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_bulk_download_silently_excludes_other_department_document(self):
+        import zipfile
+        from io import BytesIO
+
+        own_group = Group.objects.create(code="B", name="自部署分類", doc_kbn=DocKbn.DOCUMENT)
+        own_category = Category.objects.create(
+            code="002", name="自部署カテゴリー", group=own_group, doc_kbn=DocKbn.DOCUMENT
+        )
+        own_retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=2
+        )
+        from documents.models import Document
+
+        own_document = Document(
+            title="own", department=self.own_department, group=own_group, category=own_category,
+            year=2026, retention_period=own_retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2036, 1, 1),
+        )
+        own_document.file.save("own.txt", ContentFile(b"hello"), save=False)
+        own_document.save()
+
+        response = self.client.post(
+            "/documents/bulk-download/", {"pks": [own_document.pk, self.other_document.pk]}
+        )
+        self.assertEqual(response.status_code, 200)
+        zf = zipfile.ZipFile(BytesIO(response.content))
+        names = zf.namelist()
+        self.assertEqual(len(names), 1)
+        self.assertTrue(any("own" in n for n in names))
+
+    def test_admin_can_access_other_department_document(self):
+        """部署スコープは非管理者のみに適用される（管理者はcan_select_departmentがTrueを
+        返し、document_searchable_department_idsがNone＝無制限になるため、従来通り全部署に
+        アクセスできる）。"""
+        admin = Employee.objects.create_user(
+            employee_no="2", name="管理者", password="pass1234",
+            department=self.own_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=admin, role=PermissionRole.ADMIN)
+        self.client.login(username="2", password="pass1234")
+
+        response = self.client.get(f"/documents/{self.other_document.pk}/download/")
+        self.assertEqual(response.status_code, 200)
 
 
 class DeleteViewWindowTests(TestCase):
@@ -1582,6 +2087,73 @@ class UploadFileIOErrorTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], "/documents/upload/step2/")
         self.assertEqual(set(Document.objects.values_list("pk", flat=True)), before)
+
+
+class UploadStep2ViewValidationTests(TestCase):
+    """保管画面２のフォームバリデーション・二重送信対策（テストカバレッジ棚卸しで発見：
+    UploadStep2View/DocumentEditView/BulkEditView共通のform.is_valid()==False再描画経路・
+    consume_token失敗経路のいずれもテストが無かった。ここではUploadStep2Viewを代表として
+    検証する）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="pass1234")
+        self.client.post(
+            "/documents/upload/step1/",
+            {"files": [SimpleUploadedFile("a.pdf", b"dummy", content_type="application/pdf")]},
+        )
+
+    def _valid_data(self, token):
+        return {
+            "token": token,
+            "department": self.department.pk,
+            "group": self.group.pk,
+            "category": self.category.pk,
+            "year": 2026,
+            "retention_period": self.retention_period.pk,
+            "privacy_flag": "False",
+            "memo": "",
+            "title_0": "テスト文書",
+        }
+
+    def test_invalid_form_data_re_renders_with_errors(self):
+        """必須項目（分類）欠落時、200で再描画されform.errorsに反映されること。"""
+        step2 = self.client.get("/documents/upload/step2/")
+        data = self._valid_data(step2.context["token"])
+        del data["group"]
+        response = self.client.post("/documents/upload/step2/", data)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("group", response.context["form"].errors)
+
+        from documents.models import Document
+
+        self.assertFalse(Document.objects.exists())
+
+    def test_wrong_token_rejects_with_error_message_and_redirect(self):
+        """二重送信対策トークンが不一致の場合、保管せずstep1へリダイレクトしエラーメッセージを出す。"""
+        from django.contrib.messages import get_messages
+
+        from documents.models import Document
+
+        self.client.get("/documents/upload/step2/")  # トークン発行
+        response = self.client.post("/documents/upload/step2/", self._valid_data("invalid-token"))
+        self.assertRedirects(response, "/documents/upload/step1/")
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("二重に送信された可能性がある" in t for t in texts))
+        self.assertFalse(Document.objects.exists())
 
 
 class UploadStep2ImmediateExtractionTests(TestCase):
@@ -1803,3 +2375,97 @@ class OptionsAPIViewTests(TestCase):
         self.client.logout()
         response = self.client.get("/documents/api/options/", {"type": "dept"})
         self.assertEqual(response.status_code, 302)
+
+
+class DocumentSaveNormalizationTests(TestCase):
+    """documents.models.Document.saveの`update_fields`正規化カラム同期
+    （テストカバレッジ棚卸しで発見：docstringが説明する「update_fieldsにtitle_normalized等を
+    追加し忘れるとDBへ反映されない」バグクラスに対する直接のリグレッションテストが無かった）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        category = Category.objects.create(code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        from documents.models import Document
+
+        self.document = Document(
+            title="旧タイトル", department=self.department, group=group, category=category,
+            year=2026, retention_period=retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1),
+        )
+        self.document.file.save("doc.pdf", ContentFile(b"dummy"), save=False)
+        self.document.save()
+
+    def test_update_fields_title_only_still_persists_normalized_shadow_column(self):
+        from core.text_normalization import normalize_for_search
+        from documents.models import Document
+
+        self.document.title = "新タイトルＡＢＣ"
+        self.document.save(update_fields=["title"])
+
+        reloaded = Document.objects.get(pk=self.document.pk)
+        self.assertEqual(reloaded.title, "新タイトルＡＢＣ")
+        self.assertEqual(reloaded.title_normalized, normalize_for_search("新タイトルＡＢＣ"))
+
+    def test_update_fields_extracted_text_only_still_persists_normalized_shadow_column(self):
+        from core.text_normalization import normalize_for_search
+        from documents.models import Document
+
+        self.document.extracted_text = "本文サンプルＸＹＺ"
+        self.document.save(update_fields=["extracted_text"])
+
+        reloaded = Document.objects.get(pk=self.document.pk)
+        self.assertEqual(reloaded.extracted_text, "本文サンプルＸＹＺ")
+        self.assertEqual(reloaded.extracted_text_normalized, normalize_for_search("本文サンプルＸＹＺ"))
+
+
+class StoragePathTests(TestCase):
+    """documents.storage_paths（テストカバレッジ棚卸しで発見：専用テストが1件も無く、
+    パス構成のtypoや構造変更〈UUIDプレフィックスの脱落等〉が検知できない状態だった）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="001", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="010", name="カテゴリーＸ", group=group, doc_kbn=DocKbn.DOCUMENT
+        )
+
+    def test_document_upload_path_structure(self):
+        from documents.storage_paths import document_upload_path
+
+        instance = mock.Mock(year=2026, department=self.department, category=self.category)
+        path = document_upload_path(instance, "報告書.pdf")
+        prefix = "documents/2026/001-02/010/"
+        self.assertTrue(path.startswith(prefix), path)
+        remainder = path[len(prefix):]
+        uuid_part, _, filename_part = remainder.partition("_")
+        self.assertEqual(len(uuid_part), 32)
+        self.assertEqual(filename_part, "報告書.pdf")
+
+    def test_document_searchable_upload_path_uses_separate_directory(self):
+        from documents.storage_paths import document_searchable_upload_path
+
+        instance = mock.Mock(year=2026, department=self.department, category=self.category)
+        path = document_searchable_upload_path(instance, "報告書.pdf")
+        self.assertTrue(path.startswith("documents/2026/001-02/010/searchable/"), path)
+        self.assertTrue(path.endswith("_報告書.pdf"))
+
+    def test_upload_paths_are_unique_per_call_via_uuid(self):
+        from documents.storage_paths import document_upload_path
+
+        instance = mock.Mock(year=2026, department=self.department, category=self.category)
+        path1 = document_upload_path(instance, "同名.pdf")
+        path2 = document_upload_path(instance, "同名.pdf")
+        self.assertNotEqual(path1, path2)
