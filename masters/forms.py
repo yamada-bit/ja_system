@@ -199,6 +199,23 @@ class CategoryForm(forms.ModelForm):
             raise forms.ValidationError("このカテゴリーコードは既に登録されています。")
         return code
 
+    def clean(self):
+        # 原本HTML（cat-regist/cat-edit）の「分類」「書類管理区分」selectはJS連動が無い独立した
+        # 静的プルダウンだが、documents/contracts側は書類管理区分ごとにカテゴリー・分類を絞り込む
+        # 前提で動作するため、「書類管理区分=契約書管理」のカテゴリーに「書類管理区分=文書管理」の
+        # 分類を紐付けるといった不整合な組み合わせはバックエンドで拒否する（コード監査で発見、
+        # 2026-08-25追加。UIの選択肢絞り込み〈動的JS〉自体は原本に無い挙動のため追加しない）。
+        cleaned_data = super().clean()
+        group = cleaned_data.get("group")
+        doc_kbn = cleaned_data.get("doc_kbn")
+        if group is not None and doc_kbn and group.doc_kbn != doc_kbn:
+            self.add_error(
+                "group",
+                f"選択した分類「{group}」の書類管理区分（{group.get_doc_kbn_display()}）と、"
+                f"このカテゴリーの書類管理区分（{dict(DocKbn.choices).get(doc_kbn, doc_kbn)}）が一致しません。",
+            )
+        return cleaned_data
+
 
 PERIOD_UNIT_CHOICES = RetentionPeriodUnit.choices
 

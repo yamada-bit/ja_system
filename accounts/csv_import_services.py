@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+import unicodedata
 
 from django.db import transaction
 
@@ -109,6 +110,21 @@ def _import_row(row, *, actor, summary):
 
     if not employee_no:
         raise ValueError("職員番号が空です。")
+    # StaffRegistForm.clean_employee_no()と同じ正規化・検証（xlsx 職員マスタ!B173「半角数字の
+    # みを許可。全角の場合は登録時に半角へ変換」）。CSV取込はcreate_user()/save()を直接呼ぶため
+    # フォームのclean_employee_no()を経由せず、ここで明示的に揃える必要がある
+    # （コード監査で発見：以前は.strip()のみで全角数字や数字以外がそのまま保存されていた、
+    # 2026-08-25修正）。
+    # [優先度: 低・見送り、規約準拠監査 2026-08-25] 上記NFKC正規化には、姉妹バグである
+    # rank_code/position_codeのchoices未検証（下記、2026-08-24修正）に対応する
+    # test_invalid_rank_code_is_rejected/test_invalid_position_code_is_rejectedと同様の
+    # 回帰テストがImportStaffCsvServiceTestsに無い（StaffRegistFormTests.
+    # test_fullwidth_employee_no_converted_to_halfwidthは手動登録フォーム側のみでCSV取込側は
+    # 未カバー）。実装済みロジックへの追加テストであり緊急性は無いため見送るが、将来
+    # _import_row()をリファクタリングした際にNFKC正規化だけ回帰が検知されないリスクは残る。
+    employee_no = unicodedata.normalize("NFKC", employee_no)
+    if not employee_no.isdigit():
+        raise ValueError(f"職員番号が不正です（半角数字のみ許可）: {employee_no}")
     # StaffRegistForm/StaffEditFormはrank/positionをChoiceFieldで検証するが、CSV取込は
     # Employee.objects.create_user()/save()を直接呼ぶためDjangoのchoices検証を経由しない
     # （choicesはDB/save層では強制されない）。手動フォームと同じ検証をここでも行う

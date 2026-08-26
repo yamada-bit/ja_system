@@ -102,6 +102,7 @@
       </form>
     </div>
   </div>
+  {{ departments_pulldown|json_script:"departments-data" }}
 {% endblock %}
 
 {% block extra_script %}
@@ -123,7 +124,7 @@
     alert("パスワードをリセットしました: " + newPassword);
   }
 
-  const departments = {{ departments_json|safe }};
+  const departments = JSON.parse(document.getElementById('departments-data').textContent);
   const branchSelect = document.getElementById('honshisyo-edit');
   const sectionSelect = document.getElementById('buka-edit');
   const departmentInput = document.getElementById('id_department');

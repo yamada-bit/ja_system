@@ -19,6 +19,14 @@ class OptionListAPIView(LoginRequiredMixin, View):
     type=dept（contract_visible_departments、Rev1.1で追加）は、他職員に対して閲覧を許可する
     部署を選ぶための管理者・所属長向け設定であり、閲覧者自身の検索範囲を絞るものではないため
     （permissions.services.can_manage_targetで既にアクセス制御済み）、全部署を選択肢として返す。
+
+    [優先度: 低・見送り、コード監査 2026-08-25] LoginRequiredMixinのみでSettingsMenuAccessMixin
+    等のロール制御を持たないため、権限管理画面自体へのアクセス権が無い一般ロールでも
+    `?type=dept`（全部署一覧）や`?type=group&doc_kbn=contract`（契約書向け分類一覧）を直接
+    叩いて取得できる。ただしこのAPI自体はPermissionProfileの中身を変更できず、返す情報も
+    部署名・分類名という他画面（検索・保管のpopup-select等）でも同種ロールに露出しうる情報
+    のため実害は限定的と判断し、見送った。他のpopup-select系オプションAPI
+    （core.api.BaseOptionListAPIView等）のゲーティング方針と揃えるかどうかは別途要検討。
     """
 
     def get(self, request):

@@ -52,6 +52,7 @@ class AuditLogCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         response["Content-Disposition"] = 'attachment; filename="audit_log_list.csv"'
         writer = csv.writer(response)
         writer.writerow(["操作日時", "職員番号", "部署名", "職員名", "操作内容", "イベントメッセージ", "個人情報"])
+        count = 0
         for log in qs:
             # employee_name/action/event_messageは職員の自由入力（文書タイトル等）に由来しうるため、
             # Excel等で開いた際の数式インジェクション対策としてsanitize_csv_rowを通す。
@@ -68,7 +69,7 @@ class AuditLogCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                     ]
                 )
             )
-        count = qs.count()
+            count += 1
         logger.info("操作履歴ログCSV出力を実行しました: employee_no=%s 件数=%s", request.user.employee_no, count)
         # accounts.views.StaffCsvExportView等と同様、職員名等の個人情報を含む一覧をファイルとして
         # 出力するイベントのため、監査ログにも記録する。

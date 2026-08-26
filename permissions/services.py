@@ -1,6 +1,7 @@
 import logging
 
 from core.text_normalization import filter_by_full_name
+from organizations.services import department_composite_order_by
 from permissions.models import PermissionProfile, PermissionRole
 
 logger = logging.getLogger(__name__)
@@ -162,7 +163,15 @@ def visible_employees(viewer):
     """
     from accounts.models import Employee
 
-    qs = Employee.objects.select_related("department", "permission_profile")
+    # authority_list.html・_flags_row()（CSV出力）がいずれもemployee.permission_profileの3つの
+    # ManyToManyField（doc_visible_groups/contract_visible_departments/contract_visible_groups）
+    # を行ごとに参照するため、prefetch_relatedしておかないと一覧・CSV出力の行数に比例した
+    # N+1クエリが発生する（コード監査で発見、2026-08-25修正）。
+    qs = Employee.objects.select_related("department", "permission_profile").prefetch_related(
+        "permission_profile__doc_visible_groups",
+        "permission_profile__contract_visible_departments",
+        "permission_profile__contract_visible_groups",
+    )
     if get_role(viewer) == PermissionRole.ADMIN:
         return qs
     return qs.filter(department_id=viewer.department_id)
@@ -180,8 +189,9 @@ def filter_authority_queryset(viewer, form, *, sort_key=None, sort_dir="asc"):
     if sort_key == "department":
         # 表示されている「本支所名｜部課名」の並びと一致させるため本支所コード→部課コードの
         # 複合ソートにする（section_codeのみでは本支所をまたいで無関係にソートされていた）。
-        prefix = "-" if sort_dir == "desc" else ""
-        qs = qs.order_by(f"{prefix}department__branch_code", f"{prefix}department__section_code", "employee_no")
+        # masters.views.GroupListView/CategoryListViewの"department"特殊扱いと同一ロジックのため
+        # organizations.services側へ集約した（コード監査で発見、2026-08-25修正）。
+        qs = department_composite_order_by(qs, sort_dir, "employee_no")
     elif field:
         prefix = "-" if sort_dir == "desc" else ""
         qs = qs.order_by(f"{prefix}{field}", "employee_no")
@@ -275,7 +285,16 @@ def visible_groups(employee, *, kind):
     profile = get_profile(employee)
     if profile is None:
         return None  # None = 呼び出し側でフィルタなし(全件)として扱う
-    qs = profile.doc_visible_groups if kind == "document" else profile.contract_visible_groups
+    if kind == "document":
+        qs = profile.doc_visible_groups
+    elif kind == "contract":
+        qs = profile.contract_visible_groups
+    else:
+        # can_download()/department_ids_for_group_scope()と同じ理由：想定外のkindを
+        # "contract"扱いで握りつぶさず、呼び出し側の誤り（typo等）として早期に気付けるように
+        # する（コード監査で発見：この関数だけkind検証が無く、"document"以外を全て契約書向け
+        # クエリへ暗黙にフォールスルーしていた、2026-08-25修正）。
+        raise ValueError(f"unknown kind: {kind}")
     if not qs.exists():
         return None
     return qs

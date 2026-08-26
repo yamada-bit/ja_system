@@ -1,0 +1,183 @@
+organizations/masters アプリ CLAUDE.md コーディング規約準拠監査
+対象: organizations/{models,views,api,services,forms,urls,admin,apps,tests}.py
+      masters/{models,views,services,forms,urls,admin,apps,tests}.py
+      core/form_services.py, core/master_views.py（本監査対象2アプリ専用の共通基底、2026-08-25新設）
+      templates/organizations/*.html, templates/masters/*.html
+実施日: 2026-08-26
+方式: CLAUDE.md「コーディング規約」の各項目ごとに全ファイルを読み込み突き合わせ。
+      あわせて `manage.py makemigrations --check --dry-run organizations masters` と
+      `manage.py test organizations masters`（82件）を実行し、モデル変更のマイグレーション
+      漏れ・現状のテスト全件PASSを確認済み。本レポートは棚卸しのみで、修正は行っていない。
+
+※ 前提として、両アプリは2026-08-24〜25にかけて複数回のコード監査・品質レビュー・Rev1.2
+  フィデリティ監査を経ており（部署統合・分割のトランザクション化、IntegrityError捕捉の
+  save_or_none/reject_if_resubmitted集約、Group/Category一覧・登録・編集・削除の
+  core.master_views.BaseScopedMaster*集約、分類・カテゴリーの部署スコープ追加とその
+  scoped_get_object_or_404のcore.scoping_services委譲等）、本監査時点でこれらは全て
+  コード上で反映済みであることを確認した。本監査はその後の状態に対して規約準拠の観点のみで
+  棚卸しした結果。正しさのバグ探しは対象外。
+
+================================================================================
+■ 総合評価
+================================================================================
+重大な規約違反は検出せず。CLAUDE.md「コーディング規約」の各項目はいずれも遵守されている。
+指摘は2件（低2）のみで、いずれも「違反」というより「改善余地」レベル。
+
+================================================================================
+■ 規約項目ごとのチェック結果
+================================================================================
+
+[OK] ビューはCBVのみ
+  organizations/views.py・organizations/api.py・masters/views.py・core/master_views.py とも、
+  全てdjango.views.Viewを継承したクラスベースビュー。関数ベースビューは
+  masters/views.py._group_queryset_with_counts()・_category_queryset_with_counts()・
+  _retention_list_url()等のプライベートヘルパー関数のみで、URLに直接紐付く関数ビューは無し
+  （organizations/urls.py・masters/urls.py双方で.as_view()経由のみ確認）。
+
+[OK] verbose_name/help_text/エラーメッセージ/docstring の日本語統一
+  organizations/models.py（Department、DepartmentViewScope、MenuItemSetting）・
+  masters/models.py（Group、Category、RetentionPeriod、SystemSetting）の全フィールドで
+  verbose_name/help_textが日本語。forms.pyのlabels・エラーメッセージ、views.pyの
+  messages.error()/success()文言もすべて日本語で統一されている。
+
+[対象外] 設定の config/settings/base.py 集約・.env経由読み込み
+  organizations/mastersアプリ自体に新規設定値の追加は無し（masters.models.SystemSetting.
+  retention_permanent_years/audit_log_retention_months はDB上のシングルトンレコードで、
+  .envとは別の管理方式。モデルのdocstringに「お知らせしきい値・契約書保存期限は.env経由へ
+  移行済み」という経緯が明記されている）。
+
+[対象外] アップロードファイル本体の分離・Argon2優先
+  MEDIA_ROOT設定・PASSWORD_HASHERSはconfig/settings側の管轄で、organizations/mastersアプリの
+  スコープには無し（両アプリともファイルアップロード機能・パスワード関連機能を持たない）。
+
+[OK] 監査ログの一元化（auditアプリ経由）
+  部署管理の新規登録・更新（DeptRegistView.post/DeptEditView.post、統合・分割を含む）、
+  分類・カテゴリー管理の新規登録・更新・削除（core.master_views.BaseScopedMaster*系の共通実装）、
+  保存期間設定の新規登録・更新・削除（Retention*View）のいずれもaudit_services.log()を直接
+  呼んでおり、記録漏れは無い（部署管理の登録・更新ログは以前記録漏れがあったが2026-08-24修正済み、
+  organizations/tests.py DeptRegistEditAuditLogTestsで回帰テストあり）。
+
+[OK] core相当の共通基底クラス・サービス関数への集約（重複排除）
+  2026-08-25時点で、organizations/masters間・masters内部の重複はほぼ全てcore側
+  （core.form_services.save_or_none、core.double_submit.reject_if_resubmitted、
+  core.master_views.BaseScopedMasterListView/RegistView/EditView/DeleteView、
+  core.scoping_services.scoped_get_object_or_404）に集約済みで、各ファイルのdocstringに
+  集約理由・発見経緯（「品質レビューで発見」「コード監査で発見」）が丁寧に記録されている。
+  Group/Category一覧・登録・編集・削除の4画面は以前モデル名以外ほぼ完全に同一ロジックで
+  コピペ実装されていたが、documents/contracts側のcore.record_views.BaseDeleteView等と同じ
+  パラメータ化基底クラス方針をcore.master_viewsへ横展開する形で解消されている。
+  organizations.services.department_composite_order_byも、以前
+  permissions.services.filter_authority_queryset・masters.views.GroupListView/
+  CategoryListViewの計3箇所に独立に手書きされていた部課コード複合ソートを集約したもので、
+  Department関連ロジックの単一情報源として機能している。
+
+[OK] コメントは「なぜ」を詳しく書く
+  全編にわたり、xlsxの該当セル番地・Rev1.1/1.2の改訂経緯、過去の監査での発見経緯・修正日、
+  他ファイルとの対称性の理由、DepartmentViewScopeの「統合/分割の方向」のような非自明な
+  データモデル設計判断等が丁寧に記録されている。「何をしているか」の説明に留まるコメントは
+  ほぼ見当たらない。特にcore.form_services.save_or_noneのtransaction.atomic()が必要な理由
+  （IntegrityError捕捉だけではTransactionManagementErrorに繋がる）、
+  core.master_views.BaseScopedMasterListViewの部署列ソートのis_adminガード理由等、
+  一見自明に見える実装の裏にある落とし穴まで踏み込んで記録されている。
+
+[OK] ログの整備
+  organizations/mastersのviews.py・api.py・services.py・core/master_views.pyはいずれも
+  `logger = logging.getLogger(__name__)`を用意し、権限拒否（organizations.api.
+  OptionListAPIView.dispatch）、部署統合・分割時の自己参照防御
+  （organizations.services.apply_dept_action）、文書件数0件でない削除の試行
+  （core.master_views.BaseScopedMasterDeleteView.post）といったセキュリティ・業務ルール上
+  意味のある事象をlogger.warningで記録している。models.pyはlogger定義のみで発火箇所が無いが、
+  リクエスト処理を持たないモジュールのため妥当（違反ではない）。
+
+[OK] 例外処理の完成度
+  bare `except:`はorganizations/masters配下に0件（grep相当の確認済み）。DeptRegistView.post・
+  DeptEditView.post・core.master_views.BaseScopedMasterRegistView/EditView.post・
+  RetentionRegistView.post/RetentionEditView.postのIntegrityError捕捉は、いずれも
+  core.form_services.save_or_none（transaction.atomic()+IntegrityError捕捉+logger.exception）
+  に集約された上でform.add_error()/messages.error()によるユーザー向け案内と組み合わさっており
+  完成度が高い。organizations.services.apply_dept_actionの自己参照targetスキップも
+  「フォームが既にエラーにしているため通常到達しないが将来の防御として」という設計判断が
+  コメントで明記されている。
+
+[OK] 一覧画面のページネーションはDjango Paginator
+  masters.GroupListView/CategoryListView（core.master_views.BaseScopedMasterListView経由）は
+  Django Paginator使用（page_size=100）。class_list.html/cat_list.htmlの«/＜/＞/»ボタンは
+  page_obj.has_previous/has_nextに連動したdisabled切替で、「機能しない静的ページャー」には
+  該当しない。organizations.DeptListViewはxlsx部署管理!B60「ページャーは不要」の明記により
+  Paginatorを使わない内部スクロール表示だが、これはCLAUDE.mdが明示する「ページャー不要と
+  xlsxが明示している画面は例外」に該当し、規約通りの扱い。
+
+[OK] 未実装・対象外機能のdisabled+title、alert()誤魔化しの禁止
+  organizations/masters配下でUIボタンをalert()で偽装している箇所は無し。class_list.html/
+  cat_list.htmlの削除ボタンdisabled（文書件数が0件でない場合）はCLAUDE.mdが言う
+  「未実装・対象外の機能」ではなく「業務ルール上一時的に実行できない操作」であり、xlsx
+  分類管理!B68の要件通りの挙動（一覧側でdisabled化、サーバー側もBaseScopedMasterDeleteView.
+  postでblocking_count()により二重に検証）。pager-bottomのdisabledボタンも同様に
+  has_previous/has_nextに連動した動的な状態でtitle属性の対象外（documents/contracts等
+  他アプリのSearchViewと同じ扱い）。
+
+[OK] ファイル役割分担
+  organizationsアプリはmodels.py/views.py/api.py/services.py/forms.py/urls.py/admin.py/
+  apps.py/tests.pyの標準構成。mastersアプリはapi.pyを持たない代わりにservices.pyへ
+  部署スコープ関連のヘルパー（department_scope_ids/scope_queryset_by_department/
+  scoped_get_object_or_404）を分離しており、ビジネスロジックのviews.pyへの直書きは
+  見当たらない（一覧・登録・編集・削除の共通ロジック自体もcore/master_views.pyへ更に
+  分離されている）。
+
+[OK] Djangoテンプレートの複数行コメント既知の落とし穴
+  templates/organizations・templates/masters配下に`{# ... #}`形式の複数行コメントは無く、
+  dept_list.htmlの本支所/部課連動プルダウンに関する説明コメントは正しく
+  `{% comment %}...{% endcomment %}`を使用している。
+
+================================================================================
+■ 指摘一覧
+================================================================================
+
+--------------------------------------------------------------------------------
+[低] masters/admin.py・organizations/admin.pyともDjango管理サイトへのモデル未登録
+--------------------------------------------------------------------------------
+対象:
+  - organizations/admin.py（"# Register your models here."のみ、Department等の登録無し）
+  - masters/admin.py（同上、Group/Category/RetentionPeriod/SystemSetting等の登録無し）
+
+内容:
+  CLAUDE.md自体はDjango管理サイトへのモデル登録を明文の規約として要求していないため
+  「違反」ではないが、masters/models.py SystemSettingのdocstringには「DB編集用の管理画面・
+  Django管理サイトが無く、値を変更する経路が実質DB直接操作しかない」という記述があり、
+  運用上の不便さが設計判断として既に認識・記録されている状態。同様の状況は
+  organizations.DepartmentViewScope（部署統合・分割の履歴）等、画面上に一覧参照UIが無い
+  モデルにも該当する。将来的な運用改善候補として認識しておくとよい（新規指摘というより
+  既存のdocstringの記述を裏付ける確認）。
+
+--------------------------------------------------------------------------------
+[低] masters.RetentionPeriodモデルにupdated_atフィールドが無く、Group/Categoryと非対称
+--------------------------------------------------------------------------------
+対象:
+  - masters/models.py:121-159 RetentionPeriod（created_at/updated_atが無い）
+  - masters/models.py:17-58, 61-96 Group/Category（created_at/updated_atを持つ）
+  - core/master_views.py:308-309 BaseScopedMasterDeleteView.post
+    （obj.save(update_fields=["is_deleted", "updated_at"])）
+  - masters/views.py:551-552 RetentionDeleteView.post
+    （period.save(update_fields=["is_deleted"])、updated_at無し）
+
+内容:
+  同じ「論理削除は is_deleted=True のみ更新する」という設計方針でありながら、
+  Group/CategoryはBaseScopedMasterDeleteView.postでupdated_atも同時に更新するのに対し、
+  RetentionPeriodはモデル自体にupdated_atフィールドが無いため更新されない。CLAUDE.mdの
+  明文の規約への違反ではなく、RetentionPeriod単体で見れば動作に問題は無いが、3モデルとも
+  「論理削除のみで行自体は残す」という同じ設計意図を持つマスタ系モデルであるため、
+  フィールド構成の非対称自体が将来の混乱要因になりうる（例えば将来RetentionPeriodにも
+  updated_atを追加した際、RetentionDeleteView.post側だけ更新漏れになる可能性）。
+  実害は現状無いため優先度は低い。
+
+================================================================================
+■ 実行した確認コマンドと結果
+================================================================================
+- `manage.py makemigrations --check --dry-run organizations masters`
+  → "No changes detected in apps 'organizations', 'masters'"
+  （モデル定義とマイグレーションの間に差分は無い）
+
+- `manage.py test organizations masters`
+  → Ran 82 tests in 10.861s — OK（全件PASS。標準エラー出力に現れるIntegrityErrorの
+  トレースバックはMasterIntegrityErrorViewTestsが意図的に発生させる例外系テストの出力で、
+  テスト結果自体には影響なし）

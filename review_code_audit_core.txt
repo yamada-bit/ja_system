@@ -1,0 +1,266 @@
+audit / core アプリ コードレビュー結果
+実施日: 2026-08-26
+対象: audit/{models,services,views,forms,urls,admin}.py,
+      core/{models,views,api,middleware,double_submit,scoping_services,form_services,
+      master_views,forms,record_views,upload_views,upload_services,search_services,
+      deletion_services,zip_services,bulk_edit_services,text_extraction_services,
+      ocr_layout_services,text_normalization,pdf_text_embed_services,file_type_services,
+      notice_services,csv_services,storage_paths,widgets,test_runner,admin,urls,apps}.py,
+      core/management/commands/{cleanup_temp_uploads,extract_pending_pdf_text,
+      purge_expired_deleted_records,seed_test_data}.py
+      （関連テンプレート・documents/contracts/masters側の呼び出し元は参照のみ、修正は未実施）
+方針: 正しさのバグ／再利用性・単純化・効率性の指摘を分離。CLAUDE.mdのコーディング規約との
+      整合性も確認対象に含めた。優先度は 高/中/低 の3段階。
+
+
+====================================================================
+■ 正しさのバグ
+====================================================================
+
+--- [優先度: 中] --------------------------------------------------
+save_pending_files()の複数ファイル一括保存が途中失敗した際、ロールバックが実体ファイルのみで
+セッション側のpendingリストには反映されない（参照エイリアシング）
+--------------------------------------------------------------------
+場所: core/upload_services.py save_pending_files()（27-74行）
+
+内容:
+  `pending = session.get(session_key, [])`は、session_keyが既にセッションに存在する場合、
+  Django SessionBase（MutableMapping実装、内部dict `_session`）が保持する**同一のlistオブジェクト
+  への参照**をそのまま返す（新しいコピーではない）。ループ内で`pending.append(...)`すると、
+  その時点で直ちにセッションの内部dict（`session._session[session_key]`）も書き換わる
+  ——`session[session_key] = pending`（72行目、ループ完了後にのみ到達）を待たずに。
+
+  ループ途中（2件目以降）のファイル書き込みが`OSError`で失敗すると、例外送出前に実行される
+  ロールバック処理（60-69行）は`newly_saved_paths`（このループで新規に書き込んだ一時ファイル）を
+  ディスクから削除するのみで、対応する`pending.append(...)`済みのエントリ（既に上記の理由で
+  セッションの内部dictへ反映済み）は取り除かれない。関数はその後`PendingFileStorageError`を
+  送出し、72行目の`session[session_key] = pending`（および`session.modified = True`）には
+  到達しない。
+
+失敗シナリオ:
+  1) 職員がチャンク分割アップロード（`combine_upload_chunks`）で1件アップロード済み
+     ——この時点で`session[session_key]`に実在するlistオブジェクトが確定登録される
+     （`session.modified`もTrueになる）。
+  2) 続けて通常のファイル選択（`BaseUploadStep1View.post`→`save_pending_files`、複数ファイル）を
+     行い、そのうち2件目の書き込みでディスク容量不足等の`OSError`が発生。
+  3) 1件目（このバッチ内で新規に書けた分）はディスクから削除されるが、対応する`pending`の
+     エントリは残ったまま。かつ`SessionIdleTimeoutMiddleware`が認証済みリクエストで毎回
+     `request.session[SESSION_LAST_ACTIVITY_KEY] = now`を実行するため`session.modified`は
+     既にTrueであり、レスポンス確定時にDjangoのセッションミドルウェアがこの不整合な状態
+     （実体の無い一時ファイルを指すエントリを含むpendingリスト）をそのまま永続化する。
+  4) 職員が保管画面２へ進むと、`open_pending_file`が該当エントリで`PendingFileStorageError`
+     （「保管対象のファイルが見つからないか、読み込めませんでした」）を返し、実際には
+     アップロードに成功していなかったファイル欄でエラーになる。保管画面１を再度GETすれば
+     `clear_pending_files`で解消するが、それまでの間セッション状態が不整合のまま残る。
+
+  トリガー条件（多重ファイル保存の途中失敗）自体は稀だが、テスト
+  `UploadServicesErrorHandlingTests.test_write_failure_rolls_back_earlier_files_in_same_batch`
+  （core/tests.py 769-799行）は新規セッション（`session_key`が未登録の状態）でのみ検証しており、
+  `session.get(session_key, [])`が新規listを返すケース（`pending.append()`がセッションの
+  内部dictに影響しない）しかカバーしていないため、このエイリアシング起因の不整合は現状のテストでは
+  検出できない。
+
+--- [優先度: 中] --------------------------------------------------
+BaseScopedMasterDeleteView.post()のobj.save()にDB書き込み例外処理が無い
+--------------------------------------------------------------------
+場所: core/master_views.py BaseScopedMasterDeleteView.post()（308-309行）
+
+内容:
+  masters.Group/Categoryの削除確認画面（論理削除）の本体書き込み
+  `obj.save(update_fields=["is_deleted", "updated_at"])`が、try/exceptで囲まれていない。
+
+  同ファイル内の兄弟クラスは同種のDB書き込みをすべて明示的に保護している：
+  - `BaseScopedMasterRegistView`/`BaseScopedMasterEditView`は`core.form_services.save_or_none`
+    経由で`IntegrityError`を捕捉。
+  - `core/views.py`の`OtherMainEditView`/`OtherLogoutEditView`は`(IntegrityError, DatabaseError)`
+    を明示的にtry/exceptしログ＋利用者向けエラーメッセージを出す。
+  - `core/record_views.py`の`BaseDeleteView`（documents/contracts側の同種「削除」ボタン）は
+    `obj.save(update_fields=["is_deleted", "deleted_at"])`を`django.db.Error`（DBError全般の
+    基底クラス）でtry/exceptし、AJAX/非AJAXそれぞれに応じたエラー応答を返している。
+
+  `BaseScopedMasterDeleteView`だけがこのパターンから外れており、CLAUDE.mdの「ファイルI/O・
+  外部境界（ストレージ、DBの制約違反等）はtry/exceptで具体的な例外型を捕捉し、
+  logger.exception(...)で原因を記録した上で、利用者にわかるエラー応答を返す」という規約に
+  反する。
+
+失敗シナリオ:
+  DB接続断・一時的な制約違反等で`obj.save()`が`DatabaseError`を送出した場合、Djangoの既定の
+  500エラーページがそのまま利用者に表示される（`messages.error`によるわかりやすい案内も、
+  `logger.exception`による原因特定用ログも無い）。他の削除・更新系エンドポイントでは同種の
+  失敗が発生してもユーザーへ「時間をおいて再度お試しください」等の案内が出るのに対し、
+  分類/カテゴリー管理の削除確認画面だけ挙動が一貫しない。
+
+
+====================================================================
+■ 再利用性・単純化・効率性
+====================================================================
+
+--- [優先度: 中 / 効率性] ------------------------------------------
+AuditLogCsvExportViewが同じクエリセットを2回評価している（行書き込み＋件数取得）
+--------------------------------------------------------------------
+場所: audit/views.py AuditLogCsvExportView.get()（46-81行）
+
+内容:
+  `for log in qs:`でCSV行を書き出した後、`count = qs.count()`（71行目）で改めて件数を取得して
+  おり、同一のクエリセットに対してDBラウンドトリップが2回発生する（1回目：全行フェッチ、
+  2回目：COUNT(*)）。`for log in qs`のループ内でカウンタをインクリメントするだけで同じ値が
+  得られ、追加のクエリは不要。
+
+失敗シナリオ（効率性）:
+  操作履歴ログは全画面操作を記録する性質上、時間とともに無制限に増加するテーブル
+  （後述のGINインデックス欠如の指摘も参照）。CSV出力にページングが無く全件対象のため、
+  件数が多い環境では出力のたびに不要なCOUNT(*)クエリが余分に発生し、レスポンスタイムを
+  やや悪化させる。また理論上、2回のクエリの間にレコードが増減すると（他ユーザーの操作等）、
+  監査ログ自身に記録される「件数」とCSVに実際に書き出された行数が一致しなくなる可能性もある
+  （実害は小さいが、監査ログとしての正確性という観点では望ましくない）。
+
+--- [優先度: 中 / 効率性] ------------------------------------------
+AuditLogにGINトライグラムインデックスが無く、無制限に増え続けるテーブルに対しicontains検索が
+フルスキャンになる
+--------------------------------------------------------------------
+場所: audit/models.py AuditLog.Meta.indexes（30-36行）、audit/services.py
+      filter_audit_log_queryset()（16-34行）
+
+内容:
+  CLAUDE.mdが明記する通り、本システムはPostgreSQLのpg_trgm（`core/migrations/0001_enable_pg_trgm`
+  で有効化）を使い、documents.Document/contracts.Contractは`django.contrib.postgres`の
+  GinIndexで全文検索クエリ（icontains）を高速化している。一方、`AuditLog`のModel.Metaには
+  `models.Index(fields=["-timestamp"])`しか定義が無く、検索フォームが使う
+  - `employee_name__icontains`相当（`core.text_normalization.filter_by_full_name`、内部で
+    `Replace()`による関数呼び出しicontains）
+  - `event_message__icontains`（スペース区切りAND、複数`icontains`条件）
+  のいずれにもインデックスが効かず、テーブル全体のシーケンシャルスキャンになる。
+
+  操作履歴ログはCLAUDE.mdにも明記されている通り「保存件数上限・CSV出力の最大対象期間設定は
+  今回実装を見送る」（HTML_REIMPL_CHECKLIST_ARCHIVE.md参照）ため、運用が長期化するほど
+  無制限に行数が増え続ける前提のテーブルであり、documents/contracts同様にキーワード検索が
+  高頻度で使われる画面（操作履歴ログ一覧）でもある。
+
+失敗シナリオ（効率性）:
+  運用開始から時間が経ちAuditLogの行数が数十万〜数百万件規模になると、イベントメッセージ・
+  職員名でのキーワード検索のたびに全件スキャンが発生し、一覧表示・CSV出力のレスポンスタイムが
+  documents/contracts検索と非対称に悪化していく。documents/contracts側で既に確立している
+  GIN／pg_trgmインデックスの方針が、同じicontains検索を行うauditアプリにだけ適用されていない
+  という一貫性の欠如でもある。
+
+--- [優先度: 低 / 効率性] ------------------------------------------
+BaseBulkDownloadView.post()がクエリセットを2回評価している（count()とzip_builder内の反復）
+--------------------------------------------------------------------
+場所: core/record_views.py BaseBulkDownloadView.post()（127-134行）
+
+内容:
+  `total_count = objects.count()`の直後に`self.zip_builder(objects)`
+  （`core.zip_services.build_zip_archive`）で同じ`objects`querysetを`for obj in objects:`と
+  反復しており、DBラウンドトリップが2回（COUNT(*)＋SELECT）発生する。`build_zip_archive`側で
+  返す実処理件数（成功件数＋`missing_count`）から`total_count`を導出する、または先に
+  `list(objects)`へ確定させてから`len()`とループの両方に使い回す等で1回に削減できる。
+
+失敗シナリオ（効率性）:
+  一括ダウンロードは選択件数（最大でも検索結果一覧の表示件数程度）に比例するため実害は小さいが、
+  AuditLogCsvExportViewと同種の「同一クエリセットの二重評価」パターンであり、まとめて解消する
+  価値がある。
+
+--- [優先度: 低 / 再利用性] ------------------------------------------
+core.form_services.save_or_none()がIntegrityErrorのみ捕捉し、同種のDB書き込みヘルパー間で
+捕捉範囲が非対称
+--------------------------------------------------------------------
+場所: core/form_services.py save_or_none()（8-27行）
+
+内容:
+  `save_or_none`は`except IntegrityError:`のみで、`DatabaseError`（接続断等）は捕捉しない
+  （未捕捉のまま伝播しDjango既定の500になる）。一方、同じ「フォーム保存」という文脈を持つ
+  `core/views.py`の`OtherMainEditView.post`/`OtherLogoutEditView.post`は
+  `except (IntegrityError, DatabaseError):`と両方を捕捉し、利用者にエラーメッセージを返す設計に
+  なっている。`save_or_none`はdocstringで意図的に「最終的な一意性はモデルのUniqueConstraintに
+  委ねる」ため`IntegrityError`のみを対象にしていると読めるが、DB接続断のような一時的な
+  `DatabaseError`まで無防備というのは、周辺の書き込みパスと粒度が揃っていない。
+  （なお、前段の「BaseScopedMasterDeleteView」の指摘と合わせて見ると、core/master_views.py
+  経由の3操作＝登録・編集・削除のうち、登録/編集はIntegrityErrorのみ保護、削除は無保護、と
+  段階的に手薄になっている）。
+
+失敗シナリオ（保守性）:
+  分類/カテゴリーマスタの登録・編集中にDB接続が瞬断すると、`save_or_none`を通しても
+  `DatabaseError`はそのまま未捕捉で伝播し、Djangoの既定500ページが表示される
+  （`logger.exception`によるログも、利用者向けの案内も無い）。他の設定画面系エンドポイントとの
+  一貫性を保つなら`(IntegrityError, DatabaseError)`に広げるか、意図的にIntegrityErrorのみに
+  絞っている理由をdocstringに明記するのが望ましい。
+
+
+====================================================================
+■ CLAUDE.mdコーディング規約との整合性
+====================================================================
+
+- ビューはCBVのみ: audit/core双方とも全ビューがView/TemplateViewのサブクラスで、関数ベース
+  ビューは無し。準拠。
+- モデルのverbose_name/help_text/エラーメッセージ/docstringの日本語統一:
+  `audit.AuditLog`は全フィールドが日本語verbose_name/help_text。準拠。
+- 例外処理（try/exceptで具体的な例外型を捕捉しlogger.exceptionで記録、bare except:禁止）:
+  core全体でbare exceptは無し。ファイルI/O境界（upload_services.py、pdf_text_embed_services.py、
+  ocr_layout_services.py等）はいずれも具体的な例外型（OSError等）またはコメントで理由を明記した
+  上での広いException捕捉（「1件の失敗で全体を止めない」という設計判断が明記されている）で、
+  規約に沿う。ただし上記「正しさのバグ」「再利用性」セクションで挙げた
+  `BaseScopedMasterDeleteView.post()`（例外処理が丸ごと無い）・`save_or_none()`
+  （DatabaseErrorが対象外）の2点は、この規約の「本質的でない処理の失敗で本処理まで巻き込まない
+  という設計判断が有効な場合は握りつぶして良いが、その場合は必ずコメントで理由を明記する」に
+  該当する説明が無いまま保護が手薄になっており、要修正。
+- ログ整備（logger = logging.getLogger(__name__)、権限拒否等はlogger.warning）:
+  audit/core全モジュールでlogger定義済み。`OtherSettingsView.post`の管理者による誤アクセス、
+  `BaseFileServeView`/`BasePendingPreviewView`のダウンロード権限拒否、`BaseOptionListAPIView`の
+  未知type、`BaseBulkDownloadView`/`resolve_ordered_pks`の不正pks等、想定外の分岐は一貫して
+  logger.warningで記録されている。準拠。
+- 一覧画面のページネーションはDjango Paginator: `AuditLogListView`・
+  `BaseScopedMasterListView`・`OtherSettingsView._render_main`いずれもPaginator使用。準拠。
+- 共通処理をcoreへ集約: `core/master_views.py`・`core/record_views.py`・`core/upload_views.py`・
+  `core/scoping_services.py`・`core/form_services.py`・`core/deletion_services.py`・
+  `core/zip_services.py`・`core/search_services.py`・`core/bulk_edit_services.py`のいずれも
+  ドキュメント上で「documents/contracts/masters間の重複実装を集約した」経緯が明記されており、
+  規約の実践例として一貫している。準拠。
+- 未実装・対象外の機能をUIに残す場合はdisabled+titleで明示: audit/core配下の.pyファイルには
+  該当するUI分岐が無いため対象外（テンプレートは本レビュー範囲外）。
+- 新機能追加時のユニットテスト: `core/tests.py`（1617行）・`audit/tests.py`（262行）とも
+  広範にカバーされている。ただし上記「正しさのバグ」1件目（save_pending_filesのエイリアシング）
+  で指摘した通り、既存テストは新規セッション（pendingが空の状態からの失敗）のみを検証しており、
+  「既存pending存在下での途中失敗」という分岐は未カバー。
+
+
+====================================================================
+■ まとめ（優先度別件数）
+====================================================================
+高: 0件
+中: 4件（save_pending_files()のセッション不整合／BaseScopedMasterDeleteView例外処理欠如／
+         AuditLogCsvExportViewの二重クエリ／AuditLogのGINインデックス欠如）
+低: 2件（BaseBulkDownloadViewの二重クエリ／save_or_noneの捕捉範囲の非対称）
+
+====================================================================
+■ 対応状況（2026-08-26）
+====================================================================
+中優先度4件はすべて修正済み（`python manage.py test audit core`で115件成功を都度確認）。
+
+- save_pending_files()のセッション不整合: core/upload_services.py
+  `pending = session.get(session_key, [])`を`list(session.get(session_key, []))`に変更し、
+  セッション内部dictの同一listオブジェクトを直接書き換えないようにした。
+- BaseScopedMasterDeleteView例外処理欠如: core/master_views.py
+  `obj.save()`を`django.db.Error`でtry/exceptし、`logger.exception`＋`messages.error`＋
+  一覧へのredirectを追加（core.record_views.BaseDeleteViewと同じ方針）。
+- AuditLogCsvExportViewの二重クエリ: audit/views.py
+  `qs.count()`を廃止し、CSV行を書き出すループ内でカウンタをインクリメントする方式に変更。
+- AuditLogのGINインデックス欠如: audit/models.py + audit/migrations/0002。
+  event_messageは素の列にGinIndex(gin_trgm_ops)を追加。employee_nameは
+  `core.text_normalization.filter_by_full_name`が`Replace(Replace(F("employee_name"), "　", ""),
+  " ", "")`という式でicontains検索するため、素の列へのインデックスでは使われない。同じ式に
+  対する式インデックス（`GinIndex(OpClass(Replace(...), name="gin_trgm_ops"), ...)`）を追加した。
+  なお、gin_trgm_ops opclassはpg_trgm拡張（core/migrations/0001_enable_pg_trgm）が必要だが、
+  documents/contracts側の既存GinIndexはこの依存を明示していなかったため、テストDB構築時の
+  マイグレーション適用順序次第でpg_trgm拡張の有効化前にインデックス作成が実行され
+  `ProgrammingError: operator class "gin_trgm_ops" does not exist`で失敗することを実際に確認した。
+  audit側のマイグレーションでは`('core', '0001_enable_pg_trgm')`への依存を明示して回避した
+  （documents/contracts側は既存マイグレーションが既に適用済み環境で運用されているため、今回は
+  遡って修正せず、audit側の新規マイグレーションのみ対応）。
+
+低優先度2件は指摘通り未修正（理由: 実害が小さい／設計判断の明文化のみで挙動変更を伴わないため、
+今回のスコープでは見送り。将来手を入れる際にまとめて対応する）。
+- BaseBulkDownloadViewの二重クエリ（core/record_views.py）: 一括ダウンロードの対象件数は
+  検索結果一覧の表示件数程度に収まり実害が小さい。
+- save_or_noneの捕捉範囲の非対称（core/form_services.py）: DatabaseError非捕捉は setUp
+  時点でも仕様上意図的とも読める境界線上の判断であり、挙動変更（利用者向けエラー文言の追加等）を
+  伴うため、単独では見送り、BaseScopedMasterDeleteViewの対応と合わせて次回まとめて検討する。

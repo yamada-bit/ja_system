@@ -8,7 +8,6 @@ from core.forms import (
     MATCH_AND,
     MATCH_CHOICES,
     MATCH_OR,
-    SEARCH_RADIO_DEFAULTS,
     apply_radio_defaults,
     scoped_group_and_category_querysets,
     search_year_choices,

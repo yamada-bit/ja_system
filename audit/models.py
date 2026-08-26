@@ -1,6 +1,9 @@
 import logging
 
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
+from django.db.models import F, Value
+from django.db.models.functions import Replace
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,23 @@ class AuditLog(models.Model):
         verbose_name_plural = "操作履歴ログ"
         indexes = [
             models.Index(fields=["-timestamp"]),
+            # documents.Document/contracts.Contractと同じpg_trgm(gin_trgm_ops)方針をicontains検索に
+            # 適用する（品質レビューで発見、無制限に増え続けるテーブルに対しキーワード検索のたびに
+            # フルスキャンが発生していた、2026-08-26修正）。
+            # employee_nameは core.text_normalization.filter_by_full_name が
+            # Replace(Replace(F("employee_name"), "　", ""), " ", "") というスペース除去済みの式で
+            # icontains検索するため、素の列に対するGinIndexでは使われない。実際に検索で評価される
+            # 式と完全に一致する式インデックスを張る必要がある。
+            GinIndex(
+                OpClass(
+                    Replace(Replace(F("employee_name"), Value("　"), Value("")), Value(" "), Value("")),
+                    name="gin_trgm_ops",
+                ),
+                name="auditlog_employee_name_trgm",
+            ),
+            # event_messageはfilter_audit_log_querysetでスペース区切りAND複数icontainsを行うのみで
+            # 変換式を挟まないため、素の列へのGinIndexで足りる。
+            GinIndex(fields=["event_message"], name="auditlog_event_message_trgm", opclasses=["gin_trgm_ops"]),
         ]
 
     def __str__(self):

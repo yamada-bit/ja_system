@@ -135,6 +135,7 @@
       {% endif %}
     </div>
   </div>
+  {{ departments_pulldown|json_script:"departments-data" }}
 {% endblock %}
 
 {% block extra_script %}
@@ -145,7 +146,7 @@
   // 表示する<option>を絞り込む。検索欄は必須項目ではないため「(全て)」は常に残し、
   // 部課select自体の無効化はしない（登録/編集と異なり本店以外でも部課の絞り込みが有効）。
   (function () {
-    const departments = {{ departments_json|safe }};
+    const departments = JSON.parse(document.getElementById('departments-data').textContent);
     const branchSelect = document.getElementById('id_branch_code');
     const sectionSelect = document.getElementById('id_section_code');
     if (!branchSelect || !sectionSelect) return;

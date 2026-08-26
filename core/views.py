@@ -138,7 +138,10 @@ class OtherSettingsView(LoginRequiredMixin, View):
         # 常時disabled」のページャー描画のままで、部署数が増えても実際のページングが機能しない
         # 一貫性の欠如があった）。
         rows = []
-        for department in Department.objects.order_by("branch_code", "section_code"):
+        # select_relatedが無いと部署件数分のN+1クエリになる（品質レビューで発見、2026-08-26修正）。
+        for department in Department.objects.select_related("menu_item_setting").order_by(
+            "branch_code", "section_code"
+        ):
             setting = getattr(department, "menu_item_setting", None)
             rows.append({"department": department, "setting": setting})
         logout_setting, _ = SystemSetting.objects.get_or_create(pk=1)

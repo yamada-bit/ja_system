@@ -13,7 +13,7 @@ from core.csv_services import sanitize_csv_row
 from core.double_submit import consume_token, issue_token
 from permissions.forms import AuthorityEditForm, AuthoritySearchForm
 from permissions.mixins import SettingsMenuAccessMixin
-from permissions.models import PermissionProfile, PermissionRole
+from permissions.models import CSV_EXPORT_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
 from permissions.services import (
     can_manage_target,
     filter_authority_queryset,
@@ -78,13 +78,8 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         response["Content-Disposition"] = 'attachment; filename="authority_list.csv"'
         writer = csv.writer(response)
         writer.writerow(
-            [
-                "職員番号", "部署", "氏名", "役職", "権限",
-                "文書管理-分類(表示)", "文書管理-文書(保存満了日変更)", "文書管理-文書(ダウンロード)",
-                "契約書-部門間閲覧設定", "契約書-分類(表示)",
-                "契約書-契約書(契約書情報変更)", "契約書-契約書(ダウンロード)",
-                "電子決裁-書類毎の閲覧設定", "電子決裁-書類名(作成・変更)", "電子決裁-申請書(保存期間)",
-            ]
+            ["職員番号", "部署", "氏名", "役職", "権限"]
+            + [str(PermissionProfile._meta.get_field(name).verbose_name) for name in CSV_EXPORT_FIELDS]
         )
         for employee in qs:
             # 未設定判定はpermissions.services.get_profileに一元化する
@@ -122,25 +117,22 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
 
 
 def _flags_row(profile):
-    """AuthorityCsvExportViewのCSVヘッダー（10列、文書管理3列＋契約書4列＋電子決裁3列）と
-    同じ順序でPermissionProfileのフラグを文字列化する。列の増減や並び替えをする際はヘッダー行
-    （AuthorityCsvExportView.get内のwriterow呼び出し）とこの関数の両方を対応させて修正すること。
+    """AuthorityCsvExportViewのCSVヘッダーと同じ順序（CSV_EXPORT_FIELDS）でPermissionProfileの
+    フラグを文字列化する。permissions.models.FLAG_FIELDS/MULTI_FIELDSを単一情報源として
+    列を自動生成するため、新しいフラグ追加時にヘッダーとこの関数がずれる心配が無い
+    （コード監査で発見：以前はCSVヘッダーと本関数の両方に個別ハードコードされており、
+    FLAG_FIELDS/MULTI_FIELDSとは別に手動同期が必要な3箇所目になっていた、2026-08-25修正）。
     profileがNone（PermissionProfile未設定の職員）の場合は全列を空文字にする。
     """
     if profile is None:
-        return [""] * 10
-    return [
-        ",".join(g.name for g in profile.doc_visible_groups.all()),
-        "〇" if profile.doc_retention_edit else "",
-        "〇" if profile.doc_download else "",
-        ",".join(str(d) for d in profile.contract_visible_departments.all()),
-        ",".join(g.name for g in profile.contract_visible_groups.all()),
-        "〇" if profile.contract_edit else "",
-        "〇" if profile.contract_download else "",
-        "〇" if profile.eapproval_view_setting else "",
-        "〇" if profile.eapproval_doc_name_manage else "",
-        "〇" if profile.eapproval_retention else "",
-    ]
+        return [""] * len(CSV_EXPORT_FIELDS)
+    row = []
+    for name in CSV_EXPORT_FIELDS:
+        if name in MULTI_FIELDS:
+            row.append(",".join(str(obj) for obj in getattr(profile, name).all()))
+        else:
+            row.append("〇" if getattr(profile, name) else "")
+    return row
 
 
 class AuthorityEditView(LoginRequiredMixin, View):

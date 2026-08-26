@@ -1,4 +1,3 @@
-import json
 import logging
 
 from organizations.models import RETIRED_SECTION_CODE, Department, DepartmentViewScope
@@ -76,20 +75,42 @@ def section_choices():
     return [("", "(全て)")] + [(code, name) for code, name in dict(sections).items()]
 
 
-def departments_json():
+def department_composite_order_by(qs, sort_dir, tiebreaker):
+    """本支所コード→部課コードの複合キーで並び替える共通ヘルパー。
+
+    「部署」列は部署名ではなく部課コードで昇順/降順にする（xlsx 分類管理!B58・カテゴリー管理!B62・
+    権限管理!B48-50等、複数画面で共通の要件）。department FKを持つモデルの一覧・CSV出力で
+    section_codeのみでソートすると本支所をまたいで無関係にソートされてしまうため、常に
+    branch_code→section_codeの複合キーにする必要がある。この分岐がpermissions.services.
+    filter_authority_queryset、masters.views.GroupListView/CategoryListViewの計3箇所で
+    独立に手書きされていた（masters/views.py自身のコメントが重複を認識しつつインライン実装して
+    いた）ため、Department関連の共通ロジックを持つ本モジュールに集約した
+    （コード監査で発見、2026-08-25修正）。
+
+    `tiebreaker`は最終的な安定ソート用の追加フィールド（呼び出し元のモデルによって
+    "employee_no"/"code"等が異なるため引数で指定する）。
+    """
+    prefix = "-" if sort_dir == "desc" else ""
+    return qs.order_by(f"{prefix}department__branch_code", f"{prefix}department__section_code", tiebreaker)
+
+
+def departments_list():
     """本支所→部課の連動プルダウン用データ（テンプレートのJSでフィルタする）。
     accounts（職員マスタ登録・編集・一覧検索）とorganizations（部署管理一覧検索）の両方で
     同じ連動プルダウンJSを使うため、Department自体が属するこのモジュールに集約する。
+
+    戻り値はPythonのlistのまま返す（呼び出し元テンプレートで`|json_script`フィルタに渡し、
+    エスケープはDjango側に一元化する。branch_name/section_nameはフリーテキストのため、
+    ここで`json.dumps`して`|safe`で埋め込むと`</script>`インジェクションの格納型XSSになる
+    ——過去に発見・修正した問題。詳細はCLAUDE.md原本フィデリティ運用方針参照）。
     """
-    return json.dumps(
-        [
-            {
-                "id": d.pk,
-                "branch_code": d.branch_code,
-                "branch_name": d.branch_name,
-                "section_code": d.section_code,
-                "section_name": d.section_name,
-            }
-            for d in Department.objects.order_by("branch_code", "section_code")
-        ]
-    )
+    return [
+        {
+            "id": d.pk,
+            "branch_code": d.branch_code,
+            "branch_name": d.branch_name,
+            "section_code": d.section_code,
+            "section_name": d.section_name,
+        }
+        for d in Department.objects.order_by("branch_code", "section_code")
+    ]

@@ -1817,3 +1817,117 @@ Pythonの自動テストでは`edit_url`の値（None/URL文字列）は元々�
 実装方式（`display:none`か`disabled`か）も揃っているか確認すること。1つのボタンで先に
 `disabled`から`display:none`への変更経緯があっても、隣のボタンに同じ注記が後から追加された際に
 その変更が横展開されず古い実装方式のまま残ることがある。
+
+## audit/coreアプリ CLAUDE.mdコーディング規約準拠監査（2026-08-25〜26集約後の再監査、2026-08-26）
+
+`review_rule_audit_core.txt`にてaudit/coreアプリ全体（models/views/services/forms/urls/admin/
+tests、および2026-08-25〜26のdocuments/contracts間重複ロジック集約で新設された
+core.record_views/master_views/upload_views/scoping_services/deletion_services/zip_services/
+bulk_edit_services/csv_services/search_services/storage_paths/double_submit/form_services等）
+を対象にCLAUDE.md「コーディング規約」の各項目ごとに突き合わせた。
+
+### 結果：重大な規約違反なし、高・中優先度の指摘は0件
+ビューのCBV限定、verbose_name/help_text/エラーメッセージの日本語統一、設定のbase.py集約、
+アップロードファイル本体の分離、Argon2優先、監査ログの一元化、core相当への重複排除、
+「なぜ」重視のコメント、ログ整備、例外処理の完成度、Paginator使用、disabled+title、
+ファイル役割分担、Djangoテンプレート複数行コメントの罠、いずれも遵守を確認。
+`manage.py makemigrations --check --dry-run audit core`（差分無し）・
+`manage.py test audit core`（115件PASS）も確認済み。指摘は低優先度2件のみだった
+ため、ユーザー指示（「低優先度は修正せず、理由付きで記録だけ残して」）に基づき
+いずれも意図的に未修正。
+
+### 見送った低優先度（2件、ドキュメントのみ・修正なし）
+- `.env.example`への記載漏れ3件：`SESSION_IDLE_TIMEOUT_MINUTES`
+  （`config/settings/base.py:158`、`core.middleware.SessionIdleTimeoutMiddleware`が
+  `masters.SystemSetting`未設定・DB未接続時のフォールバック値として参照）・`MEDIA_ROOT`
+  （`base.py:123`）・`LOG_DIR`（`base.py:204`）。他の設定値は全て`.env.example`にコメント付きで
+  記載済みなのに対しこの3つだけ抜けている。既定値で動作するため実害は無いが、運用担当者が
+  「変更可能な設定値の一覧」として参照した際にこの3項目の存在に気づけない状態。将来
+  `.env.example`を更新する機会に、他の設定値と同じ形式（コメント＋既定値をコメントアウトで
+  例示）で追記するのが望ましい。
+- `core/notice_services.py`のimportに理由不明な非対称性：`get_notice_counts()`は
+  `from documents.models import Document`をモジュール冒頭でトップレベルimportする一方、
+  `from contracts.models import Contract`（および`organizations.services`/`permissions.services`の
+  各関数）は関数内での遅延importにしている。documents/contracts双方のmodels.pyは
+  `core.models`のみに依存しており循環import回避という他の遅延importと同じ理由が
+  Document側には成立しないように見えるが、動作上の不具合ではなく将来この関数を読む際に
+  「なぜ片方だけトップレベルか」を確認する手間が生じる程度の影響に留まる。対応するなら
+  意図的な理由をコメントで明記するか、4つとも同じimport方式に揃えて非対称性を解消する。
+
+## audit/coreアプリ テストカバレッジ棚卸しの反映（2026-08-26）
+
+`review_test_audit_core.txt`（audit/coreアプリのテストカバレッジ棚卸し、優先度高4件・中7件・
+低6件）のうち、ユーザー指示（「優先度「高」「中」の不足テストを1件ずつ順番に追加して。
+python manage.py test audit coreで確認してから次に進んで。低優先度は追加せず、理由付きで
+記録だけ残して」）に基づき、高・中優先度の指摘に対応するテストを1件ずつ追加し、都度
+`manage.py test audit core`で確認しながら進めた。
+
+### 追加したテスト（高優先度4件）
+1. `core/tests.py` `SessionIdleTimeoutMiddlewareTests`（3件）：自動ログアウト本体
+   （アイドル判定・ログアウト実行・`SystemSetting`未設定時の`settings.SESSION_IDLE_TIMEOUT_MINUTES`
+   フォールバック）。テストクライアントのセッションに`last_activity_ts`を直接書き込み、
+   経過時間を模擬した。
+2. `core/tests.py` `OtherViewsDoubleSubmitTokenTests`（3件）：`OtherSettingsView.post`/
+   `OtherMainEditView.post`/`OtherLogoutEditView.post`の二重送信トークン不正時分岐。
+3. `audit/tests.py` `AuditLogListViewTests.test_filter_by_date_range`（1件）：
+   `filter_audit_log_queryset`の`date_start`/`date_end`。`timestamp`が`auto_now_add`のため、
+   作成後に`queryset.update()`で日時を書き換えて検証した。
+4. `masters/tests.py` `MasterDeleteDatabaseErrorFallbackTests`（1件）：
+   `BaseScopedMasterDeleteView.post`の`obj.save()`が`DBError`を送出した場合のフォールバック
+   （2026-08-26に品質レビューで発見・追加されたばかりの例外処理）。既存の
+   `MasterDoubleSubmitTokenTests`docstringの判断（GroupDeleteView/CategoryDeleteViewは
+   `core.master_views.BaseScopedMasterDeleteView`の共通実装を完全共有するためGroup側のみで
+   十分）を踏襲し、Group側のみ追加、Category側は重複として省略した。
+
+### 追加したテスト（中優先度、6件対応・1件は既存判断を踏襲し見送り）
+5. `core/tests.py` `NoticeCountsTests`に2件追加：契約書側の`expiring_soon_contracts`/
+   `recently_deleted_contracts`、および`contract_searchable_department_ids`による部署スコープ
+   （`test_other_department_document_not_counted_for_staff`の契約書版）。
+6. `core/tests.py` `OtherViewsDatabaseWriteFailureTests`（2件）：`OtherSettingsView.post`
+   （パスワード保存）/`OtherMainEditView.post`（メイン画面項目設定保存）のDB書き込み失敗
+   （`DatabaseError`）分岐。高優先度2の`OtherViewsDoubleSubmitTokenTests`と合わせて
+   `core/views.py`の3画面の例外系をまとめて手当てした。
+7. `core/tests.py` `AddMonthsClampTests`（4件）：`add_months`/`_days_in_month`の月末日クランプ
+   （1/31→2/28・うるう年2/29）・年またぎ。
+8. `documents/tests.py` `SearchFormRadioDefaultsInitialAccessTests`（1件）：
+   `apply_radio_defaults`/`InlineRadioSelect`の「初回アクセス時（GETに`title_match`等の
+   キーが無い状態）にchecked状態で表示される」分岐。`SearchForm(data={})`で検証した
+   （documents側のみ追加。contracts.forms.SearchFormも同じ`core.forms.apply_radio_defaults`を
+   共有する完全同一実装のため、指摘4・7と同様の理由で重複テストとして省略）。
+9. `documents/tests.py` `DownloadViewTests.test_download_audit_log_records_document_privacy_flag_value`
+   （1件）：`BaseFileServeView.audit_extra_kwargs()`が`Document.privacy_flag`の値を
+   ハードコードせずそのまま渡すことを、既定値(True)ではなくFalseを明示設定して確認した。
+10. `documents/tests.py`・`contracts/tests.py`の`DownloadViewTests`にそれぞれ
+    `test_display_name_strips_uuid_prefix`を追加（2件）：`UuidPrefixedFilenameMixin.display_name`
+    がDocument/Contract本体側でもUUIDプレフィックス除去後の元ファイル名を返すことを直接確認した。
+
+11については追加せず見送った（次節参照）。
+
+### 見送った中優先度1件（既存の低優先度判断を踏襲）
+- `core/master_views.py` `CategoryListView.apply_special_sort`の"group"列desc方向は、
+  `review_test_organizations_masters.txt`の棚卸し時点で既に低優先度No.18として発見済みで
+  「見送り済み」と記録されていた同一の指摘が、共有実装であるため本棚卸し（audit/core側）にも
+  再掲されたもの。既に一度なされた判断を覆す新しい事情は無いため、本対応でもテストを追加せず
+  一貫して見送った。
+
+### 見送った低優先度（6件、ドキュメントのみ・修正なし）
+- `audit/models.py` `AuditLog.__str__`、GinIndex定義自体（DB制約と同様、実害の乏しいインフラ
+  設定として他レポートでも低優先度扱い）。
+- `audit/forms.py` `AuditLogSearchForm`の`date_start`/`date_end` widget自体の単体テスト
+  （優先度高3で対応したView/services経由の検証が既にあるため、フォーム単体の直接テストは
+  重複性が高く見送った）。
+- `core/double_submit.py` `issue_token`/`consume_token`/`reject_if_resubmitted`自体の直接単体
+  テストが無い（他アプリのView経由で広く間接カバー済みのため、他レポートと同様に低優先度）。
+- `core/text_normalization.py` `normalize_for_search`の直接単体テスト（NFKC正規化の入出力）が
+  無い（View経由で実質カバー済み）。
+- `core/bulk_edit_services.py` `resolve_ordered_pks`の部署スコープ外pk除外だけを狙った
+  専用テストが無い（`BaseBulkDownloadView`の同種フィルタで間接カバー済み）。
+- `core/upload_views.py` `BaseChunkUploadAPIView`・`core/record_views.py` `BaseBulkDownloadView`の
+  一部分岐がcontracts側テストのみ欠けている（`review_test_doc_contract.txt`指摘5・9として
+  既出、完全共有コードのため見送り済み）。
+
+### 検証
+高・中優先度の各指摘を1件ずつ追加するたびに`manage.py test audit core`を実行し、都度
+全件PASSを確認しながら進めた。最終的に`manage.py test audit core`は130件PASS（棚卸し時点の
+115件から15件純増）、影響範囲を含めた`manage.py test audit core documents contracts masters`は
+467件全件PASSで完了。

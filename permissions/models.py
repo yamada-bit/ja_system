@@ -134,3 +134,28 @@ class PermissionProfile(models.Model):
 
     def __str__(self):
         return f"{self.employee} ({self.get_role_display()})"
+
+
+# permissions/views.py AuthorityCsvExportView（一覧のCSV出力）が使うフラグ列の並び順
+# （＝原本HTML一覧の列順、モデルのフィールド宣言順と一致）。以前はCSVヘッダー・_flags_row()の
+# どちらもFLAG_FIELDS/MULTI_FIELDSを参照せず個別に手書きされており、両ファイルとは別に手動同期が
+# 必要な3箇所目になっていた（コード監査で発見、2026-08-24追記）。ヘッダー文言は各フィールドの
+# verbose_name（このファイル内で定義済み）をそのまま使うため、ここでは文言を持たない。
+# 並び順自体はモデルのフィールド宣言順から機械的に導出できない（ManyToManyFieldはモデルの
+# `_meta.get_fields()`がアプリ起動完了前（AppRegistryNotReady）に呼べず、モジュール読み込み時には
+# 解決できないため）ので、この列挙自体は手書きのまま残す。ただしFLAG_FIELDS/MULTI_FIELDSに
+# 追加したフィールドをここに追加し忘れた場合はpermissions.tests.PermissionModelsTest
+# .test_csv_export_fields_matches_flag_and_multi_fieldsが即座に検知する
+# （コード監査で発見、2026-08-25修正）。
+CSV_EXPORT_FIELDS = [
+    "doc_visible_groups",
+    "doc_retention_edit",
+    "doc_download",
+    "contract_visible_departments",
+    "contract_visible_groups",
+    "contract_edit",
+    "contract_download",
+    "eapproval_view_setting",
+    "eapproval_doc_name_manage",
+    "eapproval_retention",
+]

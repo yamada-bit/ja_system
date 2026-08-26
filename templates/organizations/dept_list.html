@@ -87,13 +87,14 @@
       </div>
     </div>
   </div>
+  {{ departments_pulldown|json_script:"departments-data" }}
 {% endblock %}
 
 {% block extra_script %}
 <script>
   // accounts/staff_list.htmlと同じ連動プルダウンJS（xlsx 部署管理!B38）。
   (function () {
-    const departments = {{ departments_json|safe }};
+    const departments = JSON.parse(document.getElementById('departments-data').textContent);
     const branchSelect = document.getElementById('id_branch_code');
     const sectionSelect = document.getElementById('id_section_code');
     if (!branchSelect || !sectionSelect) return;

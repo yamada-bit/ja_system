@@ -1,6 +1,9 @@
 import logging
 import uuid
 
+from django.contrib import messages
+from django.shortcuts import redirect
+
 logger = logging.getLogger(__name__)
 
 SESSION_KEY = "double_submit_tokens"
@@ -44,3 +47,19 @@ def consume_token(session, form_id, submitted_token):
     del tokens[form_id]
     session.modified = True
     return True
+
+
+def reject_if_resubmitted(request, form_id, redirect_to, *redirect_args, **redirect_kwargs):
+    """POST冒頭での「トークン検証→失敗ならmessages.error+redirect」という定型パターンの共通処理。
+
+    organizations/masters系の登録・編集・削除ビューで同一の4行パターンが11箇所重複していた
+    ため集約した（コード監査で発見、2026-08-25修正）。戻り値がNoneでなければ呼び出し元は
+    それをそのままreturnする（`if (resp := reject_if_resubmitted(...)) is not None: return resp`）。
+    `redirect_to`以降は`django.shortcuts.redirect`にそのまま渡すため、pk付きURL等
+    （`redirect_to="masters:class_edit", pk=pk`）にも対応する。
+    """
+    submitted_token = request.POST.get("token", "")
+    if consume_token(session=request.session, form_id=form_id, submitted_token=submitted_token):
+        return None
+    messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
+    return redirect(redirect_to, *redirect_args, **redirect_kwargs)

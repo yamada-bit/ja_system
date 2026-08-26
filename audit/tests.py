@@ -1,6 +1,8 @@
+import datetime
 from unittest import mock
 
 from django.test import TestCase
+from django.utils import timezone
 
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
@@ -177,6 +179,25 @@ class AuditLogListViewTests(TestCase):
         self.assertContains(response, "山田花子")
         # ログイン中ユーザー名(ヘッダーのuser-info)自体は「テスト太郎」を含むため、
         # 一覧テーブルの行を特定できる文言で絞り込み結果を確認する。
+        self.assertNotContains(response, "ログイン</td>")
+
+    def test_filter_by_date_range(self):
+        """xlsx 操作履歴ログ!B33-34(Rev1.1)「操作日(開始)/操作日(終了)」の日付範囲検索。
+        フォーム定義の先頭2フィールドだが、AuditLogListViewTests/AuditLogCsvExportViewTestsの
+        どのテストからも一度も指定されておらず未検証だった（テストカバレッジ棚卸しで発見、
+        2026-08-26追加）。timestampはauto_now_addのため、作成後にqueryset.update()で
+        任意の日時へ書き換える。
+        """
+        login_entry = AuditLog.objects.get(action="ログイン")
+        download_entry = AuditLog.objects.get(action="文書 ダウンロード")
+        AuditLog.objects.filter(pk=login_entry.pk).update(
+            timestamp=timezone.make_aware(datetime.datetime(2026, 1, 10))
+        )
+        AuditLog.objects.filter(pk=download_entry.pk).update(
+            timestamp=timezone.make_aware(datetime.datetime(2026, 1, 20))
+        )
+        response = self.client.get("/audit/", {"date_start": "2026-01-15", "date_end": "2026-01-25"})
+        self.assertContains(response, "文書 ダウンロード")
         self.assertNotContains(response, "ログイン</td>")
 
     def test_pagination_splits_across_pages(self):

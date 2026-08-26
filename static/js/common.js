@@ -287,13 +287,24 @@ function renderPopupPopupItems() {
     const row = document.createElement("div");
     row.className = "popup-select-row";
 
+    // item.labelはマスタのフリーテキスト項目（部署名・分類名・カテゴリー名等）を含み、
+    // HTMLエスケープ無しでinnerHTMLに埋め込むと格納型XSSになるため、DOM APIで組み立てる。
+    const label = document.createElement("label");
+    const input = document.createElement("input");
     if (activePopupMode === "search") {
-      const isChecked = currentValues.includes(String(item.value)) ? "checked" : "";
-      row.innerHTML = `<label><input type="checkbox" class="item-checkbox" value="${item.value}" data-label="${item.label}" ${isChecked}> ${item.label}</label>`;
+      input.type = "checkbox";
+      input.className = "item-checkbox";
+      input.checked = currentValues.includes(String(item.value));
     } else {
-      const isChecked = currentValues[0] === String(item.value) ? "checked" : "";
-      row.innerHTML = `<label><input type="radio" name="pop-radio" value="${item.value}" data-label="${item.label}" ${isChecked}> ${item.label}</label>`;
+      input.type = "radio";
+      input.name = "pop-radio";
+      input.checked = currentValues[0] === String(item.value);
     }
+    input.value = item.value;
+    input.dataset.label = item.label;
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(" " + item.label));
+    row.appendChild(label);
     container.appendChild(row);
   });
 

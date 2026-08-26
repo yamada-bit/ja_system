@@ -7,7 +7,7 @@ from organizations.models import Department, DepartmentViewScope
 from organizations.services import (
     apply_dept_action,
     branch_choices,
-    departments_json,
+    departments_list,
     section_choices,
     visible_department_ids,
 )
@@ -184,6 +184,45 @@ class DeptSettingsMenuAccessControlTests(TestCase):
         self.assertIn("/accounts/login/", response.url)
 
 
+class OptionListAPIResponseContentTests(TestCase):
+    """organizations.api.OptionListAPIViewはアクセス制御のみ検証されており、実際のレスポンス
+    内容（`_department_items()`が返す{value, label}のリスト、branch_code→section_code順）が
+    一度も検証されていなかった（テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept_b = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_dept_options_returns_all_departments_ordered_by_branch_and_section_code(self):
+        response = self.client.get("/organizations/api/options/", {"type": "dept"})
+        self.assertEqual(
+            response.json(),
+            {
+                "items": [
+                    {"value": self.dept_a.pk, "label": str(self.dept_a)},
+                    {"value": self.dept_b.pk, "label": str(self.dept_b)},
+                ]
+            },
+        )
+
+    def test_unsupported_type_returns_400(self):
+        """BaseOptionListAPIView.getのelse分岐（type未指定・未対応値）は本画面が使わない
+        分岐だが、共通実装として未検証だった（本画面はdeptのみ使用するため実害は小さい）。"""
+        response = self.client.get("/organizations/api/options/", {"type": "unsupported"})
+        self.assertEqual(response.status_code, 400)
+
+
 class DeptRegistEditAuditLogTests(TestCase):
     """部署管理の新規登録・更新もmasters/permissions系の登録・更新ビューと同様に
     audit_services.log()で操作履歴ログへ記録されること（コード監査で発見された記録漏れの修正）。
@@ -224,6 +263,51 @@ class DeptRegistEditAuditLogTests(TestCase):
         self.assertIn("777", entry.event_message)
 
 
+class DeptDoubleSubmitTokenTests(TestCase):
+    """二重送信対策トークン不正時（core.double_submit.consume_tokenがFalseを返すケース）の分岐が
+    organizations側の登録・編集Viewで未テストだった（2026-08-25付permissions/accounts棚卸しの
+    中優先度7と同一パターン。テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_regist_post_with_invalid_token_shows_error_and_does_not_save(self):
+        response = self.client.post(
+            "/organizations/regist/",
+            {
+                "token": "invalid-token", "branch_code": "999", "branch_name": "新支店",
+                "section_code": "01", "section_name": "総務部",
+            },
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        self.assertFalse(Department.objects.filter(branch_code="999").exists())
+
+    def test_edit_post_with_invalid_token_shows_error_and_does_not_save(self):
+        response = self.client.post(
+            f"/organizations/{self.department.pk}/edit/",
+            {
+                "token": "invalid-token", "branch_name": "本店(改)", "section_name": "総務部(改)",
+                "dept_action": "none",
+            },
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        self.department.refresh_from_db()
+        self.assertEqual(self.department.branch_name, "本店")
+
+
 class DeptRegistIntegrityErrorTests(TestCase):
     """DeptRegistForm.clean()のcheck-then-act方式では防ぎきれない、DBレベルのUniqueConstraint
     違反(IntegrityError)が起きた場合でも、生の例外(500)ではなく利用者にわかるエラーメッセージを
@@ -258,6 +342,59 @@ class DeptRegistIntegrityErrorTests(TestCase):
         messages = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("登録された可能性" in m for m in messages))
         self.assertFalse(Department.objects.filter(branch_code="555").exists())
+
+
+class DeptEditIntegrityErrorTests(TestCase):
+    """DeptEditView.postはform.save()とapply_dept_action()を単一のtransaction.atomic()で
+    まとめており、統合・分割実行中にIntegrityErrorが発生した場合はform.save()側の変更も含めて
+    ロールバックされる（2026-08-25にコードレビュー指摘を受けて追加された修正）。
+    apply_dept_actionをモックしてIntegrityErrorを発生させ、DeptRegistIntegrityErrorTestsと
+    同様に生の例外(500)ではなくフレンドリーメッセージを返し、DBには一切反映されないことを
+    確認する回帰テスト。
+    """
+
+    def setUp(self):
+        self.dept_x = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="部署X"
+        )
+        self.dept_y = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="部署Y"
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.dept_x, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_integrity_error_during_merge_rolls_back_form_save_too(self):
+        from unittest.mock import patch
+
+        from django.db import IntegrityError
+
+        token = self.client.get(f"/organizations/{self.dept_x.pk}/edit/").context["token"]
+        with patch("organizations.views.apply_dept_action", side_effect=IntegrityError("duplicate key")):
+            response = self.client.post(
+                f"/organizations/{self.dept_x.pk}/edit/",
+                {
+                    "token": token, "branch_name": "本店(競合)", "section_name": "部署X(競合)",
+                    "dept_action": "merge", "dept_action_target": str(self.dept_y.pk),
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("競合したため保存できませんでした" in m for m in messages))
+        # transaction.atomic()のロールバックにより、apply_dept_action側だけでなくform.save()側の
+        # 変更も反映されていないこと。
+        self.dept_x.refresh_from_db()
+        self.assertEqual(self.dept_x.branch_name, "本店")
+        self.assertEqual(self.dept_x.section_name, "部署X")
+        self.assertFalse(
+            DepartmentViewScope.objects.filter(
+                viewer_department=self.dept_x, visible_department=self.dept_y
+            ).exists()
+        )
+        self.assertFalse(AuditLog.objects.filter(action="部署管理 統合").exists())
 
 
 class ApplyDeptActionTests(TestCase):
@@ -397,14 +534,12 @@ class BranchAndSectionChoicesTests(TestCase):
         self.assertNotIn("99", codes)
 
 
-class DepartmentsJsonTests(TestCase):
-    def test_returns_department_fields_as_json(self):
+class DepartmentsListTests(TestCase):
+    def test_returns_department_fields_as_list(self):
         Department.objects.create(
             branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
         )
-        import json
-
-        data = json.loads(departments_json())
+        data = departments_list()
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["branch_code"], "000")
         self.assertEqual(data[0]["section_name"], "総務部")
@@ -441,3 +576,49 @@ class DeptListViewSearchTests(TestCase):
         response = self.client.get("/organizations/", {"sort": "branch_code", "dir": "desc"})
         departments = list(response.context["departments"])
         self.assertEqual(departments[0].branch_code, "999")
+
+    def test_filter_by_branch_code_and_section_code_combined(self):
+        """xlsx 部署管理!B53-56の絞り込みは本支所コード・部課コードを同時指定した場合AND条件で
+        絞り込む（従来は単独指定のみ検証されていた。テストカバレッジ棚卸しで発見、
+        2026-08-26追加）。同一本支所コード内に別の部課コードを持つ部署を用意し、両方指定した
+        場合に該当する1件のみに絞られることを確認する。"""
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        response = self.client.get("/organizations/", {"branch_code": "000", "section_code": "01"})
+        self.assertEqual(list(response.context["departments"]), [self.dept_a])
+
+    def test_sort_by_section_code_desc(self):
+        """SORT_FIELDSのbranch_code以外（section_code等）が未検証だったため追加
+        （テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        response = self.client.get("/organizations/", {"sort": "section_code", "dir": "desc"})
+        departments = list(response.context["departments"])
+        self.assertEqual([d.section_code for d in departments], ["02", "01"])
+
+    def test_department_name_with_script_tag_is_escaped_in_pulldown_json(self):
+        """本支所→部課連動プルダウンのデータは`departments_json()`を`json.dumps`＋`|safe`で
+        scriptタグに直書きしていたため、部課名に`</script>`を仕込まれると格納型XSSになる
+        脆弱性があった（セキュリティレビュー2026-08-26で発見・修正）。`|json_script`経由の
+        現在の実装では`</script>`が`\u003C/script\u003E`にエスケープされ、レンダリング後の
+        HTMLに生の閉じタグとして現れないことを確認する。"""
+        Department.objects.create(
+            branch_code="777",
+            branch_name="</script><script>alert(1)</script>",
+            section_code="01",
+            section_name="経理部",
+        )
+        response = self.client.get("/organizations/")
+        content = response.content.decode()
+        self.assertNotIn("</script><script>alert(1)</script>", content)
+        self.assertIn("\\u003C/script\\u003E", content)
+
+    def test_sort_by_branch_name_and_section_name_are_reversible(self):
+        """branch_name/section_nameは日本語文字列のためDBの照合順序（Japanese_Japan.utf8）に
+        依存し、昇順の絶対的な並び順をハードコードすると環境依存になる。asc/descが互いに
+        完全な逆順であることを確認することで、SORT_FIELDS経由でこれらの列が実際に
+        並び替えに使われていることを検証する（テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        for field in ("branch_name", "section_name"):
+            asc = [d.pk for d in self.client.get("/organizations/", {"sort": field, "dir": "asc"}).context["departments"]]
+            desc = [d.pk for d in self.client.get("/organizations/", {"sort": field, "dir": "desc"}).context["departments"]]
+            self.assertEqual(asc, list(reversed(desc)), f"sort={field}")
+            self.assertEqual(set(asc), {self.dept_a.pk, self.dept_b.pk})

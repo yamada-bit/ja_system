@@ -1,0 +1,162 @@
+documents/contracts アプリ CLAUDE.md コーディング規約準拠監査
+対象: documents/{models,views,api,services,search_services,storage_paths,forms,urls,admin,apps,tests}.py
+      contracts/{models,views,api,services,search_services,storage_paths,forms,urls,admin,apps,tests}.py
+      templates/documents/*.html, templates/contracts/*.html
+      documents/migrations/, contracts/migrations/ の未コミット分（0005/0006）
+実施日: 2026-08-25
+方式: CLAUDE.md「コーディング規約」の各項目ごとに全ファイルを読み込み突き合わせ。
+      あわせて `manage.py makemigrations --check --dry-run` と `manage.py test documents contracts`
+      （228件）を実行し、モデル変更のマイグレーション漏れ・現状のテスト全件PASSを確認済み。
+      本レポートは棚卸しのみで、修正は行っていない。
+
+※ 前提として、両アプリは2026-08-25時点で既に複数回のコード監査・セキュリティレビュー・品質
+  レビューを経ており（各ファイルの「コード監査で発見」「セキュリティレビューで発見」「品質
+  レビューで発見」コメント多数）、core.deletion_services/scoping_services/zip_services/
+  record_views/bulk_edit_services への実体集約、部署スコープチェックの統一、DBError捕捉漏れの
+  解消等は既に反映済み。本監査はその後の状態に対して規約準拠の観点のみで棚卸しした結果。
+  正しさのバグ探しは対象外（/code-review high 相当は review_code_doc_contract_full.txt 参照）。
+
+================================================================================
+■ 総合評価
+================================================================================
+重大な規約違反は検出せず。CLAUDE.md「コーディング規約」の各項目はおおむね遵守されている。
+指摘は2件（中1・低1）のみで、いずれも「違反」というより「改善余地」レベル。
+
+================================================================================
+■ 規約項目ごとのチェック結果
+================================================================================
+
+[OK] ビューはCBVのみ
+  documents/views.py・contracts/views.py・documents/api.py・contracts/api.py とも、全て
+  django.views.View / UpdateView 等を継承したクラスベースビュー。関数ベースビューは
+  _strip_ext() 等のプライベートヘルパー関数のみで、URLに直接紐付く関数ビューは無し。
+
+[OK] verbose_name/help_text/エラーメッセージ/docstring の日本語統一
+  documents/models.py・contracts/models.py の全フィールドでverbose_name/help_textが日本語。
+  forms.pyのlabel、views.pyのmessages.error()文言もすべて日本語で統一されている。
+
+[対象外] 設定の config/settings/base.py 集約・.env経由読み込み
+  documents/contracts アプリ自体に新規設定値の追加は無し（settings.CONTRACT_RETENTION_YEARS等は
+  config/settings/base.py 側で完結、両アプリからはsettings経由で参照するのみ）。
+
+[対象外] アップロードファイル本体の分離・Argon2優先
+  MEDIA_ROOT設定・PASSWORD_HASHERSはconfig/settings側の管轄で、documents/contractsアプリの
+  スコープには無し。
+
+[OK] 監査ログの一元化（auditアプリ経由）
+  登録（UploadStep2View.post）・更新（EditView/BulkEditView.post）はaudit_services.logを直接
+  呼んでおり、ダウンロード・プレビュー・削除はcore.record_views.BaseFileServeView/
+  BaseBulkDownloadView/BaseDeleteViewが内部でaudit_services.logを呼ぶ（core/record_views.py
+  L66,142,239で確認）。イベントの記録漏れは無し。
+
+[OK] core相当の共通基底クラス・サービス関数への集約（重複排除）
+  2026-08-25時点で、documents/contracts間の実装重複はほぼ全てcore側（deletion_services/
+  scoping_services/zip_services/storage_paths/record_views/bulk_edit_services/upload_views/
+  search_services/forms/models.NormalizedTextFieldsMixin・UuidPrefixedFilenameMixin）に
+  集約済みで、各ファイルのdocstringに集約理由・発見経緯が丁寧に記録されている。
+  documents.services.document_searchable_department_idsのみpermissions.services側の
+  contract_searchable_department_idsと配置が非対称だが、依存データの違い（契約書側のみ
+  PermissionProfile.contract_visible_departmentsに依存）が理由としてdocstringに明記されており、
+  意図的な設計判断として妥当（documents/services.py L47-54）。
+
+[OK] コメントは「なぜ」を詳しく書く
+  全編にわたり、原本HTML/xlsxの該当セル番地、過去の監査での発見経緯、他ファイルとの対称性の
+  理由等、非自明な設計判断の「なぜ」が丁寧に記録されている。「何をしているか」の説明に留まる
+  コメントはほぼ見当たらない。
+
+[OK] ログの整備
+  documents/contracts の views.py・api.py・services.py・search_services.py はいずれも
+  `logger = logging.getLogger(__name__)` を用意し、権限拒否（RequiresContractEditMixin.dispatch、
+  DeleteView.extra_permission_check）、不正アクセス試行（scoped_get_object_or_404、
+  DetailAPIView、pks不正値、remove_related_ids不正値）といったセキュリティ上意味のある事象を
+  logger.warningで記録している。models.pyはlogger定義のみで発火箇所が無いが、リクエスト処理を
+  持たないモジュールのため妥当（違反ではない）。
+
+[OK] 例外処理の完成度
+  bare `except:` は documents/contracts 配下に0件（grep確認済み）。ファイルI/O・DB境界は
+  OSError/DBErrorを具体的に捕捉し、logger.exceptionで記録した上でmessages.errorでユーザーに
+  案内している（UploadStep2View.post、DocumentEditView.post、ContractEditView.post、
+  BulkEditView.post）。UploadStep2View.post例外時のロールバック済みファイル実体の孤児化防止
+  （document.file.delete(save=False)）等、失敗時の後始末まで踏み込んで実装されている。
+
+[OK] 一覧画面のDjango Paginator
+  SearchView（documents/contracts両方）はDjango Paginatorを使用（PAGE_SIZE=100）。
+  search.htmlの«/＜/＞/»ボタンはpage_obj.has_previous/has_nextに連動したdisabled切替で、
+  「機能しない静的ページャー」には該当しない。
+
+[OK] 未実装機能のdisabled+title、alert()誤魔化しの禁止
+  documents/contracts配下でUIボタンをalert()で偽装している箇所は無し。storage1.htmlの
+  alert(String(err.message || err))はチャンクアップロード失敗時の実エラー通知であり、
+  「未実装機能をalert()で誤魔化す」パターンには該当しない。未実装・対象外のUI要素も
+  documents/contracts単体には見当たらない（電子決裁関連は他アプリ〈permissions/masters〉の
+  スコープ）。
+
+[OK] ファイル役割分担
+  両アプリともmodels.py/views.py/api.py/services.py/search_services.py/storage_paths.py/
+  forms.py/urls.py/admin.py/apps.py の標準構成に沿っており、ビジネスロジックの
+  views.pyへの直書きも解消済み（documents.services.build_zip_archive等、docstringに
+  「規約準拠監査で発見」として分離経緯が記録されている）。
+
+[要確認] 新機能追加時のユニットテスト追加（詳細は指摘1参照）
+
+================================================================================
+■ 指摘一覧
+================================================================================
+
+--------------------------------------------------------------------------------
+[中] documents/contracts間でユニットテストの観点が非対称（contracts側のテスト不足）
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:2295 DocumentSaveNormalizationTests
+  - documents/tests.py:2347 StoragePathTests
+  - contracts/tests.py（対応するテストクラスが存在しない）
+
+内容:
+  documents側にはcore.models.NormalizedTextFieldsMixin（title/memo/extracted_textの
+  *_normalizedシャドウカラムがsave()のたびに再計算される挙動、update_fields指定時の
+  追従を含む）とcore.storage_paths.build_hierarchical_upload_path（document_upload_path/
+  document_searchable_upload_pathの生成パス）を直接検証する専用テストクラスが存在するが、
+  contracts側には同じMixin・同じ生成関数（Contract.title_normalized、
+  contract_upload_path/contract_searchable_upload_path/related_file_upload_path）を対象にした
+  同等のテストが無い（contracts/tests.pyをgrepしても"normalized"はコメント中の1件のみ、
+  "StoragePath"/"build_hierarchical_upload_path"は0件）。
+
+  documents/contractsは「並行構成」でモデル・サービス層がほぼ同型に保たれている前提の
+  アプリ（CLAUDE.md冒頭の3陣構成の説明、および各ファイルのdocstringが繰り返し
+  "documents.xxxと同じ理由"と記載する設計方針）のため、片方だけテストが手薄だと、
+  将来Mixin/共通関数側に手を入れた際の回帰がcontracts側だけ検知されない状態になる。
+  CLAUDE.mdの「新機能追加時は同様の観点でユニットテストを追加する」に照らすと、
+  documents側で追加済みの観点をcontracts側にも横展開すべき。
+
+対応方針（参考、修正はまだしない）:
+  contracts/tests.pyに、documents.tests.DocumentSaveNormalizationTests/StoragePathTestsと
+  同じ観点（Contract.save()でtitle_normalized等が更新されること、
+  update_fields=["extracted_text"]指定時にextracted_text_normalizedも追従すること、
+  contract_upload_path/contract_searchable_upload_path/related_file_upload_pathが期待通りの
+  パスを生成すること）のテストクラスを追加する。
+
+--------------------------------------------------------------------------------
+[低] 未使用import（SEARCH_RADIO_DEFAULTS）
+--------------------------------------------------------------------------------
+対象:
+  - documents/forms.py:11 （core.formsからのimport一覧内）
+  - contracts/forms.py:12 （同上）
+
+内容:
+  core.forms.SEARCH_RADIO_DEFAULTS を両ファイルともimportしているが、ファイル内では
+  一切参照されていない（実際に使っているのはcore.forms.apply_radio_defaults内部のみで、
+  documents/contracts側はapply_radio_defaults()を呼び出すだけで済んでいる）。CLAUDE.mdに
+  「未使用importを避ける」という明文の規約は無いため違反ではないが、コード監査の過程で
+  重複ロジックをcore側へ集約した際の置き土産と見られ、可読性の観点で除去してよい。
+
+================================================================================
+■ 実行した確認コマンドと結果
+================================================================================
+- `manage.py makemigrations --check --dry-run documents contracts`
+  → "No changes detected in apps 'documents', 'contracts'"
+  （未コミットのcontracts/migrations/0005・0006、documents/migrations/0005を含め、
+  モデル定義とマイグレーションの間に差分は無い）
+
+- `manage.py test documents contracts`
+  → Ran 228 tests in 31.741s — OK（全件PASS。標準エラー出力に現れるトレースバックは
+  disk full等を意図的に発生させる例外系テストのmock出力で、テスト結果自体には影響なし）

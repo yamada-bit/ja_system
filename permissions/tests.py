@@ -5,7 +5,7 @@ from accounts.models import Employee, Position, Rank
 from masters.models import DocKbn, Group
 from organizations.models import Department
 from permissions.forms import AuthorityEditForm, AuthoritySearchForm
-from permissions.models import PermissionProfile, PermissionRole
+from permissions.models import CSV_EXPORT_FIELDS, FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
 from permissions.services import (
     can_download,
     can_edit_contract,
@@ -103,6 +103,23 @@ class PermissionServicesTests(TestCase):
         profile.doc_visible_groups.add(group_a)
         result = visible_groups(self.employee, kind="document")
         self.assertEqual(list(result.all()), [group_a])
+
+    def test_visible_groups_contract_kind_returns_configured_queryset(self):
+        """visible_groups(kind="contract")分岐が未テストだった
+        （コード監査で発見、2026-08-25追加）。"""
+        contract_group = Group.objects.create(code="C", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        Group.objects.create(code="D", name="契約分類Ｂ", doc_kbn=DocKbn.CONTRACT)
+        profile = PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        profile.contract_visible_groups.add(contract_group)
+        result = visible_groups(self.employee, kind="contract")
+        self.assertEqual(list(result.all()), [contract_group])
+
+    def test_visible_groups_invalid_kind_raises(self):
+        """can_download()/department_ids_for_group_scope()と同じ理由で想定外のkindを
+        握りつぶさない分岐が未テストだった（コード監査で発見、2026-08-25追加）。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        with self.assertRaises(ValueError):
+            visible_groups(self.employee, kind="unknown")
 
     def test_can_select_department_contract_kind_true_with_grant(self):
         """xlsx 検索・閲覧・変更!B421-423(Rev1.1)「権限が"管理者"。または契約書-部門間閲覧設定に
@@ -234,6 +251,32 @@ class AuthoritySettingsMenuAccessControlTests(TestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class AuthorityListIsAdminViewerContextTests(TestCase):
+    """xlsx 権限管理!B35「部署」プルダウンの管理者限定表示に対応するis_admin_viewerフラグの
+    回帰テスト（コード監査で発見：context値の分岐が未テストだった、2026-08-25追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_admin_viewer_context_true_for_admin(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.get("/permissions/")
+        self.assertTrue(response.context["is_admin_viewer"])
+
+    def test_admin_viewer_context_false_for_manager(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.MANAGER)
+        response = self.client.get("/permissions/")
+        self.assertFalse(response.context["is_admin_viewer"])
+
+
 class AuthorityListSortTests(TestCase):
     """screen-authority-list列見出しソート（permissions.services.filter_authority_queryset）の
     回帰テスト。「部署」列は`employee.department`（`Department.__str__`=本支所名｜部課名）を
@@ -287,6 +330,19 @@ class AuthorityListSortTests(TestCase):
         qs = filter_authority_queryset(self.viewer, form)
         self.assertEqual(list(qs), [self.viewer, self.emp_a, self.emp_b])
 
+    def test_department_search_condition_filters_results(self):
+        """AuthoritySearchFormのdepartmentフィールドによる絞り込み。全テストがこれまで
+        空条件（data={}）のみで呼んでいたため、実際に効くかは未検証だった
+        （コード監査で発見、2026-08-25追加）。"""
+        form = AuthoritySearchForm(data={"department": self.dept_b.pk})
+        qs = filter_authority_queryset(self.viewer, form)
+        self.assertEqual(list(qs), [self.emp_b])
+
+    def test_name_search_condition_filters_results(self):
+        form = AuthoritySearchForm(data={"name": "部署A"})
+        qs = filter_authority_queryset(self.viewer, form)
+        self.assertEqual(list(qs), [self.emp_a])
+
 
 class AuthorityEditFormTests(TestCase):
     """権限管理編集フォームは原本の全項目を含むこと（Rev1.1で権限管理!B167-215の構成に
@@ -327,6 +383,16 @@ class AuthorityEditViewTests(TestCase):
             department=self.department, rank=Rank.SHUJI, position=Position.IPPAN,
         )
         self.client.login(username="1", password="pass1234")
+
+    def test_staff_role_cannot_edit_others_permissions(self):
+        """can_manage_target()のviewer_role==STAFF（一般ロール）拒否分岐の回帰テスト。
+        AuthorityEditViewはSettingsMenuAccessMixinを使わずcan_manage_target()に直接依存するため、
+        一般ロールがpk直指定でアクセスした場合の403もこのdispatch()経由で確認する必要がある
+        （コード監査で発見：分岐自体は未テストだった、2026-08-25追加）。
+        """
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        response = self.client.get(f"/permissions/{self.other_employee.pk}/edit/")
+        self.assertEqual(response.status_code, 403)
 
     def test_manager_cannot_edit_own_permissions(self):
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.MANAGER)
@@ -385,6 +451,21 @@ class AuthorityEditViewTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["form"].is_valid())
+        self.assertEqual(
+            PermissionProfile.objects.get(employee=self.other_employee).role, PermissionRole.STAFF
+        )
+
+    def test_post_with_invalid_token_shows_error_and_does_not_save(self):
+        """二重送信対策トークン不正時（core.double_submit.consume_tokenがFalseを返すケース）の
+        分岐が未テストだった（コード監査で発見、2026-08-25追加）。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.post(
+            f"/permissions/{self.other_employee.pk}/edit/",
+            {"role": PermissionRole.ADMIN, "token": "invalid-token"},
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
         self.assertEqual(
             PermissionProfile.objects.get(employee=self.other_employee).role, PermissionRole.STAFF
         )
@@ -517,6 +598,70 @@ class AuthorityCsvExportViewTests(TestCase):
         response = self.client.get("/permissions/csv/")
         content = response.content.decode("utf-8-sig")
         self.assertIn("'=cmd|'/c calc'!A1", content)
+
+    def test_csv_export_fields_matches_flag_and_multi_fields(self):
+        """permissions.models.CSV_EXPORT_FIELDSはFLAG_FIELDS/MULTI_FIELDSと過不足なく一致する
+        こと。CSV_EXPORT_FIELDSはCSV列の並び順のため機械的に導出できず手書きのままだが
+        （permissions/models.py CSV_EXPORT_FIELDS docstring参照）、この一致だけはテストで担保する。
+        新しい権限フラグをFLAG_FIELDS/MULTI_FIELDSへ追加してCSV_EXPORT_FIELDSへの追加を
+        忘れた場合、ここが真っ先に落ちる（CSVヘッダー・データ列がずれたまま気付かれずリリース
+        される事故を防ぐ、コード監査で発見、2026-08-25追加）。
+        """
+        self.assertEqual(len(CSV_EXPORT_FIELDS), len(set(CSV_EXPORT_FIELDS)))
+        self.assertEqual(set(CSV_EXPORT_FIELDS), set(FLAG_FIELDS) | set(MULTI_FIELDS))
+
+
+class OptionListAPIViewTests(TestCase):
+    """screen-authority-editの分類選択・部門間閲覧設定ポップアップが使うpermissions/api.py
+    OptionListAPIViewの回帰テスト（コード監査で発見：丸ごと無テストだった、2026-08-25追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_type_returns_document_groups_by_default(self):
+        doc_group = Group.objects.create(code="A", name="文書分類", doc_kbn=DocKbn.DOCUMENT)
+        Group.objects.create(code="B", name="契約分類", doc_kbn=DocKbn.CONTRACT)
+        response = self.client.get("/permissions/api/options/", {"type": "group"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"items": [{"value": doc_group.pk, "label": "文書分類"}]})
+
+    def test_group_type_returns_contract_groups_with_doc_kbn_param(self):
+        Group.objects.create(code="A", name="文書分類", doc_kbn=DocKbn.DOCUMENT)
+        contract_group = Group.objects.create(code="B", name="契約分類", doc_kbn=DocKbn.CONTRACT)
+        response = self.client.get("/permissions/api/options/", {"type": "group", "doc_kbn": "contract"})
+        self.assertEqual(response.json(), {"items": [{"value": contract_group.pk, "label": "契約分類"}]})
+
+    def test_group_type_excludes_deleted_groups(self):
+        Group.objects.create(code="A", name="削除済み分類", doc_kbn=DocKbn.DOCUMENT, is_deleted=True)
+        response = self.client.get("/permissions/api/options/", {"type": "group"})
+        self.assertEqual(response.json(), {"items": []})
+
+    def test_dept_type_returns_all_departments(self):
+        other = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        response = self.client.get("/permissions/api/options/", {"type": "dept"})
+        values = {item["value"] for item in response.json()["items"]}
+        self.assertEqual(values, {self.department.pk, other.pk})
+
+    def test_invalid_type_returns_400(self):
+        response = self.client.get("/permissions/api/options/", {"type": "unknown"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "invalid type"})
+
+    def test_requires_login(self):
+        self.client.logout()
+        response = self.client.get("/permissions/api/options/", {"type": "dept"})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response["Location"])
 
 
 class AuthorityListOperationColumnPositionTests(TestCase):

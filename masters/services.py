@@ -1,7 +1,8 @@
 import logging
 
 from django.db.models import Q
-from django.http import Http404
+
+from core.scoping_services import scoped_get_object_or_404 as _core_scoped_get_object_or_404
 
 logger = logging.getLogger(__name__)
 
@@ -42,20 +43,19 @@ def scoped_get_object_or_404(base_qs, employee, pk):
     """masters.Group/Categoryの編集・削除確認画面で、部署スコープ外のpkへのURL直叩きを404に
     しつつ、セキュリティ上意味のある事象としてlogger.warningに残す共通ヘルパー。
 
-    GroupEditView/GroupDeleteView/CategoryEditView/CategoryDeleteViewの`_get_object`が
-    ほぼ同一実装（部署スコープでフィルタ→get_object_or_404）だった上、スコープ外アクセスの
-    ログが無くGroupDeleteView.post等の他の拒否パスと一貫していなかったため集約した
-    （コード監査で発見、2026-08-24修正）。存在自体しないpkとの区別のため、スコープ無しでの
-    存在確認を1回追加で行っている。
+    以前はGroupEditView/GroupDeleteView/CategoryEditView/CategoryDeleteViewの`_get_object`と
+    ほぼ同一のアルゴリズムを本アプリ独自に再実装していたが、documents/contracts側で同じ目的の
+    core.scoping_services.scoped_get_object_or_404が既に集約されていた（2026-08-25にNULL許容の
+    絞り込み方式をscope_queryset引数として一般化）ため、そちらに委譲する形に揃えた
+    （ログもentity_name="分類/カテゴリー"の日本語表記に統一され、documents/contracts側と
+    一貫するようになった。コード監査で発見、2026-08-25修正）。
     """
-    dept_ids = department_scope_ids(employee)
-    scoped = scope_queryset_by_department(base_qs, dept_ids)
-    obj = scoped.filter(pk=pk).first()
-    if obj is not None:
-        return obj
-    if base_qs.filter(pk=pk).exists():
-        logger.warning(
-            "部署スコープ外のレコードへのアクセスを試行しました: model=%s employee_no=%s pk=%s",
-            base_qs.model.__name__, employee.employee_no, pk,
-        )
-    raise Http404(f"No {base_qs.model._meta.object_name} matches the given query.")
+    entity_name = "分類" if base_qs.model.__name__ == "Group" else "カテゴリー"
+    return _core_scoped_get_object_or_404(
+        base_qs,
+        employee,
+        pk,
+        dept_ids_resolver=department_scope_ids,
+        entity_name=entity_name,
+        scope_queryset=scope_queryset_by_department,
+    )

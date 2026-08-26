@@ -6,6 +6,7 @@ from django.conf import settings
 from django.db.models import Count, Q
 from django.utils import timezone
 
+from contracts.models import Contract
 from documents.models import Document
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,6 @@ def get_notice_counts(employee) -> NoticeCounts:
     を経由せず自部署のみでフィルタしていたため、閲覧部署範囲テーブル〈部署統合・分割〉未反映の
     まま検索画面と件数が食い違うバグを修正した）。
     """
-    from contracts.models import Contract
     from organizations.services import visible_department_ids
     from permissions.services import can_select_department, contract_searchable_department_ids
 

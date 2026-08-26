@@ -96,6 +96,7 @@
       </form>
     </div>
   </div>
+  {{ departments_pulldown|json_script:"departments-data" }}
 {% endblock %}
 
 {% block extra_script %}
@@ -103,7 +104,7 @@
   // 原本index.html updateCode()の移植。ただし原本は固定サンプル値だったのに対し、
   // xlsx注記（本支所は「部署管理」の実データを参照する動的リスト）通り、実際のDepartmentから
   // 本支所→部課の連動選択肢を生成する。
-  const departments = {{ departments_json|safe }};
+  const departments = JSON.parse(document.getElementById('departments-data').textContent);
   const branchSelect = document.getElementById('honshisyo-regist');
   const sectionSelect = document.getElementById('buka-regist');
   const departmentInput = document.getElementById('id_department');

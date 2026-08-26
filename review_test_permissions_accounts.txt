@@ -1,0 +1,257 @@
+permissions/accounts アプリ テストカバレッジ棚卸し
+対象: permissions/{models,views,api,mixins,forms,services}.py + tests.py
+      accounts/{models,views,forms,services,csv_import_services}.py + tests.py
+実施日: 2026-08-25
+方式: 各ソースファイルの公開関数・View・分岐を洗い出し、permissions/tests.py（22クラス）・
+      accounts/tests.py（13クラス）の既存テストと突き合わせ。`manage.py test permissions accounts`
+      実行済み（101件、全件PASS）。本レポートは棚卸しのみで、テスト追加・修正は行っていない。
+凡例: [済] 直接/実質的にカバー  [部分] 一部の分岐のみカバー  [無] テスト無し
+
+================================================================================
+■ 総合評価
+================================================================================
+両アプリとも「権限に関わる分岐」（ロール別アクセス制御、権限リセット、CSV出力の機微情報
+フラグ）は手厚くテストされている。一方で、以下の3種のパターンで抜けが目立つ：
+  (a) permissions/api.py の OptionListAPIView が丸ごと無テスト
+  (b) 二重送信対策（token不正時の分岐）がpermissions/accounts双方の全Viewで無テスト
+  (c) 「検索・ソートの実データ絞り込み」がpermissions側は一部、accounts側（filter_staff_queryset）
+      はほぼ丸ごと無テスト（アクセス制御のテストはあるが、絞り込み結果の中身は見ていない）
+
+優先度高：4件、中：6件、低：6件（詳細は末尾「■ 優先度別まとめ」参照）。
+
+================================================================================
+■ permissions アプリ
+================================================================================
+
+--- permissions/models.py ---
+[済] FLAG_FIELDS/MULTI_FIELDS/CSV_EXPORT_FIELDSの一致
+     (test_csv_export_fields_matches_flag_and_multi_fields)
+[部分] PermissionProfile.__str__ / get_role_display()
+     直接のモデル単体テストは無いが、AuthorityCsvExportViewTestsのCSV内容検証
+     （"1,総務部,管理者太郎,課長,管理者"）が間接的にget_role_display()を通している。
+
+--- permissions/services.py ---
+[済] get_profile / get_role / is_admin
+[済] can_select_department（document=管理者のみ、contract=grant時true）
+[済] contract_searchable_department_ids（統合部署込み、管理者はNone）
+[済] can_download（未設定=false、フラグ反映、invalid kind例外、管理者は常にtrue）
+[済] can_edit_contract（未設定=false、フラグ反映、管理者は常にtrue）
+[済] can_edit_retention（フラグ反映、管理者は常にtrue）
+[部分] can_manage_target
+     ADMIN/MANAGERの分岐は AuthorityEditViewTests 経由（HTTP）で厚くカバー。
+     [無] viewer_role が STAFF（一般ロール）の場合にFalseを返す分岐が未テスト。
+          一般ロールでログインし /permissions/<pk>/edit/ にアクセスするテストが無い
+          （AuthorityEditViewはSettingsMenuAccessMixinを使わずcan_manage_target()に
+          直接依存しているため、一般ロールが弾かれることを確認する回帰テストが無い）。
+[部分] visible_employees
+     ADMIN分岐は AuthorityListSortTests（デフォルトsort）でカバー。MANAGER分岐（自部署のみ）は
+     AuthorityCsvExportViewTests.test_export_respects_department_scoping_for_manager で間接的に
+     カバー。prefetch_related（N+1対策）自体の効果（クエリ数）を検証するテストは無い。
+[部分] filter_authority_queryset
+     ソート系（department列の複合ソート、デフォルトソート）は AuthorityListSortTests で手厚い。
+     [無] 検索条件（AuthoritySearchFormのdepartment/nameフィールドによる絞り込み）が
+          実際に効くかを確認するテストが無い。全テストが `AuthoritySearchForm(data={})`
+          （空条件）のみで呼んでいる。
+[無] visible_settings_menu_items
+     関数自体を直接呼ぶテストが無い（呼び出し元のcore.views.SettingsMenuViewは本監査対象外の
+     coreアプリ側テストの領分だが、permissions側にも単体テストが無い）。
+[部分] can_access_settings_menu_item
+     "staff_master"（accounts側テスト経由）と"authority_management"のadmin/manager/staff
+     3ロールはカバー。SETTINGS_MENU_VISIBLE_ROLESの残り8キー
+     （class_management/category_management/eapproval_management/notice_management/
+     retention_setting/item_management/audit_log/other_settings）はpermissions/accounts
+     の対象外（各アプリ側のtests.pyの領分）だが、この関数自体をSETTINGS_MENU_VISIBLE_ROLES
+     全キーに対して機械的に検証する単体テストは無い。
+[済] department_ids_for_group_scope（document kind、invalid kind例外）
+[無] department_ids_for_group_scope の kind="contract" 分岐
+     （contract_searchable_department_idsへの委譲）自体は直接テストされていない
+     （委譲先の関数は別途直接テストされているため実害は小さいが、委譲の配線自体は未検証）。
+[部分] visible_groups
+     kind="document"（未設定/空/設定済み）は厚くカバー。
+     [無] kind="contract"分岐、および invalid kind の ValueError 分岐が未テスト。
+
+--- permissions/views.py ---
+[済] AuthorityListView（管理者/所属長のアクセス可否、操作列の位置）
+[無] AuthorityListView.get のcontext「is_admin_viewer」フラグ
+     管理者/所属長でレスポンスcontextの値が正しく分岐することを確認するテストが無い
+     （xlsx 権限管理!B35「部署」プルダウンの管理者限定表示に対応するフラグ）。
+[済] AuthorityCsvExportView（ヘッダー/データ行、部署スコープ、監査ログ、CSVインジェクション対策）
+[済] AuthorityEditView（GET/POST、対象アクセス制御、ロール選択肢絞り込み、POST改ざん防御、
+     監査ログ、contract_visible_departmentsの管理者限定表示）
+[無] AuthorityEditView.post の二重送信トークン不正時分岐
+     （`consume_token`がFalseを返すケース）が未テスト。正常系・ロール改ざん系のPOSTテストは
+     あるが、token不一致（再送信）時にmessages.errorでリダイレクトされることを確認するテストが
+     無い。
+[無] AuthorityEditView.post のフォームバリデーションエラー（ロール改ざん以外の一般的な入力
+     不正）での再描画パスが未テスト（ロール選択肢絞り込みによる不正値以外の失敗経路）。
+
+--- permissions/api.py ---
+[無] OptionListAPIView が丸ごと無テスト。
+     - `?type=group&doc_kbn=document` / `?type=group&doc_kbn=contract`（分類選択肢の返却）
+     - `?type=dept`（契約書-部門間閲覧設定の部署選択肢の返却、is_deletedを問わず全件）
+     - 上記以外の`type`パラメータで400を返す分岐
+     - 未ログイン（LoginRequiredMixin）でのアクセス
+     いずれもテストが存在しない。screen-authority-editのポップアップ選択（分類・部署）が
+     実際に機能するかはHTTPレベルで一切検証されていない。
+
+--- permissions/mixins.py ---
+[済] SettingsMenuAccessMixin（accounts/permissions双方のViewテスト経由で
+     staff_master/authority_managementキーはカバー）。mixin自体の一般ロジックとしては
+     十分カバーされている。
+
+--- permissions/forms.py ---
+[済] AuthorityEditForm（全項目の存在、editable_roles絞り込み、
+     show_contract_visible_departments=Falseでのフィールド除去）はいずれもview経由で実質カバー。
+[無] AuthoritySearchForm 単体（department選択肢の並び順、empty_label等）の直接テストは無いが、
+     優先度は低い（View経由の実利用で暗黙にカバーされている）。
+
+================================================================================
+■ accounts アプリ
+================================================================================
+
+--- accounts/models.py ---
+[済] create_user（パスワードハッシュ化）
+[無] create_superuser（is_staff/is_superuserのデフォルト付与）— テスト無し。
+[無] has_perm / has_module_perms（is_superuserを返す） — テスト無し。Django管理サイト用の
+     経路でありUI上の利用箇所は無いため優先度は低い。
+
+--- accounts/forms.py ---
+[済] LoginForm（退職者ログイン不可、在職者ログイン可）
+[済] StaffCsvImportForm.clean_csv_file（拡張子チェック、View経由で実質カバー）
+[済] StaffRegistForm（重複職員番号、初期パスワード、選択してくださいラベル、全角→半角変換、
+     非数字拒否、0000許可）
+[部分] StaffEditForm
+     パスワード関連（空欄で変更なし、新パスワードで変更）はカバー。
+     [無] department/rank/position の変更自体をこのフォーム単体で保存し、値が反映されることを
+          確認する直接テストが無い（後述のStaffEditView側の統合ギャップと表裏）。
+[無] StaffSearchForm 単体テストなし（branch_code/section_code選択肢の動的設定）。
+     Viewの検索絞り込み自体が未テストのため、間接カバーも無い（後述）。
+
+--- accounts/services.py ---
+[済] reset_permission_profile_if_needed
+     変更なし時no-op、部署変更時リセット+監査ログ、退職時リセット、
+     「既に退職済み・退職と無関係な変更」での誤リセット防止、プロファイル未設定時no-op、
+     いずれも直接の単体テストで手厚くカバー（4引数とも個別に検証）。
+[無] filter_staff_queryset がほぼ丸ごと無テスト。
+     - STAFF_SORT_FIELDS（employee_no/name/branch_code/section_code/rank/position）による
+       ソートの並び順を検証するテストが無い（permissions側のAuthorityListSortTestsに相当する
+       ものが accounts 側に無い）。
+     - branch_code/section_code/nameによる絞り込みが実際に効くかのテストが無い。
+     - include_retired=Falseがデフォルトで退職者を除外する挙動は
+       StaffCsvExportViewTests.test_export_respects_search_filter で「退職者が含まれない」
+       ことのみ間接確認されているが、include_retired=Trueで退職者が含まれる分岐は未テスト。
+     - デフォルトソート順（本支所→部課→職階→役職→職員番号）を検証するテストが無い。
+
+--- accounts/csv_import_services.py ---
+[済] ヘッダー不正/空ファイル/文字コード不正/列数不一致（CsvImportError・行エラー）
+[済] 新規登録（部署自動作成、初期パスワード、権限プロファイル初期化）
+[済] 部署名更新、氏名のみ変更（権限リセット対象外）、部課/役職/職階変更（権限リセット対象）
+[済] 部課コード"99"による退職扱い、CSVに無い既存職員の不処理
+[済] 所属長フラグによるSTAFF→MANAGER昇格、ADMIN降格防止、退職と同一行での昇格抑止、
+     昇格時の監査ログ
+[済] 職階/役職コード不正の拒否、行単位エラーが他行を止めないこと
+[済] 想定外例外(RuntimeError)を汎用メッセージに変換しrawメッセージを漏らさないこと
+[無] （コード側コメントで既知・容認済みと明記）CSV取込の職員番号NFKC正規化（全角→半角変換）
+     自体の直接テストが無い。手動登録フォーム側
+     （StaffRegistFormTests.test_fullwidth_employee_no_converted_to_halfwidth）でのみ
+     カバーされ、CSV取込側（_import_row）の同ロジックには対応する回帰テストが無い
+     （accounts/csv_import_services.py内のコメントで「優先度: 低・見送り」として明記済み）。
+[無] _apply_manager_flag の「既にMANAGERロールの職員にmanager_flag=1」で重複更新・重複監査ログを
+     発生させないこと（`profile.role == STAFF`のガード）を確認する直接テストが無い
+     （昇格させるケースと昇格させないケース〈ADMIN降格防止〉はあるが、既にMANAGERの職員が
+     no-opになるケースが未テスト）。
+[無] 新規CSV行の職員が既存Employeeだが PermissionProfile未設定という組み合わせで
+     manager_flag=1 の場合の get_or_create(defaults={"role": MANAGER}) 分岐が未テスト。
+
+--- accounts/views.py ---
+[済] LoginView/LogoutView（監査ログ記録、ログイン失敗時の職員特定/不明扱い）
+[部分] LogoutView.dispatch の「未ログイン状態でのログアウトアクセス」（employee=Noneで
+     監査ログを記録しない分岐）は未テスト（優先度低）。
+[部分] StaffListView.get
+     アクセス制御（管理者のみ）はカバー。
+     [無] 実際の検索結果一覧の中身（絞り込み・ソート）、departments_json/csv_import_form/
+          csv_import_tokenのcontext値を検証するテストが無い（filter_staff_querysetの
+          無テストとも連動する）。
+[済] StaffCsvExportView（ヘッダー/空パスワード行、退職者デフォルト除外、監査ログ、
+     CSVインジェクション対策）
+[部分] StaffCsvImportView.post
+     成功時サマリメッセージ・拡張子不正エラーはカバー。
+     [無] 二重送信トークン不正時分岐が未テスト。
+     [無] `import_staff_csv`がCsvImportErrorを送出した場合（例: ヘッダー不正CSVをこのView経由で
+          アップロード）に`messages.error`で案内される分岐がView統合テストとして未テスト
+          （サービス層の例外送出自体はImportStaffCsvServiceTestsでカバー済みだが、Viewの
+          catch節を通したことは確認されていない）。
+     [無] summary.errorsが1件以上ある場合の`messages.warning`分岐（部分成功時の警告表示）が
+          View経由では未テスト（サービス層のsummary.errors自体はカバー済み）。
+[無] StaffDetailView が丸ごと無テスト。
+     管理者が正常にアクセスできること（200）、パスワードマスク表示、存在しないpkでの404、
+     いずれも検証するテストが無い（アクセス拒否側＝所属長403のみ
+     StaffSettingsMenuAccessControlTestsでカバー）。
+[部分] StaffRegistView
+     監査ログ記録・IntegrityError処理はカバー。
+     [無] 二重送信トークン不正時分岐が未テスト。
+     [無] GET時のcontext（departments_json）検証、フォームバリデーションエラー時の再描画
+          （通常のフィールド不正、IntegrityError以外）が未テスト。
+[部分] StaffEditView
+     監査ログ記録はカバーされているが、既存テスト（test_edit_creates_audit_log）は
+     department/rank/positionを変更前と同一の値でPOSTしているため、
+     reset_permission_profile_if_needed が実際に「変更あり」で呼ばれる経路が
+     View統合テストとして一度も通っていない
+     （関数自体はaccounts.services側で直接テスト済みだが、Viewが計算する
+     before_department_id等の差分検出ロジックとの結線は未検証）。
+     [無] 二重送信トークン不正時分岐が未テスト。
+     [無] department/rank/position/is_retiredの実際の変更をこのView経由のPOSTで検証する
+          テストが無い。
+
+================================================================================
+■ 優先度別まとめ
+================================================================================
+
+[優先度: 高]
+1. permissions/api.py OptionListAPIView が丸ごと無テスト
+   （type=group/dept双方の正常系、invalid type、未ログイン）。
+2. accounts/services.py filter_staff_queryset の絞り込み・ソートが丸ごと無テスト
+   （StaffListViewの実質的な検索機能そのものの正しさが未検証）。
+3. accounts/views.py StaffEditView がreset_permission_profile_if_neededを実際に
+   「変更あり」で駆動する経路（View統合テスト）が無い
+   （関数単体は厚くテスト済みだが、Viewの差分検出ロジックとの結線は未検証）。
+4. accounts/views.py StaffDetailView が丸ごと無テスト（管理者の200アクセス・404）。
+
+[優先度: 中]
+5. permissions/services.py can_manage_target の STAFF（一般ロール）拒否分岐が未テスト
+   （AuthorityEditViewへの一般ロールアクセスを確認する回帰テストが無い）。
+6. permissions/services.py filter_authority_queryset の検索条件（department/name）絞り込みが
+   未テスト（ソート順のみテスト済み）。
+7. permissions/views.py・accounts/views.py 双方の二重送信トークン不正時分岐が
+   全View共通で未テスト（AuthorityEditView/StaffCsvImportView/StaffRegistView/StaffEditView）。
+8. accounts/views.py StaffCsvImportView のCsvImportError・summary.errors警告表示の
+   View統合テストが無い（サービス層のみカバー）。
+9. permissions/services.py visible_groups の kind="contract"・invalid kind分岐が未テスト。
+10. permissions/views.py AuthorityListView の is_admin_viewer context値が未テスト。
+
+[優先度: 低]
+11. accounts/models.py create_superuser / has_perm / has_module_perms 未テスト。
+12. accounts/csv_import_services.py CSV取込側の職員番号NFKC正規化・
+    _apply_manager_flagの「既にMANAGER」no-op分岐が未テスト（コード側コメントで既知）。
+13. permissions/services.py visible_settings_menu_items・can_access_settings_menu_indexの
+    SETTINGS_MENU_VISIBLE_ROLES全キーを機械的に検証する単体テストが無い。
+14. permissions/forms.py AuthoritySearchForm、accounts/forms.py StaffSearchForm の
+    単体テストが無い（View経由で暗黙にカバー）。
+15. accounts/views.py LogoutView の未ログイン状態アクセス（監査ログ非記録分岐）が未テスト。
+16. permissions/services.py department_ids_for_group_scope の kind="contract"分岐、
+    visible_employeesのprefetch_related効果（クエリ数）が未テスト。
+
+================================================================================
+■ 対応記録（2026-08-25）
+================================================================================
+優先度「高」4件・「中」6件（うち中7「二重送信トークン不正時分岐」はAuthorityEditView/
+StaffCsvImportView/StaffRegistView/StaffEditViewの4View分をまとめて1件として実装）を
+permissions/tests.py・accounts/tests.pyに追加。追加のたびに
+`manage.py test permissions accounts`を実行し、全件PASSを確認済み（101件→132件、
++31件。内訳：優先度高4件で+13件、中6件で+18件）。
+
+優先度「低」6件（No.11〜16）は今回見送り。理由は各項目に記載の通り、いずれも
+「Django管理サイト等UI外の経路」「コード側コメントで既知・優先度低と明記済み」
+「View経由で暗黙にカバー済み」「実害の乏しいN+1計測」等、実利用画面のバグ検出への
+寄与が小さいと判断したため。将来これらの経路を直接使う変更が入る場合は、その時点で
+このレポートを再確認してテスト追加を検討すること。

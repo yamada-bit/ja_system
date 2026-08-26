@@ -1,0 +1,315 @@
+organizations/masters アプリ テストカバレッジ棚卸し
+対象: organizations/{models,views,api,forms,services}.py + tests.py
+      masters/{models,views,forms,services}.py + tests.py
+      （両アプリのGroup/Category一覧・登録・編集・削除の共通実装core/master_views.pyは、
+      呼び出し元経由でのカバレッジ確認のみ行い、単体テストの要否はcoreアプリの領分として対象外）
+実施日: 2026-08-26
+方式: 各ソースファイルの公開関数・View・分岐を洗い出し、organizations/tests.py（10クラス）・
+      masters/tests.py（9クラス）の既存テストと突き合わせ。`manage.py test organizations masters`
+      実行済み（82件、全件PASS）。本レポートは棚卸しのみで、テスト追加・修正は行っていない。
+凡例: [済] 直接/実質的にカバー  [部分] 一部の分岐のみカバー  [無] テスト無し
+
+================================================================================
+■ 総合評価
+================================================================================
+両アプリとも「部署スコープ・権限ゲーティング」（Rev1.2で追加された分類/カテゴリーの部署単位
+閲覧範囲、部署管理画面自体の管理者限定アクセス）は手厚くテストされている。一方で、以下の
+パターンで抜けが目立つ：
+  (a) masters側の操作履歴ログ（audit_services.log）が、分類の新規登録1件を除いて
+      一切検証されていない（Group/Category/Retentionの更新・削除、Category登録の
+      監査ログはすべて無テスト）
+  (b) 「契約書管理」側（doc_kbn=contract）のGroup/Category件数集計・削除可否ロジックが
+      丸ごと無テスト（文書管理側のみで検証されている）
+  (c) 登録画面（Regist）のIntegrityError捕捉は3画面ともテスト済みだが、同じ実装パターンを
+      持つ編集画面（Edit）側のIntegrityError捕捉が3画面とも無テスト
+  (d) organizations側は部署統合・分割のトランザクション化（apply_dept_actionの失敗時ロールバック）
+      自体の回帰テストが無い（登録側の同種IntegrityErrorテストはあるが編集側には無い）
+  (e) 二重送信トークン不正時分岐が両アプリの全View（regist/edit/delete）で無テスト
+      （2026-08-25付permissions/accounts棚卸しと同一パターン）
+
+優先度高：5件、中：7件、低：7件（詳細は末尾「■ 優先度別まとめ」参照）。
+
+================================================================================
+■ organizations アプリ
+================================================================================
+
+--- organizations/models.py ---
+[済] Department.__str__（部課ありなしの2パターン）
+[無] DepartmentViewScope.__str__、および(viewer_department, visible_department)の
+     UniqueConstraint自体をDBレベルで直接検証するテストが無い（apply_dept_actionの
+     idempotencyテストがサービス層経由で間接的にカバーしているのみ）。
+[無] MenuItemSetting がorganizationsアプリ内では一切テストされていない。ただし本モデルは
+     メイン画面項目設定（screen-other-main）というcoreアプリの機能でのみ使われ、
+     core/tests.pyでカバーされているため実害は小さい（accounts.PermissionProfile相当の
+     「モデルの置き場所とテストの置き場所が別アプリ」というパターン）。
+
+--- organizations/services.py ---
+[済] apply_dept_action（統合/分割それぞれの方向、複数target、idempotency、自己参照スキップ、
+     同一(viewer,visible)組への異なるaction実行時のaction更新）— 手厚くカバー。
+[部分] visible_department_ids
+     単一のDepartmentViewScope経由の閲覧範囲追加は検証済み。同一職員の部署に対して
+     複数のDepartmentViewScopeが積み重なるケース（複数回の統合・分割を経た部署）は
+     未テスト。
+[済] branch_choices / section_choices（"(全て)"付き選択肢、退職部課コード除外）
+     [無] ただし異なるbranch_codeが複数存在する場合の重複排除（dict()によるdistinct化）は
+          未検証（現テストは単一本支所のみのデータセットで確認しており、実質的に
+          「複数本支所が正しく列挙される」ことまでは見ていない）。
+[無] department_composite_order_by が organizations/masters いずれのテストからも直接
+     呼ばれておらず、単体テストが無い。実際の利用者はmasters側のGroupListView/
+     CategoryListView（管理者がsort=departmentを指定した場合）だが、そちらのテスト
+     （後述 masters側 test_non_admin_sort_by_department_is_ignored）は「非管理者には
+     効かないこと」のみを確認しており、「管理者が指定した場合に本支所コード→部課コードの
+     複合キーで正しく並ぶこと」自体は一度も検証されていない。
+[済] departments_json（連動プルダウン用JSON構造）
+
+--- organizations/forms.py ---
+[済] DeptRegistForm（重複拒否、既存本支所への部課追加）
+[済] DeptEditForm（名称のみ変更、統合/分割のtarget必須、自己参照拒否）
+[部分] DeptSearchForm 単体テストは無いが、DeptListViewSearchTests（View経由）で
+     branch_code/section_code選択肢自体が実データから生成されることは実質カバーされている。
+
+--- organizations/api.py ---
+[部分] OptionListAPIView
+     アクセス制御（管理者のみ200、所属長403、未ログイン302リダイレクト）は
+     DeptSettingsMenuAccessControlTestsで手厚い。
+     [無] 実際のレスポンス内容（`_department_items()`が返す{value, label}のリスト、
+          branch_code→section_code順であること）を検証するテストが無い。ステータス
+          コードのみの確認に留まっており、screen-dept-editの統合・分割ポップアップが
+          実際に正しい部署一覧を返しているかはHTTPレベルで一切検証されていない。
+     [無] `type`パラメータに`dept`以外（未対応値、あるいは`group`）を渡した場合の
+          分岐が未テスト（本画面はdeptのみ使用するため実害は小さいが、
+          BaseOptionListAPIView側の共通ロジックとしては未検証）。
+
+--- organizations/views.py ---
+[済] DeptListView（部署管理設定メニューのアクセス制御、branch_code/section_code絞り込み、
+     sort=branch_code descでのソート）
+     [無] SORT_FIELDSの残り3項目（branch_name/section_code/section_name）でのソート結果が
+          未検証（branch_code以外の列見出しソートを1件も確認していない）。
+     [無] branch_code・section_codeを同時に指定した複合絞り込みの検証が無い（単独指定のみ）。
+[済] DeptRegistView（GET、監査ログ、IntegrityError時のフレンドリーメッセージ）
+     [無] 二重送信トークン不正時分岐（`reject_if_resubmitted`がNone以外を返すケース）が
+          未テスト。
+     [無] フォームバリデーションエラー（重複以外の一般的な入力不正）での再描画パスが未テスト。
+[部分] DeptEditView
+     merge/splitのView経由での成功パス（DepartmentViewScope作成、監査ログ2件、
+     部署マスタからの削除が行われないこと）はDeptEditViewMergeSplitTestsで手厚い。
+     [無] `apply_dept_action`実行中にIntegrityErrorが発生した場合の
+          `transaction.atomic()`ロールバック・フレンドリーメッセージ表示パスが未テスト
+          （DeptRegistIntegrityErrorTestsは登録側のみで、編集側のこの分岐に対応する
+          テストが無い。本分岐はコードレビューで指摘され2026-08-25に追加されたばかりの
+          修正のため、回帰テストが特に望ましい）。
+     [無] 二重送信トークン不正時分岐が未テスト。
+     [無] split実行時（merge以外）のView経由テストが無い（ApplyDeptActionTestsではsplit自体は
+          サービス層で検証済みだが、DeptEditViewMergeSplitTestsはmergeケースのみ）。
+
+================================================================================
+■ masters アプリ
+================================================================================
+
+--- masters/models.py ---
+[済] Group/Category の code UniqueConstraint（is_deleted=Falseの行同士でのみ一意）は
+     フォーム層（GroupFormTests/CategoryFormTests）・DB層（MasterIntegrityErrorViewTests）
+     の両方でカバー。
+[部分] RetentionPeriod.__str__
+     「永年」分岐・通常分岐とも、audit_services.log()のevent_message組み立てで間接的に
+     文字列化自体は実行されているが、その内容（AuditLogのevent_message）を直接検証する
+     テストが無いため（後述の監査ログ関連の指摘参照）、実質的に無検証に近い。
+[無] SystemSetting はmastersアプリ内では一切テストされていない。organizations.
+     MenuItemSettingと同様、自動ログアウト時間タブ（screen-other-main）というcoreアプリの
+     機能でのみ編集され、core/tests.pyでカバーされているため実害は小さい。
+
+--- masters/services.py ---
+[済] department_scope_ids（admin=None、非admin={自部署}）はView経由で実質カバー。
+[済] scope_queryset_by_department（dept_ids=Noneで無制限、絞り込み、NULL部署の救済的な
+     全非管理者への表示）— DepartmentScopingTestsで手厚い。
+[部分] scoped_get_object_or_404
+     Group側は404そのものとlogger.warning出力の両方（`test_manager_cross_department_
+     access_logs_warning`）を確認済み。
+     [無] Category側は404ステータスのみ確認されており（`test_manager_cannot_reach_other_
+          department_category_edit`）、entity_name="カテゴリー"としてログ文言が正しく
+          切り替わることは未検証。
+     [無] GroupDeleteView/CategoryDeleteViewの削除確認画面（`scoped_lookup`経由）に対する
+          他部署からのURL直叩き404検証が無い（Edit系のみテストされている）。
+
+--- masters/forms.py ---
+[済] GroupForm（重複コード新規/更新、削除済みコード再利用、全角→半角変換、数字以外拒否、
+     doc_kbn/departmentの空選択肢排除）
+[済] CategoryForm（重複コード、論理削除済みgroup除外、doc_kbn/group/departmentの空選択肢
+     排除、部署スコープによるgroup選択肢絞り込み、全角→半角変換、doc_kbn不一致の拒否）
+     — GroupForm以上に手厚くカバー。
+[無] CategorySearchForm.__init__のemployee引数によるgroup選択肢の部署スコープ絞り込み
+     （検索パネルの「分類」プルダウン自体を自部署のグループのみに絞る処理）を、フォーム単体
+     またはView経由で直接検証するテストが無い。CategoryForm側の同種ロジック
+     （登録・編集画面の「分類」選択肢絞り込み）は`test_group_queryset_scoped_to_employee_
+     department`で検証済みだが、検索フォーム側は未検証のまま。
+[済] RetentionPeriodForm（表示順重複、区分違いなら重複可、永年での数値クリア、
+     永年以外での必須チェック、period_unitの空選択肢排除）
+
+--- masters/views.py ---
+[部分] GroupListView / CategoryListView
+     文書管理(doc_kbn=document)側のitem_count集計・並び替え・名前部分一致検索は
+     手厚くカバー（MasterListSortTests）。
+     [無] 契約書管理側(doc_kbn=contract)のitem_count（`contract_count`分岐）を経由する
+          テストが1件も無い。GroupListView/CategoryListViewの一覧・ソート・削除可否判定の
+          いずれも文書管理側データのみで検証されており、契約書向けGroup/Categoryを作成して
+          Case文のdefault分岐（contract_count使用）が実際に機能することを確認していない。
+     [無] `doc_kbn`検索フィルタ自体（GroupSearchForm/CategorySearchFormの`doc_kbn`
+          フィールドによる絞り込み）が未テスト。
+     [無] CategorySearchFormの`name`（部分一致）・`group`（分類での絞り込み）フィルタが
+          未テスト（Group側の名前部分一致はテストがあるが、Categoryの対応するテストが無い）。
+     [無] `default_order_by`（sortパラメータ省略時の部課コード→コード→doc_kbn順の初期表示）
+          自体を直接検証するテストが無い（明示的なsort指定時の並び替えのみ検証されている）。
+     [無] CategoryListView.apply_special_sort（"group"列の複合ソート）はasc方向のみ検証
+          されており、desc方向は未確認。
+[部分] GroupRegistView / CategoryRegistView
+     正常系（部署自動設定/管理者選択必須）・監査ログ（Group登録のみ）・IntegrityError
+     捕捉はカバー。
+     [無] Category登録の監査ログ内容（"カテゴリー管理 新規登録"）を検証するテストが無い。
+     [無] 二重送信トークン不正時分岐が両View共通で未テスト。
+[部分] GroupEditView / CategoryEditView
+     部署スコープ外へのアクセス拒否（404、Groupはログ内容も）はカバー。
+     [無] 正常な更新自体（コード以外の項目変更が保存されること）・監査ログ内容
+          （"分類管理 更新"/"カテゴリー管理 更新"）を検証するテストが無い
+          （部署スコープ関連の404テストのみで、"編集が成功するケース"自体の
+          アサーションが手薄）。
+     [無] IntegrityError捕捉（`save_or_none`がNoneを返す分岐）がEdit側では未テスト
+          （Regist側の3画面分（Group/Category/Retention）はMasterIntegrityErrorViewTestsで
+          検証済みだが、同じtry/exceptパターンを持つEdit側の対応するテストが無い）。
+     [無] 二重送信トークン不正時分岐が未テスト。
+[部分] GroupDeleteView / CategoryDeleteView
+     文書件数0件/非0件での削除可否（MasterDeleteViewTests）はカバー。
+     [無] 削除時の監査ログ内容（"分類管理 削除"/"カテゴリー管理 削除"）を検証するテストが
+          無い。
+     [無] 部署スコープ外の他部署Group/Categoryに対する削除確認画面へのURL直叩き
+          （404になること）が未テスト（Edit側は検証済みだが削除確認側は未検証）。
+     [無] 二重送信トークン不正時分岐が未テスト。
+[部分] RetentionListView
+     アクセス制御（管理者200/所属長403）のみ確認されている。
+     [無] `kbn`/`doc_name`クエリパラメータが不正値の場合のフォールバック
+          （それぞれRetentionKbn.DOCUMENT/EapprovalDocName.RINGISHOへ戻ること）が
+          未テスト。
+     [無] `doc_periods`/`ringisho_periods`/`keihi_periods`の内容（区分ごとに正しい
+          RetentionPeriodのみが表示順で列挙されること）自体を検証するテストが無い。
+[部分] RetentionRegistView / RetentionEditView
+     表示順重複拒否・永年クリア・IntegrityError捕捉（Regist側のみ）はカバー。
+     [無] `_initial()`（GETパラメータのkbn/doc_nameがフォームの初期値へ正しく反映される
+          こと、kbn=documentのときdoc_nameが空になること）が未テスト。
+     [無] 登録・更新成功後のリダイレクト先が`_retention_list_url()`で選択中の
+          kbn/doc_nameを引き継ぐこと（一覧に戻った際に選択状態が保持される、
+          ユーザー指摘で修正された不具合そのもの）を検証するテストが無い。
+     [無] RetentionEditViewのIntegrityError捕捉が未テスト（Regist側のみ検証済み）。
+     [無] 二重送信トークン不正時分岐が両View共通で未テスト。
+[部分] RetentionDeleteView
+     論理削除自体（is_deleted=True、文書からの参照維持）はMasterDeleteViewTestsでカバー。
+     [無] `no`（同一区分内の表示順に基づく行位置）の計算結果を検証するテストが無い。
+     [無] 既に論理削除済みのpkに対するGET/POSTが404になることが未テスト
+          （`get_object_or_404(..., is_deleted=False)`の分岐）。
+     [無] リダイレクト先のkbn/doc_name引き継ぎが未テスト（Regist/Editと同じ指摘）。
+     [無] 二重送信トークン不正時分岐が未テスト。
+[部分] 設定メニューのロール別アクセス制御
+     Category系（list/regist/edit/delete全4View）はSETTINGS_MENU_VISIBLE_ROLESを一時的に
+     差し替える手法で個別に検証済み（`test_category_views_actually_enforce_settings_menu_
+     role_check`）。
+     [無] Group系はGroupListViewのみ（staff拒否/manager許可）が検証されており、
+          GroupRegistView/GroupEditView/GroupDeleteViewが実際にsettings_menu_key=
+          "class_management"を強制していることは個別に検証されていない
+          （継承元は共通だが、Category側と同じ粒度での回帰テストが無い）。
+     [無] Retention系もRetentionListViewのみ（manager拒否/admin許可）が検証されており、
+          Regist/Edit/Deleteの3Viewは個別に検証されていない。
+
+================================================================================
+■ 優先度別まとめ
+================================================================================
+
+[優先度: 高]
+1. masters/views.py 全体の監査ログ（audit_services.log）が、Group新規登録1件を除いて
+   一切検証されていない（GroupEditView/GroupDeleteView/CategoryRegistView/
+   CategoryEditView/CategoryDeleteView/RetentionRegistView/RetentionEditView/
+   RetentionDeleteViewの計8箇所）。CLAUDE.mdが監査記録を重視する方針である割に、
+   masters側は記録漏れ・文言誤りへの回帰検知力がほぼ無い状態。
+2. masters/views.py のGroupListView/CategoryListViewにおける契約書管理側
+   (doc_kbn=contract)のitem_count/blocking_count集計（Case文のdefault分岐、
+   contract_count使用）が丸ごと無テスト。文書管理側でしか検証されていないため、
+   契約書側でのカウント誤り・削除可否判定の不具合を検知できない。
+3. organizations/views.py DeptEditView の`apply_dept_action`実行中IntegrityError発生時の
+   `transaction.atomic()`ロールバックパスが未テスト（2026-08-25にコードレビュー指摘を
+   受けて追加された修正だが、対応する回帰テストが無い。登録側〈DeptRegistIntegrityError
+   Tests〉には同種のテストが存在する）。
+4. masters/views.py のGroupEditView/CategoryEditView/RetentionEditViewのIntegrityError
+   捕捉（`save_or_none`がNoneを返す分岐）が3画面とも未テスト（Regist側の対応する
+   3画面はMasterIntegrityErrorViewTestsで検証済みだが、Edit側だけ抜けている）。
+5. masters/views.py のRetentionRegistView/RetentionEditView/RetentionDeleteViewの
+   リダイレクト先が選択中のkbn/doc_nameを引き継ぐこと（`_retention_list_url`）が
+   未テスト。ユーザー指摘で修正された「編集画面から戻ると選択が解除される」不具合の
+   再発防止として回帰テストが望ましい。
+
+[優先度: 中]
+6. organizations/views.py DeptListViewのソート機能がbranch_code(desc)のみ検証されており、
+   残り3項目（branch_name/section_code/section_name）およびbranch_code+section_codeの
+   複合絞り込みが未テスト。
+7. organizations/api.py OptionListAPIViewのレスポンス内容（`_department_items()`が返す
+   部署一覧の値・順序）が一度も検証されていない（アクセス制御のみテスト済み）。
+8. masters/forms.py GroupSearchForm/CategorySearchFormの`doc_kbn`絞り込み、
+   CategorySearchFormの`name`/`group`絞り込みが未テスト（Group側の`name`絞り込みのみ
+   テストあり）。CategorySearchForm.__init__のemployee引数によるgroup選択肢の部署
+   スコープ絞り込みも未テスト。
+9. masters/views.py のGroupListView/CategoryListViewの`default_order_by`
+   （sortパラメータ省略時、部課コード→コード→doc_kbn順の初期表示）が直接検証されて
+   いない。
+10. masters/views.py のGroupDeleteView/CategoryDeleteViewについて、他部署の
+    Group/Categoryに対する削除確認画面へのURL直叩きが404になることが未テスト
+    （Edit側の同種テストはあるが削除確認側には無い）。
+11. organizations/masters両アプリの全regist/edit/delete Viewについて、二重送信
+    トークン不正時分岐（`reject_if_resubmitted`がNone以外を返すケース）が
+    一貫して未テスト（2026-08-25付permissions/accounts棚卸しの中優先度7と同一パターン）。
+12. masters/views.py RetentionListViewの`kbn`/`doc_name`不正値フォールバック、
+    および3つのquerysetの内容（区分ごとの正しい絞り込み）自体が未テスト
+    （アクセス制御のみ検証済み）。
+
+[優先度: 低]
+13. organizations/services.py department_composite_order_byの単体テストが無く、
+    その唯一の実利用箇所（masters側の管理者sort=department）も「非管理者に効かない
+    こと」のみ検証され、「管理者が指定した場合の実際の並び順」自体は未検証。
+14. masters/models.py RetentionPeriod.__str__（永年/通常の2分岐）の内容を直接
+    検証するテストが無い（audit_services.log経由で間接的に文字列化されるのみ）。
+15. organizations/models.py DepartmentViewScope.__str__、および(viewer,visible)組の
+    UniqueConstraint自体のDBレベル直接テストが無い。
+16. masters/views.py のGroup系（Regist/Edit/Delete）・Retention系（Regist/Edit/Delete）に
+    ついて、設定メニューのロール別アクセス制御がList画面のみ個別検証されており、
+    Category系のような全View個別の回帰テストが無い。
+17. organizations/services.py branch_choicesの重複排除（同一branch_codeが複数部課に
+    またがる場合に1件のみ列挙されること）が、複数本支所が存在するデータセットでは
+    未検証。
+18. masters/views.py CategoryListView.apply_special_sortの"group"列ソートがasc方向
+    のみ検証されており、desc方向は未確認。
+19. masters/services.py scoped_get_object_or_404のCategory側で、部署スコープ外
+    アクセス時のlogger.warning文言（entity_name="カテゴリー"）がGroup側のように
+    直接アサーションされていない（404ステータスのみ確認）。
+
+================================================================================
+■ 対応記録（2026-08-26）
+================================================================================
+優先度「高」5件・「中」7件をorganizations/tests.py・masters/tests.pyに追加。追加のたびに
+`manage.py test organizations masters`を実行し、全件PASSを確認済み（82件→127件、+45件）。
+中優先度11（二重送信トークン不正時分岐）はorganizations側2View（Regist/Edit）、masters側は
+GroupRegistView/GroupEditView/GroupDeleteView（Category側は同一基底クラス実装のため重複を
+避けて省略）＋RetentionRegistView/RetentionEditView/RetentionDeleteView（独立実装のため個別に
+検証）の計8件としてまとめて実装した。
+
+優先度「低」7件（No.13〜19）は今回見送り。理由：
+- No.13(department_composite_order_by単体テスト)・No.17(branch_choices重複排除)：
+  唯一の実利用箇所が「非管理者に効かないこと」まで検証済みで、残る「管理者が指定した場合の
+  実際の並び順」は上記No.9で追加したdefault_order_by検証と重複が大きく実益が薄いため。
+- No.14(RetentionPeriod.__str__)・No.15(DepartmentViewScope.__str__/UniqueConstraint)：
+  いずれも単純な文字列化・DB制約で、audit_services.log経由や既存のapply_dept_action
+  idempotencyテストで間接的に実質カバーされているため。
+- No.16(Group/Retention系の設定メニューロール別アクセス制御の個別View検証)：
+  共通のSettingsMenuAccessMixinをCategory系で既に個別検証済みで、実装が完全に共通のため
+  同一パターンの重複テストになる。
+- No.18(CategoryListView.apply_special_sortのdesc方向)：asc方向で複合ソートのキー自体は
+  検証済みで、desc方向は単純な文字列prefix("-")の付与のみのため回帰の主要リスクは低い。
+- No.19(scoped_get_object_or_404のCategory側ログ文言)：404ステータス自体は検証済みで、
+  ログ文言の左右差（entity_name）はGroup側で同一実装パターンとして既に検証済みのため。
+
+将来これらの経路を直接使う変更が入る場合は、その時点でこのレポートを再確認してテスト追加を
+検討すること。

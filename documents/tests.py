@@ -315,6 +315,24 @@ class SearchQuerysetTests(TestCase):
         self.assertEqual(list(qs), [self.doc_apple_only])
 
 
+class SearchFormRadioDefaultsInitialAccessTests(TestCase):
+    """core.forms.apply_radio_defaults / core.widgets.InlineRadioSelectの「初回アクセス時
+    （GETにtitle_match等のキーが無い状態）に原本index.html:383,387,395通りchecked状態で
+    表示される」分岐は、本ファイルの既存テストが常にtitle_match等を明示指定しているため
+    一度も経由されていなかった（テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def test_initial_access_without_params_defaults_to_checked_or_and_save(self):
+        form = SearchForm(data={})
+        or_label, and_label = str(form["title_match"]).split("</label>")[:2]
+        self.assertIn("checked", or_label)
+        self.assertNotIn("checked", and_label)
+
+        save_label, expiry_label = str(form["save_day_kbn"]).split("</label>")[:2]
+        self.assertIn("checked", save_label)
+        self.assertNotIn("checked", expiry_label)
+
+
 class SearchSortTests(TestCase):
     """screen-search列見出しソート（documents.search_services.apply_sort）の回帰テスト。
     「No.」列は原本sortTable(1,'num',...)と同じく、その行に紐付いた表示番号（display_no、
@@ -738,6 +756,32 @@ class DownloadViewTests(TestCase):
         response = self.client.get(f"/documents/{self.document.pk}/download/")
         self.assertEqual(response.status_code, 403)
         self.assertFalse(AuditLog.objects.filter(action="文書検索 ダウンロード").exists())
+
+    def test_download_audit_log_records_document_privacy_flag_value(self):
+        """core.record_views.BaseFileServeView.audit_extra_kwargs()（documents側の
+        personal_info_flag付与）はDocument.privacy_flagの値をそのまま渡すが、既存の
+        test_download_creates_audit_logはaction/employee_no/event_messageのみ確認しており
+        personal_info_flagの値自体は未検証だった（テストカバレッジ棚卸しで発見、2026-08-26追加）。
+        既定値(True)ではなくFalseを明示設定し、ハードコードされた固定値でないことを確認する。
+        """
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        self.document.privacy_flag = False
+        self.document.save(update_fields=["privacy_flag"])
+        self.client.get(f"/documents/{self.document.pk}/download/")
+        entry = AuditLog.objects.get(action="文書検索 ダウンロード")
+        self.assertFalse(entry.personal_info_flag)
+
+    def test_display_name_strips_uuid_prefix(self):
+        """core.models.UuidPrefixedFilenameMixin.display_name（ダウンロード時のfilenameとして
+        BaseFileServeView内部で使われる）。contracts.RelatedFile側は値自体を直接検証済みだが、
+        Document本体側はDownloadViewTestsがレスポンスの成否のみを見ており、値自体
+        （UUIDプレフィックス除去後の元ファイル名）を確認するテストが無かった
+        （テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        basename = self.document.file.name.rsplit("/", 1)[-1]
+        self.assertIn("_", basename)  # storage_paths側でUUIDプレフィックスが付与されていること
+        self.assertEqual(self.document.display_name, "dl.txt")
 
     def test_deleted_document_download_returns_404(self):
         """xlsx 検索・閲覧・変更!B331(Rev1.2)「削除されている(削除フラグがTrue)文書は、ボタンを

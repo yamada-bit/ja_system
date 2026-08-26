@@ -1,0 +1,188 @@
+organizations / masters アプリ コードレビュー結果
+対象: organizations/{models,views,services,forms,api,urls,admin}.py
+      masters/{models,views,services,forms,urls,admin}.py
+      （migrationsは対象外。修正は未実施、指摘一覧のみ）
+
+
+==================================================
+■ 正しさのバグ（Correctness Bugs）
+==================================================
+
+[高]
+1. organizations/views.py:164-177（呼び出し先: organizations/services.py:9-37 apply_dept_action）
+   部署の「統合・分割」処理が、DeptEditView.post内の他の保存処理（form.save()）と異なり、
+   トランザクション・IntegrityError捕捉のどちらも無いまま実行されている。
+   - apply_dept_action()は複数targetに対してDepartmentViewScope.update_or_create()を
+     ループで呼ぶが、ループ全体を包むtransaction.atomic()が無いため、途中で例外が発生すると
+     一部targetだけ反映された中途半端な状態になり得る。
+   - views.py側もこの呼び出しをtry/exceptで囲っていないため、何らかの理由でIntegrityError等が
+     発生した場合、DeptRegistView/DeptEditView本体の保存と違って未捕捉のまま500になる。
+   - さらに、この処理の直前（views.py:158-162）で「部署管理 更新」の監査ログを既に記録して
+     しまっているため、apply_dept_action側で失敗すると「更新は成功したとログにあるのに
+     統合・分割は反映されていない」という監査ログと実態の不整合が生じる。
+   - 発生条件は複数部署に対する統合・分割の同時実行など稀なケースだが、CLAUDE.mdの
+     「例外処理を完成させる」規約にも反する。同ファイル内で確立されている
+     try/except IntegrityError + transaction.atomic() のパターンをここにも揃えるべき。
+
+[中]
+2. masters/forms.py:141-200（CategoryForm）
+   Category.doc_kbn（書類管理区分）と、選択したgroup（分類=Group）のdoc_kbnとの整合性を
+   検証する処理がどこにも無い（clean()にもテンプレート側JSにも無し、cat_regist.html/
+   cat_edit.htmlを確認済み）。そのため「書類管理区分=契約書管理」のカテゴリーに
+   「書類管理区分=文書管理」の分類（Group）を紐付ける、といった本来あり得ない組み合わせが
+   登録できてしまう。documents/contracts側は書類管理区分ごとにカテゴリー・分類を絞り込んで
+   選択させる前提のため、この不整合データが検索・登録画面で意図しない表示崩れを起こしうる。
+   ※原本HTML/xlsxがこの連動制御を実装していない可能性もあるため、原本フィデリティ方針
+   （「原本が実装していない動的制御を勝手に追加しない」）に従い、まず原本側の仕様を
+   確認した上で対応要否を判断すること。
+
+[低]
+3. masters/services.py:25-38（scope_queryset_by_department）
+   非管理者に対して「自部署のみ」（xlsx 分類管理!B73-75等）を意図しつつ、department未設定
+   （NULL、Rev1.2移行前のレガシー行）の全件を、部署に関わらず全非管理者に見せる実装になっている。
+   docstringに「移行前データの退行防止のための意図的な暫定措置」と明記されており、
+   バグというより設計判断だが、現状は「自部署のみ」という要件より広いスコープを非管理者全員に
+   許可している状態である。既存データの部署バックフィルが完了しているか、完了時期の見込みを
+   確認し、完了後はこの分岐を外す（またはスコープをさらに絞る）想定になっているか要確認。
+
+[低]
+4. masters/services.py:9-22（department_scope_ids）
+   employee.department_idが未設定（None）の場合に{None}を返し、上記3.のNULL許容フィルタと
+   組み合わさると「department未設定の行のみが見える」という状態になる。エラーにも警告にも
+   ならず静かに発生するため、職員のdepartment必須制約が本当に保証されているか
+   （accounts.Employee側）を確認し、保証されているなら実害は無いが、防御的な一言コメント
+   もしくはガードがあると安全性が高まる。
+
+
+==================================================
+■ 再利用性・簡潔性・効率性の指摘（Reuse / Simplification / Efficiency）
+==================================================
+
+[高]
+1. masters/views.py 全体（Group系: 33-300行 / Category系: 303-566行）
+   分類（Group）とカテゴリー（Category）の一覧・登録・編集・削除の4画面が、モデル名以外
+   ほぼ完全に同一ロジックでコピペ実装されている（_xxx_queryset_with_counts、
+   search-form検証、department_scope_ids/scope_queryset_by_departmentの適用、
+   sort-key分岐、Paginator(qs, 100)、登録/編集のtoken発行・消費、非管理者の自部署自動設定、
+   transaction.atomic()+IntegrityError捕捉、audit_services.log、削除確認の紐づけ件数0件
+   チェック等）。documents/contracts側は既にcore（BaseDeleteView・scoped_get_object_or_404等、
+   2026-08-25集約）で同種の重複を解消済みの前例があるにも関わらず、masters内のGroup/Category
+   はその横展開が行われていない。約760行中350行規模の実質的な重複であり、実際に
+   「コード監査で発見」の修正が個別に2箇所へ適用された履歴がある＝将来の変更漏れリスクが
+   高い状態。core側にパラメータ化した基底クラス（model/form_class/template_name/
+   audit_action_prefix等）を用意し、Group/Category双方を薄いサブクラスにする横展開を推奨。
+
+[中]
+2. organizations/views.py:74-77,131-134 および masters/views.py（Group/Category/Retentionの
+   regist/edit/deleteで計9箇所）
+   二重送信トークンの「チェック→失敗ならmessages.error+redirect」という4行パターンが
+   organizations/masters内だけで11箇所、プロジェクト全体では24箇所同一文言で重複している。
+   core.double_submitはissue_token/consume_tokenのプリミティブのみを提供しており、
+   このラッパー自体は未集約。core側に`reject_if_resubmitted(request, form_id, redirect_to)`
+   相当のヘルパーを追加すれば、この2アプリだけで約90行の重複削減になる。
+
+[中]
+3. organizations/views.py:84-100,143-155 および masters/views.py（Group regist/edit、
+   Category regist/edit、Retention regist/editの計6箇所、上記2.と重なる範囲で計8箇所）
+   「transaction.atomic()内でform.save() → IntegrityError捕捉 → logger.exception →
+   form.add_error → token再発行 → 再描画」という定型パターンが8箇所で複製されている。
+   フィールド名・エラーメッセージ文言以外は完全に同一構造で、core側にヘルパー
+   （例: save_or_add_unique_error(form, field, message)）を用意する余地が大きい。
+
+[中]
+4. permissions/services.py:187-192、masters/views.py:92-99、masters/views.py:366-370
+   「sort_key=="department"のとき(branch_code, section_code)の複合キーでソートする」という
+   特殊分岐が3箇所で独立に手書きされている。masters/views.py自体のコメントが
+   「AUTHORITY_SORT_FIELDSのdepartment扱いと同じパターン」と明記し3つ目の複製であることを
+   認識しながらインライン実装しており、共通ヘルパー化（organizations.services等、
+   Department関連の共通ロジックを既に持つ場所）が望ましい。
+
+[低〜中]
+5. accounts/services.py（STAFF_SORT_FIELDS）、masters/views.py（GROUP_SORT_FIELDS/
+   CATEGORY_SORT_FIELDS）、organizations/views.py（SORT_FIELDS）、permissions/services.py
+   （AUTHORITY_SORT_FIELDS）の計5箇所で、「sort_key→ORMフィールドのdictマッピング＋
+   asc/desc接頭辞付与＋order_by」という同型パターンが繰り返されている。
+   core側に汎用ソートヘルパー（apply_sort(qs, sort_key, sort_dir, fields_map, tiebreaker)等）
+   を用意する余地。
+
+[中]
+6. masters/services.py:41-61（scoped_get_object_or_404） vs core/scoping_services.py:8-34
+   （同名の共通ヘルパー、2026-08-25にdocuments/contracts間の重複解消のために作成された経緯あり）。
+   両者はほぼ同一アルゴリズム（スコープ絞り込み→pk検索→無ければ無スコープで存在確認→
+   logger.warning→Http404）だが、シグネチャの違い（dept_ids_resolverコールバック方式か、
+   NULL許容のscope_queryset_by_department方式か）により再利用されず個別実装されている。
+   結果としてログの実装も微妙に乖離しており、core版はentity_nameを日本語（"文書"/"契約書"）で
+   出力するのに対し、masters版はbase_qs.model.__name__（"Group"/"Category"と英語）を
+   そのままlogger.warningに出している。セキュリティ関連ログの一貫性という観点でも、
+   core側のヘルパーをscope_queryset呼び出し可能な形に一般化し、masters側から再利用する形に
+   寄せることを推奨。
+
+[低]
+7. masters/views.py:33-47,303-312（_group_queryset_with_counts / _category_queryset_with_counts）
+   doc_count（Count("documents")）とcontract_count（Count("contracts")）を全行で毎回集計し、
+   doc_kbnに応じてCase/Whenでどちらか一方だけ採用、もう一方は捨てている。一覧画面は
+   1ページ100件表示のため、ページ表示のたびに不要なJOIN付き集計が2倍発生している。
+
+[低]
+8. core/views.py:140-143（OtherSettingsView._render_main、organizations.MenuItemSettingの一覧）
+   Department.objects.order_by(...)をselect_related("menu_item_setting")せずに
+   ループ内でdepartment.menu_item_settingへアクセスしており、部署件数分のN+1クエリになる。
+   coreアプリのファイルだが実質organizations.MenuItemSettingの一覧処理のため本レビューに含める。
+
+[低]
+9. organizations/api.py:38-47（OptionListAPIView.dispatch）
+   permissions.mixins.SettingsMenuAccessMixinが提供する認可チェックの流れを、MRO制約
+   （core.api.BaseOptionListAPIViewとの継承順の都合）を理由に手書きで再実装している。
+   現状はこの1箇所のみだが、同種の追加ゲーティングが必要な派生クラスが今後増えると
+   同じ回避パターンがコピーされる可能性がある。BaseOptionListAPIView.dispatchに
+   オーバーライド可能なフックを設ける等、根本側の一般化を検討の余地あり。
+
+[低]
+10. organizations/services.py:55-76（branch_choices / section_choices）
+    values_list(...).distinct()でDB側の重複排除を行った上で、さらにPython側で
+    dict(...).items()による重複排除を重ねており、無駄な変換が発生している
+    （部署マスタは件数が小さいため実害は軽微）。
+
+
+==================================================
+■ CLAUDE.mdコーディング規約との整合性
+==================================================
+
+確認済みで違反なし: CBVのみ（関数ベースビュー無し）／verbose_name・help_text・エラー
+メッセージ・docstringの日本語統一／監査ログ記録（audit_services.log呼び出し）／
+Djangoテンプレートの複数行コメント{# #}の罠（該当箇所なし）／一覧画面のPaginator使用
+（部署管理一覧はxlsxの「ページャー不要」明記により対象外、分類/カテゴリー一覧は使用済み）。
+
+[中]
+1. masters/services.py:41-61（scoped_get_object_or_404）
+   規約: 「共通処理はcore相当の共通基底クラス・サービス関数に集約し、アプリ間で重複する
+   ロジックを増やさない」
+   core/scoping_services.py:8-34に同名・同目的の共通ヘルパーが既に存在するにもかかわらず、
+   masters側は独自に再実装している（上記「再利用性」指摘6.と同一箇所、規約違反の観点として
+   再掲）。
+
+[低]
+2. masters/views.py:33-58, 303-323（_group_queryset_with_counts等のクエリ構築ロジックと
+   GROUP_SORT_FIELDS/CATEGORY_SORT_FIELDS）
+   規約: 各アプリのファイル役割分担「services.py（ビューから分離したビジネスロジック）」
+   一覧のソート・集計ロジックがviews.pyに直書きされている。同種のロジック
+   （AUTHORITY_SORT_FIELDS/filter_authority_queryset）はpermissions/services.pyに
+   正しく配置されており、masters/views.py自身のコメントもこの類似性を認識している
+   （「AUTHORITY_SORT_FIELDSのdepartment扱いと同じパターン」）にもかかわらず、
+   配置ルールが揃っていない。
+
+[低]
+3. masters/views.py:303-312（_category_queryset_with_counts）
+   規約: 「クラス・非自明なメソッドにはdocstringを付ける」
+   対になる_group_queryset_with_counts（33行目〜）には集計ロジックの理由を説明する
+   docstringがあるが、同一構造の_category_queryset_with_countsにはdocstringが無い。
+
+
+==================================================
+■ 補足
+==================================================
+- 正しさのバグ「高」1件は稀なレースコンディション条件下だが、監査ログとの不整合という
+  観点で優先度を高めに設定。
+- 再利用性の指摘「高」1件（masters/views.pyのGroup/Category重複）は、documents/contracts側で
+  既にcoreへ横展開済みの前例があるため、同様の対応がしやすい状況にある。
+- 対応方針・実装は別途指示のこと（本レビューは指摘一覧のみ、修正は未実施）。

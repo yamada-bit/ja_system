@@ -1,0 +1,385 @@
+documents/contracts アプリ全体コードレビュー結果（/code-review high 相当）
+対象: documents/{models,storage_paths,forms,views,api,services,search_services}.py
+      contracts/{models,storage_paths,forms,views,api,services,search_services}.py
+レビュー方式: 4系統（①models/storage_paths/forms、②views.py、③api/services/search_services、
+④documents-contracts間の重複専任監査）で並行精査し、主要な正しさのバグは実ファイルを再読して検証済み。
+documents/contractsは並行構成のため、同種の指摘は両アプリ分をまとめて1件として記載。
+
+【2026-08-25 追記】高・中優先度の指摘は全件修正済み（1件ずつdiff確認＋python manage.py test
+documents contracts で都度検証、最終確認は228件OK）。低優先度は方針通り未対応。詳細は本ファイル
+末尾の「対応状況まとめ（2026-08-25）」セクション参照。
+
+
+================================================================================
+A. 正しさのバグ（correctness bugs）
+================================================================================
+
+--------------------------------------------------------------------------------
+[高] documents/api.py:45 — DetailAPIView の部署スコープ判定が他の全操作と不整合（検証済み）
+--------------------------------------------------------------------------------
+    if not can_select_department(request.user) and document.department_id != request.user.department_id:
+
+検索一覧（documents/search_services.py）や他の全操作系ビュー（download/preview/edit/delete/一括処理、
+いずれも documents/services.py の document_searchable_department_ids() 経由の scoped_get_object_or_404）
+は「自部署＋organizations.DepartmentViewScope による閲覧部署範囲」でスコープ判定しているのに対し、
+詳細ポップアップ用の DetailAPIView だけが「自部署と厳密一致」でしか判定していない。
+
+シナリオ: 部署Aから部署Bへの閲覧範囲拡張が DepartmentViewScope に設定されている場合、部署Aの一般職員は
+検索結果一覧に部署Bの文書が表示される（visible_department_ids経由）。しかし一覧をダブルクリックして
+詳細ポップアップを開こうとすると document.department_id != request.user.department_id が真になり
+PermissionDenied(403) になる。「一覧には出るのに開けない」という機能不全であり、Rev1.1で追加された
+閲覧部署範囲機能がこの画面だけ効いていない。
+
+対照として contracts/api.py:55-56 の同名 DetailAPIView は
+contract_searchable_department_ids(request.user) で正しく判定しており、documents側だけ実装が
+古い方式のまま取り残されている（documents/services.py には既に同じ範囲を返す
+document_searchable_department_ids() が存在し、本来それを再利用すべき）。
+documents/tests.py の DetailAPIViewTests は閲覧部署範囲テーブルに登録の無い他部署のみをテストしており
+この回帰は検知されない。
+
+
+--------------------------------------------------------------------------------
+[中] documents/views.py:158-196（UploadStep2View.post）, contracts/views.py:204-247（同） —
+     作成フローで DBError が未捕捉、ロールバック時に既保存ファイルが孤児化する
+--------------------------------------------------------------------------------
+transaction.atomic() ループ内で except OSError しか捕捉していない。document.save()（contracts側は
+RelatedFile.objects.create()）で IntegrityError/OperationalError 等の DBError が起きると未捕捉のまま
+生の500応答になり、CLAUDE.mdの「例外処理を完成させる」規約に反する。さらに複数ファイルを1リクエストで
+まとめて登録する際、途中の1件でDB例外が起きた場合、transaction.atomic()はDBの部分コミットは防ぐが、
+それ以前のファイルで既に document.file.save() により物理ストレージへ書き込み済みのファイル実体は
+ロールバックされず、DBに紐づく行の無い孤児ファイルとして残る。
+
+
+--------------------------------------------------------------------------------
+[中] documents/views.py:295（DocumentEditView.post）, documents/views.py:446（BulkEditView.post）
+     対 contracts/views.py:348-365, 513-532（同） — 編集フローの例外処理がアプリ間で非対称
+--------------------------------------------------------------------------------
+contracts側は apply_contract_edit(...) 呼び出しを except OSError / except DBError で個別に捕捉し
+ログ・利用者向けエラーメッセージ・リダイレクトを用意しているが、documents側の同等メソッドは
+apply_document_edit(...) を裸で呼んでおり、DB例外が発生すると未捕捉のまま生の500になる。
+両アプリのdocstringは互いに「同じ設計」と参照し合っているが、実装の完成度が食い違っている。
+
+
+--------------------------------------------------------------------------------
+[中] documents/models.py:70,134 / contracts/models.py:73,129 —
+     title_normalized（CharField(255)）が NFKC 正規化後の文字数増加を考慮していない
+--------------------------------------------------------------------------------
+core/text_normalization.py の normalize_for_search() は unicodedata.normalize("NFKC", text) を
+使用しており、NFKC正規化は文字数を増やすケースがある（例: 株式会社を表す互換文字1字→4字、
+ローマ数字1字→"VIII"等の複数字）。title が255文字ぎりぎりでこれらの互換文字を含む場合、
+save() 内の self.title_normalized = normalize_for_search(self.title) が255文字を超える文字列を
+生成し得るが、title_normalized は title と同じ max_length=255 の CharField。Model.save() は
+full_clean() を呼ばないため素通りしてINSERT/UPDATEされ、DBのvarchar(255)制約に反して
+DataError が未捕捉のまま発生し保存が500エラーになる（memo_normalized/extracted_text_normalized は
+TextFieldのため対象外）。
+
+
+--------------------------------------------------------------------------------
+[低] documents/views.py:465-466（BulkEditView.post 最終ステップ）, contracts/views.py:549-550（同） —
+     一括編集完了サマリのクエリに is_deleted フィルタが無い
+--------------------------------------------------------------------------------
+Document.objects.filter(pk__in=state["pks"]) / Contract側も同様に is_deleted を絞り込んでいない。
+ウィザード中に別セッション・別ユーザーが同じレコードを削除した場合、完了モーダルの一覧に削除済み
+レコードがそのまま表示され得る。他の全ビューで徹底されている is_deleted 一貫性から外れている。
+
+
+--------------------------------------------------------------------------------
+[低] contracts/forms.py:107-113（contract_amount）— 契約金額に下限バリデーションが無い
+--------------------------------------------------------------------------------
+CommaNumberInput はカンマ除去のみで min_value 等の制約が無いため、負の契約金額を含む改ざん
+POSTデータがバリデーションを通過し得る。
+
+
+--------------------------------------------------------------------------------
+[低] documents/forms.py:229-234, contracts/forms.py:233-238（save_date_start/end）、
+     contracts/forms.py:98-103（contract_period_start/end） —
+     開始日≦終了日のクロスフィールド検証が無い
+--------------------------------------------------------------------------------
+各DateFieldは個別には妥当なため、開始日＞終了日でもフォームは通過する。結果的に検索は__gte/__lteの
+ANDで常に0件になり、利用者には「条件が逆」ではなく単に「該当なし」としか表示されない。
+※ 原本HTML/xlsxがこの検証を元々持たない可能性があるため、実装要否は原本を確認の上で判断が必要。
+
+
+================================================================================
+B. 再利用性・単純化・効率性の指摘（reuse/simplification/efficiency）
+================================================================================
+CLAUDE.md「共通処理はcore相当の共通基底クラス・サービス関数に集約し、アプリ間で重複するロジックを
+増やさない」との整合性という観点で、documents/contracts間の重複を中心に列挙。
+2026-08-25に can_delete と対をなす deletion_denial_message、build_zip_archive は
+core.deletion_services / core.zip_services へ集約済みだが、同規模・同種の重複が他に多数残っている。
+
+--------------------------------------------------------------------------------
+[高] documents/services.py:58-81, contracts/services.py:36-60（scoped_get_object_or_404） —
+     部署スコープ外404化ロジックがほぼ全文一致
+--------------------------------------------------------------------------------
+「dept_idsで絞ったqsで存在確認→無ければ無制限qsで再確認→存在すれば不正アクセスとしてwarningログ→
+Http404」という24〜25行の構造が、変数名・ログ文言・部署ID解決関数以外は同一。ダウンロード・
+プレビュー・編集・削除・一括編集の全経路が経由するセキュリティ上重要な共通処理であり、
+core.services 等に entity_name と部署ID解決関数を引数化した汎用関数として切り出すべき
+（修正漏れの実害が大きい＝Aの[高]で見つかったDetailAPIViewの不整合と同種のリスク）。
+
+
+--------------------------------------------------------------------------------
+[高] documents/services.py:20-32（can_delete, DELETE_WINDOW_DAYS）,
+     contracts/services.py:20-25（同） — 削除可否判定ロジックが定数ごと完全重複
+--------------------------------------------------------------------------------
+is_deletedチェックと「保存から7日以内か」の判定が1行単位で同一。対をなす deletion_denial_message は
+既にcore化されているのに can_delete 自体は取り残されている。core.deletion_services.can_delete(obj,
+window_days=DELETE_WINDOW_DAYS) 等への統合が妥当。片方だけ日数定数を変更してもう片方が追従しない
+リスクが最も懸念される典型パターン。
+
+
+--------------------------------------------------------------------------------
+[高] documents/search_services.py:35-78（apply_sort）, contracts/search_services.py:34-70（同） —
+     ソート処理が約40行ほぼ同一
+--------------------------------------------------------------------------------
+display_noのWindow付与、no列の数値ソート、info/uploader列の複合ソート、それ以外の汎用列ソートの
+ロジックが完全一致し、参照フィールド名（department__section_name等）も文字通り同一。SORT_FIELDS辞書と
+特殊列名だけをパラメータ化すれば core.search_services.apply_sort(qs, sort_key, direction, sort_fields)
+として1本化できる。
+
+
+--------------------------------------------------------------------------------
+[高] documents/search_services.py:157-195（_apply_word_filter, _apply_freeword_filter）,
+     contracts/search_services.py:137-163（同） — フリーワード/タイトル検索のAND/OR組み立てが重複
+--------------------------------------------------------------------------------
+title_normalized/memo_normalized/extracted_text_normalized という同名フィールドへの icontains と
+AND/OR結合ロジックが完全に同一（documents側はif/elseループ、contracts側は三項演算子と書き方の差のみ）。
+core側に汎用関数として切り出し可能。
+
+
+--------------------------------------------------------------------------------
+[高] ビュー層の並行重複一式（documents/views.py ⇔ contracts/views.py）
+--------------------------------------------------------------------------------
+以下、モデル名・kind引数・監査ログのaction文言・URL名前空間以外ほぼ完全一致のロジックが並行実装
+されている。各20〜60行規模で、CLAUDE.mdの「core相当への集約」方針にもっとも反する領域であり、
+片方だけ修正が入って挙動がズレるリスクが実際に過去何度も発生している（監査コメント多数）。
+
+  - UploadStep1View（documents:42-80, contracts:95-131）: clear_pending_files→files/existing_pending
+    判定→save_pending_filesの例外処理まで完全一致
+  - PendingPreviewView（documents:560-585, contracts:900-929）: can_downloadチェック→index範囲チェック
+    →open_pending_fileの例外処理まで完全一致
+  - _file_rows / _pending_preview_context（documents:522-557, contracts:875-897）: 6〜15行の
+    ヘルパー関数が1文字違わず重複
+  - DownloadView.get / PreviewView.get（documents:637-711, contracts:658-718）:
+    scoped_get_object_or_404→can_downloadチェック→FileResponse（OSError捕捉→404）→監査ログ、
+    という流れが4ビューとも同一パターン。DownloadViewとPreviewViewの差はas_attachmentの真偽のみ。
+  - BulkDownloadView.post（documents:714-785, contracts:721-785）: pks検証→can_downloadチェック→
+    部署スコープ絞り込み→build_zip_archive呼び出し→監査ログ→missing_count時のwarning→ZIPレスポンス
+    組み立てまで約60行がほぼ同一。共通基底ビュー化の最有力候補。
+  - DeleteView.post（documents:788-862, contracts:788-872）: AJAX判定→scoped_get_object_or_404＋
+    Http404捕捉時のJSON分岐→can_delete拒否時のJSON/PermissionDenied分岐→DBError捕捉時の分岐→
+    監査ログ→成功時レスポンスまで約55行同一（contracts側はcan_edit_contractチェックが1ブロック
+    追加されているのみ）。
+
+core にモデル/kind/URL名前空間をパラメータ化した共通View基底クラス・ミックスインを設け、documents/
+contractsはサブクラスとして差分（モデル・action文言・URL名）のみ持つ形へ寄せることを推奨。
+
+
+--------------------------------------------------------------------------------
+[中] documents/models.py:127-147（Document.save）, contracts/models.py:127-142（Contract.save） —
+     正規化保存ロジックの重複
+--------------------------------------------------------------------------------
+title_normalized/memo_normalized/extracted_text_normalizedへの代入とupdate_fieldsへの追記ロジック
+（約20行）が完全一致。core.models に NORMALIZED_FIELDS 相当のクラス属性を持つ抽象基底モデル/Mixinを
+用意して集約する余地がある。
+
+
+--------------------------------------------------------------------------------
+[中] display_name プロパティの3重重複 —
+     documents/models.py:149-155（Document）, contracts/models.py:144-150（Contract）,
+     contracts/models.py:177-183（RelatedFile）
+--------------------------------------------------------------------------------
+アップロードパスが付与したUUIDプレフィックスをファイル名から除去するロジックが3箇所で完全に同一内容。
+共有Mixinまたはユーティリティ関数への切り出し候補。
+
+
+--------------------------------------------------------------------------------
+[中] documents/storage_paths.py:7-45, contracts/storage_paths.py:7-52 —
+     アップロード先パス生成ロジックの重複（計5関数）
+--------------------------------------------------------------------------------
+「年/部署コード/カテゴリーコード/UUID_ファイル名」という同一階層化ロジックが、ルートディレクトリ名
+（documents/かcontracts/か）とsearchable用サブディレクトリの有無以外は同じ実装で分散。
+core.storage_paths.build_hierarchical_upload_path(instance, filename, *, root, searchable=False) の
+ような汎用関数に切り出せる。ディレクトリ構成を将来変更する際の修正漏れリスクを避けられる。
+
+
+--------------------------------------------------------------------------------
+[中] documents/forms.py:153-161,253-266（MATCH_OR/MATCH_AND/MATCH_CHOICES/SEARCH_RADIO_DEFAULTS,
+     ラジオ既定値パッチ）, contracts/forms.py:162-168,246-257（同） — ほぼ同一コードが重複
+--------------------------------------------------------------------------------
+contracts側のコメントは「documents.forms.SEARCH_RADIO_DEFAULTS参照」と重複を認識していながら、
+core.forms 側の他の共通化パターン（scoped_group_and_category_querysets等）に倣って統合されていない。
+
+
+--------------------------------------------------------------------------------
+[中] documents/views.py:339-387（BulkEditStartView.post）, contracts/views.py:413-450（同） —
+     pks検証・並び順確定ロジックの重複
+--------------------------------------------------------------------------------
+pksの数値検証（不正値はwarningログを残して除外）、部署スコープでのcandidates絞り込み、existing_pksと
+の照合でordered_pksを確定する処理まで約35行がほぼ同一。core.bulk_edit_servicesに「候補queryset・
+許可部署ID集合・生pks」から「並び順を保った有効pks一覧」を返す関数として切り出せる。
+（付随して[低]: 選択pksの重複除去が無く、改ざん等で同じレコードを2回巡回し得る）
+
+
+--------------------------------------------------------------------------------
+[低] documents/search_services.py:198-221（_apply_notice_filter）,
+     contracts/search_services.py:166-186（同） — お知らせリンク遷移時の絞り込み分岐が重複
+--------------------------------------------------------------------------------
+core.notice_services.add_months は既に共有されているが、expired/expiring_soon/recently_deletedの
+3分岐自体（各約20行）はdocuments/contractsそれぞれに再実装されている。
+core.notice_services.apply_notice_filter(qs, notice) 等への集約余地がある。
+
+
+--------------------------------------------------------------------------------
+[低] documents/services.py:166-179（_add_years/_add_months/_days_in_month）,
+     contracts/services.py:137-140（calculate_expiry_date） — うるう年補正ロジックの再実装
+--------------------------------------------------------------------------------
+契約書側 calculate_expiry_date は_add_yearsを再利用せず、うるう年（2/29起点）補正を自前で
+try/except ValueError: base.replace(month=2, day=28, ...) と再実装している。ロジックは文書側の
+_add_yearsと同一なので再利用すれば二重保守を避けられる。
+
+
+================================================================================
+C. CLAUDE.mdコーディング規約との整合性
+================================================================================
+CBV専用（関数ベースビュー禁止）については明確な違反は無し。部署スコープ・is_deleted・権限チェックは
+ほぼ全ビューで一貫して丁寧に対応済み（2026-08-25の一連のセキュリティレビュー修正が反映されている）。
+以下は上記A/Bに含めなかった、規約整合性のみに関わる細目。
+
+--------------------------------------------------------------------------------
+[中] documents/api.py:45 周辺の部署スコープ関数配置の非対称（参考: Aの[高]と関連）
+--------------------------------------------------------------------------------
+document_searchable_department_ids は documents/services.py に、対応する
+contract_searchable_department_ids は permissions/services.py にあり、命名パターンが対でありながら
+定義場所が揃っていない。契約書側は PermissionProfile.contract_visible_departments という権限データに
+依存するため permissions 側に置く理由はあるが、コードを追う際に紛らわしい。docstringでの配置理由の
+明記、または将来的な集約を検討。
+
+
+--------------------------------------------------------------------------------
+[低] documents/models.py:9, contracts/models.py:13, documents/storage_paths.py:4,
+     contracts/storage_paths.py:4, documents/forms.py:19, contracts/forms.py:18 —
+     logger = logging.getLogger(__name__) が宣言のみで未使用（6箇所）
+--------------------------------------------------------------------------------
+CLAUDE.mdの「ログを整備する」規約の主対象はservices.py等のI/O層だが、宣言だけで一度もlogger.xxx()が
+呼ばれていない。例えば部署/保存期間フィールドを権限不足のため強制的にdisabledにする箇所
+（documents/forms.py:120-121,132-133, contracts/forms.py:135-136,285-286）は「想定外の分岐」寄りの
+候補としてlogger.warningを検討する余地がある。
+
+
+--------------------------------------------------------------------------------
+[低] contracts/models.py:174（RelatedFile.__str__）— 自身のdisplay_nameプロパティを使っていない
+--------------------------------------------------------------------------------
+self.file.name（UUIDプレフィックスとディレクトリを含む生のストレージパス）をそのまま返しており、
+同モデルが表示用に用意しているdisplay_nameプロパティ（177-183行）を使っていない。
+Document.__str__/Contract.__str__が人間可読なtitleを返すのと比べて一貫性がない。
+
+
+--------------------------------------------------------------------------------
+[低] contracts/views.py:609-611（SearchView）— クラスdocstringが無い
+--------------------------------------------------------------------------------
+documents/views.py:588-589のSearchViewには"""screen-search（文書モード）。..."""のdocstringがあるが、
+contracts側の対応クラスには無い。CLAUDE.mdの「クラス・非自明なメソッドにはdocstringを付ける」規約と、
+このファイル自身が他の全クラスに付けている慣行から外れている。
+
+
+--------------------------------------------------------------------------------
+[低] documents/views.py:238-336（DocumentEditView）, contracts/views.py:282-410（ContractEditView） —
+     UpdateViewを継承しているが実質使っていない
+--------------------------------------------------------------------------------
+get_object()以外のget()/post()を完全に上書きし、get_context_data()/form_valid()/get_success_url()
+等UpdateView本来の仕組みを使わず、コンテキストも毎回手動で辞書組み立てしている（context_object_name
+属性も宣言されているが実際には未使用）。動作上のバグではないが、「Django標準のUpdateViewフックが効く」
+という誤った期待を読み手に持たせる。
+
+
+--------------------------------------------------------------------------------
+[低] documents/views.py:749（BulkDownloadView.post内）, contracts/views.py:754（同） —
+     HttpResponseのみメソッド内ローカルimport
+--------------------------------------------------------------------------------
+他のdjango.httpシンボル（FileResponse, Http404, JsonResponse）はファイル冒頭でimportされているのに
+HttpResponseだけメソッド内import。実害は無いが一貫性が無く、モジュール冒頭へ移すべき。
+
+
+--------------------------------------------------------------------------------
+[低] documents/forms.py:84 — RetentionKbn定数を使わずマジックストリング"document"をハードコード
+--------------------------------------------------------------------------------
+同ファイル内でgroup/categoryフィルタにはmasters.models.DocKbn.DOCUMENTという列挙定数を使っているのに、
+RetentionPeriod.objects.filter(kbn="document", ...)だけmasters.models.RetentionKbn.DOCUMENTを
+importせず生の文字列を使っている。値自体は正しいが一貫性に欠ける。
+
+
+================================================================================
+総評
+================================================================================
+- 実害のある新規の正しさのバグは documents/api.py:45（DetailAPIViewの部署スコープ判定不整合、[高]）
+  が中心。他はエッジケース（NFKC文字数増加）や非対称な例外処理漏れなど中〜低優先度。
+- 最大の課題はB区分: documents/contractsの並行実装がモデル・ストレージパス・フォーム・サービス層
+  （can_delete/scoped_get_object_or_404）・検索ロジック（sort/word filter/notice filter）・
+  ビュー層（Upload/Preview/Download/BulkDownload/Delete/BulkEditStart）のほぼ全層にわたり重複しており、
+  CLAUDE.mdの「共通処理はcore相当の共通基底クラス・サービス関数に集約」方針からは大きく外れている。
+  2026-08-25にcan_delete/deletion_denial_message等の一部だけがcore化されたが、対をなす関数や同種の
+  ビュー重複は未着手のまま残っている。
+- 今回見つかった[高]の正しさのバグ（DetailAPIView）自体も、「部署スコープ判定ロジックが
+  scoped_get_object_or_404に集約されていれば、api.py側が独自実装することもなく発生し得なかった」
+  という点で、B区分の重複解消（特に[高]のscoped_get_object_or_404集約）が将来の同種バグの再発防止に
+  直結する。
+
+
+================================================================================
+対応状況まとめ（2026-08-25）
+================================================================================
+高・中優先度は全件修正済み。1件直すごとに差分確認＋`python manage.py test documents contracts`で
+検証し、最終的に228件OKを確認。低優先度は方針通り未対応（理由は各項目末尾に記載）。
+
+## A. 正しさのバグ
+- [高] documents/api.py:45 DetailAPIView部署スコープ判定 → 修正済み。
+  document_searchable_department_ids()ベースの判定に変更（contracts/api.pyと同じ方式）。
+- [中] UploadStep2View.post DBError未捕捉・孤児ファイル → 修正済み。
+  except (OSError, DBError)に拡張し、created(_related)の物理ファイルを明示的に削除。
+- [中] DocumentEditView/BulkEditView例外処理の非対称 → 修正済み。
+  apply_document_edit()呼び出しをtry/except DBErrorで囲み、contracts側と同じ形に統一。
+- [中] title_normalized NFKCオーバーフロー → 修正済み。
+  CharField(255)→TextFieldに変更（documents/contracts双方、マイグレーション追加）。
+- [低] BulkEditView完了サマリにis_deletedフィルタ無し → 未対応。
+  実害は限定的（ウィザード中の他ユーザーによる削除という稀な競合時のみ表示が乱れる）。
+- [低] contract_amount下限バリデーション無し → 未対応。
+  改ざん経路を要する低リスクな入力検証の穴で、業務データとして直ちに問題化しない。
+- [低] save_date_start/end等のクロスフィールド検証無し → 未対応。
+  原本HTML/xlsxがこの検証を要求しているか未確認のため、実装するとすれば原本確認が先。
+
+## B. 再利用性・単純化・効率性
+- [高] scoped_get_object_or_404重複 → 修正済み。core.scoping_services.scoped_get_object_or_404に集約。
+- [高] can_delete重複 → 修正済み。core.deletion_services.can_deleteに集約。
+- [高] apply_sort重複 → 修正済み。core.search_services.apply_sortに集約。
+- [高] _apply_word_filter/_apply_freeword_filter重複 → 修正済み。core.search_services側に集約。
+- [高] ビュー層重複一式（Upload/PendingPreview/Download/Preview/BulkDownload/Delete） → 修正済み。
+  core.upload_views.{BaseUploadStep1View,BasePendingPreviewView,file_rows,build_pending_preview_context}、
+  core.record_views.{BaseFileServeView,BaseBulkDownloadView,BaseDeleteView}に集約。
+- [中] Document.save/display_name重複 → 修正済み。
+  core.models.{NormalizedTextFieldsMixin,UuidPrefixedFilenameMixin}に集約（RelatedFileも対象）。
+- [中] storage_paths.py重複 → 修正済み。core.storage_paths.build_hierarchical_upload_pathに集約。
+- [中] SEARCH_RADIO_DEFAULTS等の重複 → 修正済み。core.forms側の定数+apply_radio_defaults()に集約。
+- [中] BulkEditStartView.post重複 → 修正済み。core.bulk_edit_services.resolve_ordered_pksに集約。
+- [低] _apply_notice_filter重複 → 未対応。
+  各20行程度で実害は無く、上記[高]の検索ロジック集約ほど緊急性が無いため見送り。
+- [低] _add_years再利用漏れ（contracts.calculate_expiry_date） → 未対応。
+  うるう年補正ロジックの二重実装だが、両者とも動作は正しく実害が無いため見送り。
+
+## C. CLAUDE.mdコーディング規約との整合性
+- [中] document_searchable_department_ids配置の非対称 → 対応済み（docstring明記）。
+  実データ移動はせず、documents.services側とpermissions.services側それぞれに配置理由
+  （契約書側のみPermissionProfile.contract_visible_departmentsに依存）を明記する形で解消。
+- [低] 未使用logger宣言（6箇所） → 2/6は副産物で解消（documents/storage_paths.py,
+  contracts/storage_paths.pyをcore.storage_paths委譲に書き換えた際にlogger自体を削除）。
+  残り4箇所（documents/models.py, contracts/models.py, documents/forms.py, contracts/forms.py）は
+  未対応。実害が無く、将来そのファイルにログが必要になった時点で使うか判断すればよいため。
+- [低] RelatedFile.__str__がdisplay_nameを使っていない → 未対応。
+  Django admin/ログでの表示可読性の問題のみで、実害・データ不整合は無いため見送り。
+- [低] contracts SearchViewのdocstring欠落 → 未対応。実害無し、文書化漏れのみ。
+- [低] DocumentEditView/ContractEditViewがUpdateViewを実質使っていない → 未対応。
+  動作上のバグではなく、Django標準フックへの期待を裏切る程度の設計上の指摘のため見送り。
+- [低] BulkDownloadView内のHttpResponseローカルimport → 副産物で解消。
+  B-高のビュー層重複解消（core.record_views.BaseBulkDownloadView）でモジュール冒頭importに統一された。
+- [低] RetentionKbn定数を使わずマジックストリング → 未対応。値は正しく実害が無いため見送り。

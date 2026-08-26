@@ -44,7 +44,12 @@ def save_pending_files(session, session_key, files):
         logger.exception("一時アップロード領域の作成に失敗しました: %s", tmp_dir)
         raise PendingFileStorageError("一時アップロード領域を作成できませんでした。") from exc
 
-    pending = session.get(session_key, [])
+    # list()でコピーする: session[session_key]が既に存在する場合、session.get()は
+    # SessionBase内部dictが保持する同一のlistオブジェクトをそのまま返す。コピーせずに
+    # pending.append()するとその場でセッション内部dictも書き換わってしまい、ループ途中の
+    # 失敗時（下記のロールバック）でも既にセッションへ反映済みのエントリを取り消せなくなる
+    # （実体ファイルは削除されるがpendingのエントリだけ残る、という不整合の原因だった）。
+    pending = list(session.get(session_key, []))
     # このループで新規に書き込んだ一時ファイルのパス（失敗時のロールバック用）。
     # session[session_key]への反映はループ完了後にまとめて行うため、失敗時にここまでの
     # 書き込みをディスクから消せばセッション・ディスクとも失敗前の状態に戻る。

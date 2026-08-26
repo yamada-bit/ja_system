@@ -1,0 +1,400 @@
+documents/contracts アプリ テストカバレッジ棚卸しレポート
+対象: documents/{models,views,api,services,search_services,storage_paths,forms,tests}.py
+      contracts/{models,views,api,services,search_services,storage_paths,forms,tests}.py
+      上記から呼ばれているcore側の共通実装（core/deletion_services.py, core/scoping_services.py,
+      core/zip_services.py, core/record_views.py, core/bulk_edit_services.py,
+      core/upload_views.py, core/search_services.py, core/storage_paths.py, core/csv_services.py）
+      ※documents/contracts経由での分岐カバレッジという観点で見る（core側ファイル自体の
+      改修は対象外）
+実施日: 2026-08-25
+方式: documents/tests.py（28クラス）・contracts/tests.py（33クラス）を全文通読し、各テストが
+      検証している観点（正常系/異常系/権限分岐/バリデーション/ファイルI/O境界/削除済みによる
+      ボタン非表示・URL直打ち対策/部署スコープ判定等）を整理した上で、models.py/views.py/
+      api.py/services.py/search_services.py/storage_paths.py/forms.pyの主要な分岐を1つずつ
+      対応テストの有無で突き合わせた。documents/contractsは「並行構成」（CLAUDE.md冒頭）の
+      アプリのため、documents側にあってcontracts側に無い観点（またはその逆）を重点的に探した。
+      あわせて`manage.py test documents contracts`を実行し、現状の全件PASSを確認済み。
+      本レポートは棚卸しのみで、修正コードは一切書いていない。
+
+※ 前提として、review_rule_doc_contract.txt（2026-08-25実施のCLAUDE.mdコーディング規約準拠監査）
+  の指摘1（documents.tests.DocumentSaveNormalizationTests/StoragePathTestsに対応する
+  contracts側テストの不在）は、本レポート着手前に既にcontracts.tests.
+  ContractSaveNormalizationTests/StoragePathTests（contracts/tests.py:2103,2154）として
+  追加・反映済みだった（該当クラスのdocstringが「review_rule_doc_contract.txt指摘1参照、
+  2026-08-25追加」と明記）。本レポートはその反映後の状態を対象にした、規約準拠ではなく
+  テストカバレッジ専門の別軸の棚卸しである。
+
+================================================================================
+■ 総合評価
+================================================================================
+致命的な欠陥（本番障害に直結するバグの見落とし）は無いが、指摘は9件（高1・中4・低4）。
+最大の指摘は、documents/contracts共通で「編集・一括編集時のDB書き込み失敗（except DBError:）」
+という異常系分岐が両アプリとも一切テストされていない点（指摘1、[高]）。CLAUDE.mdが明文で
+要求する「例外処理を完成させる」の実装自体はコード上完成しているが、テストによる裏付けが
+無い状態。
+
+それ以外はdocuments/contracts間の非対称（documentsにあってcontractsに無いテスト観点）が
+中心で、いずれもcontracts.views.BulkEditView/BulkEditStartView、contracts.forms、
+contracts.api.OptionListAPIView等、documentsと共有ロジックを使う箇所に集中している。
+過去のrule監査（review_rule_doc_contract.txt）で発見された非対称は1件だったが、
+今回はテストカバレッジという別軸で見た結果、同種の非対称が複数件見つかった。
+
+================================================================================
+■ 観点ごとのチェック結果
+================================================================================
+
+[OK] 正常系の主要フロー（一覧検索・ソート・登録・編集・削除・ダウンロード・プレビュー）
+  documents/contracts双方とも、検索（SearchQuerysetTests/SearchSortTests/NoticeFilterTests）・
+  登録（UploadStep2View経由のRegistrationテスト群）・編集（EditScreenYearFieldTests等）・
+  削除（DeleteViewAjaxTests）・ダウンロード/プレビュー（DownloadViewTests/PreviewViewTests）の
+  一連の正常系フローは両アプリともHTTPテスト経由で検証されている。
+
+[OK] 部署スコープ・権限分岐
+  DepartmentScopeAccessControlTests（documents/contracts双方）が、ダウンロード・プレビュー・
+  編集・削除・一括編集・一括ダウンロードの6操作全てで他部署pkへの直接アクセスが404になる
+  ことを検証済み。contracts固有のcontract_edit権限（Rev1.2）も
+  DeleteViewRequiresContractEditPermissionTests/DispatchOrderingAnonymousAccessTestsで
+  手厚く検証されている。
+
+[OK] 削除済みレコードのボタン非表示・URL直打ち防止
+  DetailAPIViewTests（is_deleted=True時のedit_url/delete_url/download_url/preview_urlの
+  None化）、DeletedDocumentDirectAccessTests/DeletedContractDirectAccessTests（編集画面への
+  直接URLアクセスの404化）、DeleteViewWindowTests（保存から1週間経過後の削除拒否）が
+  documents/contracts双方に存在し、削除済み・期限超過の両ケースを網羅している。
+
+[OK] core側共通実装のdocuments/contracts経由での分岐カバレッジ
+  core.deletion_services.can_delete（CanDeleteBoundaryTests、7日境界の等号側を含む）、
+  core.zip_services.build_zip_archive（BulkDownloadViewTestsのFileNotFoundError分岐）、
+  core.scoping_services.scoped_get_object_or_404（DepartmentScopeAccessControlTests）は
+  documents/contracts双方から等しく検証されている。
+
+[要確認] 異常系（try/except境界）のうち、編集・一括編集時のDB書き込み失敗
+  詳細は指摘1参照。DocumentEditView/ContractEditView/BulkEditView（両アプリ）の
+  `except DBError:`ブロックが、DeleteView側は検証済みなのに対し編集系は未検証。
+
+[要確認] documents/contracts間の非対称（テストカバレッジ観点）
+  詳細は指摘2・3・4・5・6・7・8・9参照。contracts.views.BulkEditStartView/BulkEditView、
+  contracts.forms.UploadStep2Form/SearchForm、contracts.api.OptionListAPIView、
+  contracts.views.BulkDownloadView/DeleteView/api.ChunkUploadAPIViewの各所で、
+  documents側に存在する観点のテストがcontracts側に無い。
+
+================================================================================
+■ 指摘一覧
+================================================================================
+
+--------------------------------------------------------------------------------
+[高] 1. 編集・一括編集時のDB書き込み失敗（except DBError:）が両アプリとも未検証
+--------------------------------------------------------------------------------
+対象:
+  - documents/views.py:269-281 DocumentEditView.post の `except DBError:` ブロック
+  - documents/views.py:410-422 BulkEditView.post の `except DBError:` ブロック
+  - contracts/views.py:331-348 ContractEditView.post の `except OSError:`/`except DBError:` ブロック
+    （OSErrorはcontracts/tests.py:1945 ContractEditViewFileHandlingTests.
+    test_related_file_save_failure_rolls_back_and_shows_errorで検証済みだが、DBErrorは未検証）
+  - contracts/views.py:481-500 BulkEditView.post の `except OSError:`/`except DBError:` ブロック
+    （OSError/DBErrorともに未検証）
+
+内容:
+  documents.services.apply_document_edit/contracts.services.apply_contract_editがDB例外
+  （IntegrityError/OperationalError等のDBError）を送出した場合、各ビューはlogger.exception
+  で記録した上でmessages.error＋リダイレクト（BulkEditViewは同ステップの再描画）という
+  利用者向けのフォールバック処理を持つ。この処理自体はCLAUDE.mdの「例外処理を完成させる」
+  規約に沿って実装済みだが、対応するテストが4箇所（documents 2箇所、contracts 2箇所）とも
+  存在しない。
+
+  DeleteView側（core.record_views.BaseDeleteView.post）は
+  documents/contracts.tests.DeleteViewAjaxTests.test_ajax_request_returns_json_error_on_db_failure
+  で`mock.patch.object(Document/Contract, "save", side_effect=DBError(...))`によりDBError
+  分岐を明示的に検証しているのに、同じ書き込み系であるUploadStep2View（登録）・
+  DocumentEditView/ContractEditView（単体編集）・BulkEditView（一括編集）はいずれも
+  ファイルI/O例外（OSError）のみがモックされ、DBErrorそのものを模擬したテストが無い
+  （UploadStep2Viewは`except (OSError, DBError):`と1つの except節に併記されているため
+  OSErrorのテストで当該行自体は通っているが、DocumentEditView/ContractEditView/
+  BulkEditViewの`except DBError:`は独立したexcept節のため、OSError側のテストでは
+  一切実行されない）。
+
+  対象がユーザーの入力内容を保存する主要な書き込みパスであり、この分岐に回帰
+  （例えばmessages.errorの文言変更やredirect先の誤り、あるいはロールバック漏れ）が
+  入っても現状は検知できない。
+
+対応方針（参考、修正はまだしない）:
+  DeleteViewAjaxTests.test_ajax_request_returns_json_error_on_db_failureと同じパターンで、
+  `mock.patch.object(Document/Contract, "save", side_effect=DBError("db down"))`を
+  DocumentEditView.post/ContractEditView.post/BulkEditView.post（documents/contracts
+  各2ビュー、計4テスト）に対して行い、(1) 200/302の適切な応答、(2) messages.errorの
+  文言、(3) 対象レコードが更新されずDBに残ることを確認するテストを追加する。
+
+--------------------------------------------------------------------------------
+[中] 2. contracts側でBulkEditStartView/BulkEditViewの分岐カバレッジがdocumentsより手薄
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:966-975 BulkEditViewTests.test_start_with_all_pks_invalid_or_deleted_redirects_to_search
+  - documents/tests.py:1017-1034 BulkEditViewTests.test_prev_navigation_also_saves_current_step
+  - contracts/tests.py:913-1002 BulkEditViewTests（該当する2テストが存在しない）
+  - contracts/views.py:413-415 BulkEditStartView.post の `if not ordered_pks:` 分岐
+  - contracts/views.py:510-512 BulkEditView.post の `bulk_nav == "prev"` 分岐
+
+内容:
+  documents.tests.BulkEditViewTestsは(1)有効なpkが1件も無い場合（数値以外の混入だけでなく
+  「有効な数値pkだが全て削除済み」で0件になる境界）にBulkEditStartView.postが
+  `documents:search`へリダイレクトすること、(2)「＜」（prev）ナビゲーションでも
+  現在のステップ内容が保存されてから前のステップへ戻ることの2点を明示的に検証しているが、
+  contracts.tests.BulkEditViewTestsには対応するテストが無い（start_without_selection_
+  redirects_with_message／direct_access_without_session_state_redirects／
+  walk_through_two_contracts_saves_each_and_records_per_item_audit_logの3件のみ）。
+
+  BulkEditStartView.post自体はdocuments/contracts双方ともcore.bulk_edit_services.
+  resolve_ordered_pksを呼ぶ薄いラッパーで実装はほぼ同一だが、CLAUDE.mdの「同一注記が
+  複数箇所に繰り返し付いている場合は1箇所ずつ個別に確認する」という運用方針と同じ考え方で、
+  実装が共通でもcontracts固有のcontract_edit権限チェック（RequiresContractEditMixin）を
+  経由した上でこの分岐が正しく動くかは個別に確認すべき。特に「prev」ナビゲーションの
+  分岐（contracts/views.py:510-512）はcontracts.tests.BulkEditViewTestsのどのテストからも
+  一度も実行されていない。
+
+対応方針（参考、修正はまだしない）:
+  documents.tests.BulkEditViewTests.test_start_with_all_pks_invalid_or_deleted_redirects_to_search/
+  test_prev_navigation_also_saves_current_stepと同じ内容のテストをcontracts.tests.
+  BulkEditViewTestsに追加する（削除済み契約書のpkを一括編集開始に混入させて0件になる
+  ケース、および2件の契約書を「＜」で行き来して各ステップの保存が反映されるケース）。
+
+--------------------------------------------------------------------------------
+[中] 3. contracts.forms「部署スコープがcontract_visible_groups付与を上書きする」が未検証
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:1583-1597 UploadStep2FormGroupCategoryScopeTests.
+    test_department_scope_overrides_cross_department_doc_visible_groups_grant
+  - contracts/tests.py:1378-1435 UploadStep2FormGroupCategoryScopeTests（対応するテストが無い）
+  - contracts/forms.py:149-155（UploadStep2Form.__init__のscoped_group_and_category_querysets呼び出し）
+
+内容:
+  documents.tests.UploadStep2FormGroupCategoryScopeTests.
+  test_department_scope_overrides_cross_department_doc_visible_groups_grantは、
+  権限管理でPermissionProfile.doc_visible_groupsに他部署の分類を明示的に許可していても、
+  Rev1.2で追加された部署スコープ（core.forms.scoped_group_and_category_querysets）が
+  優先され、UploadStep2Formのgroupフィールドの選択肢に他部署分類が含まれないことを
+  検証している。このテストのdocstringは「2026-08-25にユーザーへ確認し『部署スコープを
+  常に優先する』で確定した」という、ユーザー確認済みの重要な業務ルールの固定用
+  リグレッションテストだと明記している。
+
+  contracts.forms.UploadStep2Form/SearchFormも同じcore.forms.scoped_group_and_category_
+  querysets（PermissionProfile.contract_visible_groupsが対応する権限フィールド）を
+  呼んでいるが、contracts.tests.UploadStep2FormGroupCategoryScopeTestsには
+  「部署スコープの内側」を検証するtest_posting_out_of_scope_group_id_is_rejected_by_
+  form_validationしかなく、「contract_visible_groupsで他部署分類が明示的に許可されていても
+  部署スコープが優先される」ことを確認するテストが無い。documents側と同じ関数を共有する以上
+  挙動は同じはずだが、ユーザー確定済みの業務ルールである以上、両アプリから独立に固定する
+  価値がある（Mixin/共通関数側の将来の改修で、この優先順位がcontracts側だけ意図せず
+  変わっても検知できない）。
+
+対応方針（参考、修正はまだしない）:
+  documents側のテストと同じ構成で、PermissionProfile.contract_visible_groupsに
+  自部署の分類・他部署の分類の両方を追加した状態でUploadStep2Form(employee=...)の
+  group選択肢に他部署分類が含まれないことを確認するテストをcontracts.tests.
+  UploadStep2FormGroupCategoryScopeTestsに追加する。
+
+--------------------------------------------------------------------------------
+[中] 4. contracts.api.OptionListAPIViewの type=year・グループ制限なしケースが未検証
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:2234-2239 OptionsAPIViewTests.test_type_dept_no_profile_only_sees_own_department
+  - documents/tests.py:2260-2268 OptionsAPIViewTests.test_type_group_no_restriction_returns_all_document_groups
+  - documents/tests.py:2279-2283 OptionsAPIViewTests.test_type_year_returns_recent_years_including_current
+  - contracts/tests.py:2039-2101 OptionsAPIViewTests（上記3テストに対応するものが無い）
+  - core/api.py:100-104 BaseOptionListAPIView._year_items（self.doc_kbnで対象を絞り込む）
+
+内容:
+  core.api.BaseOptionListAPIView（documents.api.OptionListAPIView/contracts.api.
+  OptionListAPIView経由）は、popup-selectの「年」選択肢生成（_year_items、
+  core.forms.search_year_choices(self.doc_kbn)を経由）と「分類」選択肢生成（_group_items、
+  visible_groups(request.user, kind=self.visible_groups_kind)がNoneの場合は無制限）を
+  documents/contracts間でdoc_kbn/visible_groups_kindの値だけを変えて共有している。
+
+  documents.tests.OptionsAPIViewTestsは、(1) type=year（実行時の直近年に現在年が含まれる
+  こと）、(2) type=group時にPermissionProfileはあるがdoc_visible_groupsに何も追加していない
+  （＝visible_groups()がNoneを返す）場合に全件返ること、(3) PermissionProfile自体が
+  未作成（無いユーザー）でもtype=deptで自部署のみに絞られること、の3パターンを検証している。
+  contracts.tests.OptionsAPIViewTestsにはこの3パターンいずれも対応するテストが無く、
+  type=yearのエンドポイントが契約書側から一度もHTTP経由でテストされていない
+  （契約書の保存年集合は文書と別データのため、search_year_choices(DocKbn.CONTRACT)の
+  計算結果がdocuments側のテストで代替検証されているとは言えない）。
+
+対応方針（参考、修正はまだしない）:
+  documents.tests.OptionsAPIViewTestsの該当3テストと同じ内容を、DocKbn.CONTRACT・
+  `/contracts/api/options/`エンドポイントに置き換えてcontracts.tests.OptionsAPIViewTestsに
+  追加する。
+
+--------------------------------------------------------------------------------
+[中] 8. BulkEditView（契約書側）で関連書類の追加・削除が一切未検証
+--------------------------------------------------------------------------------
+対象:
+  - contracts/views.py:476-500 BulkEditView.post（remove_related_ids解析・
+    request.FILES.getlist("related_files")の取得・apply_contract_editへの受け渡し）
+  - contracts/tests.py:1869-1966 ContractEditViewFileHandlingTests（ContractEditViewのみ対象）
+  - contracts/tests.py:913-1002 BulkEditViewTests（関連書類を一切扱っていない）
+
+内容:
+  contracts.views.ContractEditView.post（単体編集）とBulkEditView.post（一括編集）は
+  どちらも同じcontracts.services.apply_contract_editを呼び、remove_related_ids
+  （削除する関連書類pk）とnew_related_files（新規追加する関連書類）を渡す点で
+  実装がほぼ同一（BulkEditView.post:476-480参照）。ContractEditViewFileHandlingTestsは
+  単体編集側でremove_related_idsへの不正値混入・関連書類保存失敗時のロールバックの
+  2点を検証しているが、BulkEditViewTestsには関連書類の追加・削除を伴うステップ送信の
+  テストが1件も無い（_step_dataヘルパーがdepartment/group/category/year/title_0のみを
+  送信し、related_files/remove_related_idsに触れていない）。
+
+  一括編集ウィザードは複数件の契約書を順番に巡回する構造上、「1件目で関連書類を追加、
+  2件目で既存の関連書類を削除」といった操作が正しくその契約書だけに反映されるかは
+  単体編集の検証だけでは代替できない（save-as-you-goの各ステップが正しいcontractインスタンスに
+  対してRelatedFileを操作しているかという、一括編集固有のロジックが未検証のまま）。
+
+対応方針（参考、修正はまだしない）:
+  BulkEditViewTests.test_walk_through_two_contracts_saves_each_and_records_per_item_audit_log
+  を拡張するか新規テストを追加し、1件目のステップでrelated_files（新規ファイル）を送信し
+  RelatedFileが作成されること、2件目のステップでremove_related_idsを送信し該当契約書の
+  関連書類のみ削除され1件目の関連書類は影響を受けないことを確認する。
+
+--------------------------------------------------------------------------------
+[低] 5. contracts.tests.BulkDownloadViewTestsにpks未選択時のリダイレクト確認が無い
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:851-853 BulkDownloadViewTests.test_no_selection_redirects_with_message
+  - contracts/tests.py:819-911 BulkDownloadViewTests（対応するテストが無い）
+  - core/record_views.py:97-101 BaseBulkDownloadView.post の `if not pks:` 分岐
+
+内容:
+  core.record_views.BaseBulkDownloadView.post（documents/contracts共通）のpks未選択時
+  リダイレクト分岐は、documents側の`/documents/bulk-download/`経由では検証されているが、
+  `/contracts/bulk-download/`経由では検証されていない。実体は完全に共有されたコードで
+  documents側のテストで既に間接的にカバーされているため優先度は低いが、URLルーティングや
+  contracts固有のkind="contract"引き渡しに起因する回帰があった場合は検知できない。
+
+対応方針（参考、修正はまだしない）:
+  documents側と同内容（`{"pks": []}`相当の空POST→`/contracts/search/`へのリダイレクト）を
+  contracts.tests.BulkDownloadViewTestsに追加する。
+
+--------------------------------------------------------------------------------
+[低] 6. contracts.tests.DeleteViewAjaxTestsに「削除済み契約書への非AJAX削除」確認が無い
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:654-665 DeleteViewAjaxTests.test_deleting_already_trashed_document_is_rejected_non_ajax
+  - contracts/tests.py:374-473 DeleteViewAjaxTests（対応するテストが無く、非AJAXの
+    test_non_ajax_request_still_redirectsは「削除済みでない通常の契約書」を対象にしたテスト）
+
+内容:
+  documents.tests.DeleteViewAjaxTestsは、削除済み文書への削除操作がAJAX/非AJAXどちらの
+  経路でも拒否される（非AJAX時はPermissionDenied→403）ことを個別に検証しているが、
+  contracts.tests.DeleteViewAjaxTestsは削除済み契約書への拒否をAJAX経路
+  （test_deleting_already_trashed_contract_is_rejected）でしか検証していない。
+  core.record_views.BaseDeleteView.postの「can_delete()がFalseの場合の非AJAX分岐」自体は
+  contracts.tests.DeleteViewWindowTests.test_delete_rejected_after_window_non_ajax
+  （1週間経過ケース）で別条件から既に実行されているため、コードパスとしては間接的に
+  カバーされている。ただし`deletion_denial_message`が返す文言はis_deleted/期限超過で
+  異なるため、「削除済み」ケース固有のメッセージ内容が非AJAX経路で検証されていない点は残る。
+
+対応方針（参考、修正はまだしない）:
+  documents側と同内容（is_deleted=Trueにした契約書へ非AJAXでPOSTし、403とレコード・
+  ファイルが残ることを確認）をcontracts.tests.DeleteViewAjaxTestsに追加する。
+
+--------------------------------------------------------------------------------
+[低] 7. contracts.tests.OptionsAPIViewTestsにPermissionProfile未作成ケースが無い
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:2234-2239 OptionsAPIViewTests.test_type_dept_no_profile_only_sees_own_department
+  - contracts/tests.py:2039-2101 OptionsAPIViewTests（対応するテストが無い）
+
+内容:
+  documents側はPermissionProfileが1件も無い職員（permissions.services.get_roleが
+  最も制限の強いロール扱いにするケース）でもtype=deptが自部署のみに絞られることを
+  検証しているが、contracts側には同様のテストが無い。core.api.BaseOptionListAPIView.
+  _department_itemsはdepartment_kind=="contract"の場合permissions.services.
+  contract_searchable_department_idsを使う専用分岐（documents側には無い、
+  department_kind=="document"のget_role判定とは別コードパス）のため、documents側の
+  テストでは代替できない。
+
+対応方針（参考、修正はまだしない）:
+  PermissionProfileを作成しない職員で`/contracts/api/options/?type=dept`にアクセスし、
+  自部署のみが返ることを確認するテストをcontracts.tests.OptionsAPIViewTestsに追加する。
+
+--------------------------------------------------------------------------------
+[低] 9. contracts.tests.ChunkUploadAPITestsに不正リクエスト（400）確認が無い
+--------------------------------------------------------------------------------
+対象:
+  - documents/tests.py:2202-2204 ChunkUploadAPITests.test_malformed_request_returns_400
+  - contracts/tests.py:1969-2036 ChunkUploadAPITests（対応するテストが無い）
+  - core/upload_views.py:43-54 BaseChunkUploadAPIView.post の `except (KeyError, ValueError):` 分岐
+
+内容:
+  core.upload_views.BaseChunkUploadAPIView.post（documents/contracts共通）の、
+  必須POSTキー（file_name/chunk_index/total_chunks/file等）欠落時に400を返す分岐は
+  documents側でのみHTTP経由のテストがある。実体は完全に共有されたコードのため
+  documents側のテストで間接的にカバーされているが、contracts.api.ChunkUploadAPIViewは
+  RequiresContractEditMixinを追加で挟んでいる分、documents側と全く同じ経路とは限らない
+  （実際、同クラスのcontract_edit権限拒否テストtest_chunk_upload_rejected_without_
+  contract_edit_permissionは別途存在するのに、キー欠落時の400分岐だけが未検証のまま
+  残っている）。
+
+対応方針（参考、修正はまだしない）:
+  documents側と同内容（`{"upload_id": "abc"}`のみのPOSTで400を確認）をcontracts.tests.
+  ChunkUploadAPITestsに追加する。
+
+================================================================================
+■ 実行した確認コマンドと結果
+================================================================================
+- `python manage.py test documents contracts`（venv:
+  C:\Users\yamad\Claude\JA\ja_system\venv\Scripts\python.exe）
+  → "Ran 235 tests in 31.932s — OK"（全件PASS。標準エラー出力に現れるトレースバック・
+  文字化けした警告ログは、ディスク容量不足・破損PDF・チャンク欠落等を意図的に発生させる
+  例外系テストのmock/ログ出力であり、テスト結果自体には影響なし）。
+  ※review_rule_doc_contract.txt実施時点（2026-08-25、228件）から235件に増加しているのは、
+  同レポート指摘1の反映（ContractSaveNormalizationTests/StoragePathTestsの追加）による。
+
+- 補足：本リポジトリのDjango実行環境はC:\Users\yamad\Claude\JA\ja_system\ja_pjとは別ディレクトリの
+  C:\Users\yamad\Claude\JA\ja_system\venvに存在する（`python`/`py -3`のグローバル環境には
+  Djangoがインストールされていない）。今後同様の確認コマンドを実行する際はこのvenvの
+  python.exeを直接指定する必要がある。
+
+================================================================================
+■ 対応実施記録（2026-08-25、本レポート着手後に追記）
+================================================================================
+方針：優先度「高」「中」（指摘1・2・3・4・8）の不足テストを1件ずつ追加。「低」（指摘5・6・7・9）
+は追加せず、理由を以下に記録する。追加後`python manage.py test documents contracts`を再実行し、
+246件（追加前235件+新規11件）全件PASSを確認済み。
+
+[追加したテスト]
+- 指摘1[高]: documents.tests.DocumentEditViewDBErrorTests.
+  test_edit_view_db_failure_shows_error_and_does_not_update_document（新規クラス）
+- 指摘1[高]: documents.tests.BulkEditViewTests.
+  test_step_db_failure_shows_error_and_does_not_update_document
+- 指摘1[高]: contracts.tests.ContractEditViewFileHandlingTests.
+  test_edit_view_db_failure_shows_error_and_does_not_update_contract
+- 指摘1[高]: contracts.tests.BulkEditViewTests.
+  test_step_db_failure_shows_error_and_does_not_update_contract
+- 指摘2[中]: contracts.tests.BulkEditViewTests.
+  test_start_with_all_pks_invalid_or_deleted_redirects_to_search /
+  test_prev_navigation_also_saves_current_step
+- 指摘3[中]: contracts.tests.UploadStep2FormGroupCategoryScopeTests.
+  test_department_scope_overrides_cross_department_contract_visible_groups_grant
+- 指摘4[中]: contracts.tests.OptionsAPIViewTests.
+  test_type_dept_no_profile_only_sees_own_department /
+  test_type_group_no_restriction_returns_all_contract_groups /
+  test_type_year_returns_recent_years_including_current
+- 指摘8[中]: contracts.tests.BulkEditViewTests.
+  test_related_files_added_and_removed_affect_only_current_contract
+
+[低優先度4件を追加しなかった理由]
+- 指摘5: core.record_views.BaseBulkDownloadViewのpks未選択分岐は完全共有コードで、
+  documents側テストで実質カバー済み。contracts固有の分岐が無いため、回帰検知の限界コストに対して
+  追加優先度が低いと判断し見送り。
+- 指摘6: 「削除済み契約書への非AJAX削除拒否」自体のコードパスは
+  contracts.tests.DeleteViewWindowTests.test_delete_rejected_after_window_non_ajax
+  （期限超過ケース）で別条件から既に実行されており間接的にカバー済み。文言差分
+  （is_deleted/期限超過でdeletion_denial_messageが異なる）のみが未検証で、実害の小さい
+  表示文言の細部のため見送り。
+- 指摘7: 「PermissionProfile未作成でtype=deptが自部署のみ」は、指摘4の対応で
+  contracts.tests.OptionsAPIViewTests.test_type_dept_no_profile_only_sees_own_departmentとして
+  今回既に追加済み（指摘4と指摘7が同一テストを別の切り口で重複指摘していた）。追加要否の
+  判断としては「低」だが、指摘4のスコープに含まれていたため実質的に対応完了。
+- 指摘9: core.upload_views.BaseChunkUploadAPIViewの400分岐は完全共有コードで、
+  documents側テストで実質カバー済み。contract_edit権限チェックはRequiresContractEditMixin側で
+  別途contracts.tests.ChunkUploadAPITests.test_chunk_upload_rejected_without_contract_edit_permission
+  が検証しており、400分岐自体の独立回帰リスクは小さいと判断し見送り。

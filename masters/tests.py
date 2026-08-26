@@ -143,6 +143,67 @@ class CategoryFormTests(TestCase):
         )
         self.assertFalse(form.is_valid())
 
+    def test_doc_kbn_mismatch_with_group_rejected(self):
+        """documents/contractsは書類管理区分ごとにカテゴリー・分類を絞り込む前提のため、
+        Category.doc_kbnと選択したGroup.doc_kbnが食い違う組み合わせは登録できない
+        （コード監査で発見、2026-08-25追加。原本HTMLにはUI側の選択肢絞り込みJSは無いが、
+        バックエンド検証のみ追加する方針をユーザーに確認済み）。"""
+        contract_group = Group.objects.create(code="B", name="分類Ｂ", doc_kbn=DocKbn.CONTRACT)
+        form = CategoryForm(
+            data={
+                "code": "002", "name": "新カテゴリー", "group": contract_group.pk, "doc_kbn": DocKbn.DOCUMENT,
+            },
+            show_department=False,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("group", form.errors)
+
+    def test_doc_kbn_matching_group_accepted(self):
+        form = CategoryForm(
+            data={"code": "002", "name": "新カテゴリー", "group": self.group.pk, "doc_kbn": DocKbn.DOCUMENT},
+            show_department=False,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+
+class CategorySearchFormTests(TestCase):
+    """CategorySearchForm.__init__のemployee引数によるgroup選択肢の部署スコープ絞り込み
+    （検索パネルの「分類」プルダウン自体を自部署のグループのみに絞る処理）。CategoryForm側の
+    同種ロジック（CategoryFormTests.test_group_queryset_scoped_to_employee_department）は
+    検証済みだが検索フォーム側は未検証だった（テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def test_group_queryset_scoped_to_employee_department(self):
+        from masters.forms import CategorySearchForm
+
+        dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        group_a = Group.objects.create(code="9001", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=dept_a)
+        group_b = Group.objects.create(code="9002", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=dept_b)
+        employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        form = CategorySearchForm(employee=employee)
+        self.assertIn(group_a, form.fields["group"].queryset)
+        self.assertNotIn(group_b, form.fields["group"].queryset)
+
+    def test_group_queryset_unscoped_without_employee(self):
+        """employee未指定時（実際は使われないが、CategorySearchForm(request.GET)単体テストと
+        しての防御的確認）は絞り込みが適用されないこと。"""
+        from masters.forms import CategorySearchForm
+
+        dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        group = Group.objects.create(code="9003", name="分類Ｃ", doc_kbn=DocKbn.DOCUMENT, department=dept)
+        form = CategorySearchForm()
+        self.assertIn(group, form.fields["group"].queryset)
+
 
 class RetentionPeriodFormTests(TestCase):
     def setUp(self):
@@ -333,6 +394,90 @@ class MasterDeleteViewTests(TestCase):
         self.assertEqual(self.document.retention_period_id, self.retention_period.pk)
 
 
+class ContractSideMasterCountTests(TestCase):
+    """masters/views.pyのGroupListView/CategoryListView/GroupDeleteView/CategoryDeleteViewの
+    契約書管理側(doc_kbn=contract)のitem_count/blocking_count集計（Case文のdefault分岐、
+    contract_count使用）は文書管理側でしか検証されておらず丸ごと無テストだった
+    （テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def _create_contract(self, group, category):
+        from django.core.files.base import ContentFile
+        from django.utils import timezone
+
+        from contracts.models import Contract
+
+        contract = Contract(
+            title="テスト契約書", department=self.department, group=group, category=category,
+            year=2026, uploader=self.employee, expiry_date=timezone.localdate(),
+        )
+        contract.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        contract.save()
+        return contract
+
+    def test_group_list_counts_contracts_for_contract_doc_kbn(self):
+        group = Group.objects.create(
+            code="C1", name="契約分類", doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        category = Category.objects.create(
+            code="CC1", name="契約カテゴリ", group=group, doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        self._create_contract(group, category)
+        self._create_contract(group, category)
+        response = self.client.get("/masters/class/", {"doc_kbn": DocKbn.CONTRACT})
+        item = list(response.context["page_obj"])[0]
+        self.assertEqual(item.item_count, 2)
+
+    def test_category_list_counts_contracts_for_contract_doc_kbn(self):
+        group = Group.objects.create(
+            code="C2", name="契約分類2", doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        category = Category.objects.create(
+            code="CC2", name="契約カテゴリ2", group=group, doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        self._create_contract(group, category)
+        response = self.client.get("/masters/cat/", {"doc_kbn": DocKbn.CONTRACT})
+        item = list(response.context["page_obj"])[0]
+        self.assertEqual(item.item_count, 1)
+
+    def test_group_with_contracts_cannot_be_deleted(self):
+        group = Group.objects.create(
+            code="C3", name="契約分類3", doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        category = Category.objects.create(
+            code="CC3", name="契約カテゴリ3", group=group, doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        self._create_contract(group, category)
+        token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
+        self.client.post(f"/masters/class/{group.pk}/delete/", {"token": token})
+        group.refresh_from_db()
+        self.assertFalse(group.is_deleted)
+
+    def test_category_with_contracts_cannot_be_deleted(self):
+        group = Group.objects.create(
+            code="C4", name="契約分類4", doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        category = Category.objects.create(
+            code="CC4", name="契約カテゴリ4", group=group, doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        self._create_contract(group, category)
+        token = self.client.get(f"/masters/cat/{category.pk}/delete/").context["token"]
+        self.client.post(f"/masters/cat/{category.pk}/delete/", {"token": token})
+        category.refresh_from_db()
+        self.assertFalse(category.is_deleted)
+
+
 class MasterListSortTests(TestCase):
     """screen-class-list/screen-cat-listの列見出しソート（xlsx 分類管理!B55-58、
     カテゴリー管理!B57-61「下記項目に▲▼ボタンにて昇順/降順切替が可能なようにする。
@@ -422,6 +567,247 @@ class MasterListSortTests(TestCase):
 
         count_desc = self.client.get("/masters/cat/", {"sort": "count", "dir": "desc"})
         self.assertEqual(list(count_desc.context["page_obj"]), [category_b, category_a])
+
+    def test_group_list_doc_kbn_filter(self):
+        """GroupSearchForm.doc_kbnによる絞り込み自体が未テストだった
+        （テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        group_doc = Group.objects.create(code="D1", name="文書分類", doc_kbn=DocKbn.DOCUMENT)
+        group_contract = Group.objects.create(code="C1", name="契約分類", doc_kbn=DocKbn.CONTRACT)
+        response = self.client.get("/masters/class/", {"doc_kbn": DocKbn.CONTRACT})
+        self.assertEqual(list(response.context["page_obj"]), [group_contract])
+        self.assertNotIn(group_doc, list(response.context["page_obj"]))
+
+    def test_category_list_doc_kbn_filter(self):
+        group = Group.objects.create(code="G1", name="共通分類", doc_kbn=DocKbn.DOCUMENT)
+        cat_doc = Category.objects.create(code="CD1", name="文書カテゴリ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        cat_contract = Category.objects.create(
+            code="CC1", name="契約カテゴリ", group=group, doc_kbn=DocKbn.CONTRACT
+        )
+        response = self.client.get("/masters/cat/", {"doc_kbn": DocKbn.CONTRACT})
+        self.assertEqual(list(response.context["page_obj"]), [cat_contract])
+        self.assertNotIn(cat_doc, list(response.context["page_obj"]))
+
+    def test_category_list_name_is_partial_match_search(self):
+        """MasterListSortTests.test_group_list_name_is_partial_match_searchと同じ理由だが、
+        Category側の対応するテストが無かった（テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        group = Group.objects.create(code="G2", name="共通分類2", doc_kbn=DocKbn.DOCUMENT)
+        cat_a = Category.objects.create(code="CA1", name="総務カテゴリ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        cat_b = Category.objects.create(code="CB1", name="経理カテゴリ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        response = self.client.get("/masters/cat/", {"name": "総務"})
+        self.assertEqual(list(response.context["page_obj"]), [cat_a])
+        self.assertNotIn(cat_b, list(response.context["page_obj"]))
+
+    def test_category_list_group_filter(self):
+        group_x = Group.objects.create(code="GX", name="Xグループ", doc_kbn=DocKbn.DOCUMENT)
+        group_y = Group.objects.create(code="GY", name="Yグループ", doc_kbn=DocKbn.DOCUMENT)
+        cat_x = Category.objects.create(code="CX1", name="カテゴリX", group=group_x, doc_kbn=DocKbn.DOCUMENT)
+        cat_y = Category.objects.create(code="CY1", name="カテゴリY", group=group_y, doc_kbn=DocKbn.DOCUMENT)
+        response = self.client.get("/masters/cat/", {"group": group_x.pk})
+        self.assertEqual(list(response.context["page_obj"]), [cat_x])
+        self.assertNotIn(cat_y, list(response.context["page_obj"]))
+
+
+class RetentionListViewContentTests(TestCase):
+    """RetentionListViewはアクセス制御のみ検証されており、`kbn`/`doc_name`クエリパラメータが
+    不正値の場合のフォールバック、および3つのqueryset（doc_periods/ringisho_periods/
+    keihi_periods）の内容自体が一度も検証されていなかった（テストカバレッジ棚卸しで発見、
+    2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_invalid_kbn_falls_back_to_document(self):
+        response = self.client.get("/masters/retention/", {"kbn": "bogus"})
+        self.assertEqual(response.context["selected_kbn"], RetentionKbn.DOCUMENT)
+
+    def test_invalid_doc_name_falls_back_to_ringisho(self):
+        response = self.client.get(
+            "/masters/retention/", {"kbn": RetentionKbn.EAPPROVAL, "doc_name": "bogus"}
+        )
+        self.assertEqual(response.context["selected_doc_name"], "ringisho")
+
+    def test_querysets_filtered_by_kbn_and_doc_name(self):
+        doc_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        ringisho_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.EAPPROVAL, doc_name="ringisho", period_value=2,
+            period_unit=RetentionPeriodUnit.YEAR, display_order=1,
+        )
+        keihi_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.EAPPROVAL, doc_name="keihi", period_value=3,
+            period_unit=RetentionPeriodUnit.YEAR, display_order=1,
+        )
+        # 論理削除済みは各querysetから除外される（is_deleted=Falseフィルタ）ことも併せて確認する。
+        deleted_doc_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=9, period_unit=RetentionPeriodUnit.YEAR,
+            display_order=2, is_deleted=True,
+        )
+        response = self.client.get("/masters/retention/")
+        self.assertEqual(list(response.context["doc_periods"]), [doc_period])
+        self.assertEqual(list(response.context["ringisho_periods"]), [ringisho_period])
+        self.assertEqual(list(response.context["keihi_periods"]), [keihi_period])
+        self.assertNotIn(deleted_doc_period, list(response.context["doc_periods"]))
+
+
+class MasterDoubleSubmitTokenTests(TestCase):
+    """二重送信対策トークン不正時の分岐が両アプリの全regist/edit/delete Viewで一貫して
+    未テストだった（2026-08-25付permissions/accounts棚卸しの中優先度7と同一パターン。
+    テストカバレッジ棚卸しで発見、2026-08-26追加）。GroupRegistView/GroupEditView/
+    GroupDeleteViewはcore.master_views.BaseScopedMaster*Viewの共通実装をCategory側と
+    完全に共有しているため、Group側で検証すれば実装の妥当性としては十分と判断し、Category側は
+    重複テストとして省略する。RetentionRegistView/RetentionEditView/RetentionDeleteViewは
+    独立した実装のため個別に検証する。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_regist_invalid_token_shows_error_and_does_not_save(self):
+        response = self.client.post(
+            "/masters/class/regist/",
+            {
+                "token": "invalid-token", "code": "1", "name": "分類Ａ", "doc_kbn": DocKbn.DOCUMENT,
+                "department": self.department.pk,
+            },
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        self.assertFalse(Group.objects.filter(code="1").exists())
+
+    def test_group_edit_invalid_token_shows_error_and_does_not_save(self):
+        group = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        response = self.client.post(
+            f"/masters/class/{group.pk}/edit/",
+            {
+                "token": "invalid-token", "code": "1", "name": "分類Ａ改", "doc_kbn": DocKbn.DOCUMENT,
+                "department": self.department.pk,
+            },
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        group.refresh_from_db()
+        self.assertEqual(group.name, "分類Ａ")
+
+    def test_group_delete_invalid_token_shows_error_and_does_not_delete(self):
+        group = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        response = self.client.post(
+            f"/masters/class/{group.pk}/delete/", {"token": "invalid-token"}, follow=True
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        group.refresh_from_db()
+        self.assertFalse(group.is_deleted)
+
+    def test_retention_regist_invalid_token_shows_error_and_does_not_save(self):
+        response = self.client.post(
+            "/masters/retention/regist/",
+            {
+                "token": "invalid-token", "kbn": RetentionKbn.DOCUMENT, "doc_name": "",
+                "period_value": "3", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+            },
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        self.assertFalse(RetentionPeriod.objects.filter(kbn=RetentionKbn.DOCUMENT, display_order=1).exists())
+
+    def test_retention_edit_invalid_token_shows_error_and_does_not_save(self):
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        response = self.client.post(
+            f"/masters/retention/{period.pk}/edit/",
+            {
+                "token": "invalid-token", "kbn": RetentionKbn.DOCUMENT, "doc_name": "",
+                "period_value": "9", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+            },
+            follow=True,
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        period.refresh_from_db()
+        self.assertEqual(period.period_value, 1)
+
+    def test_retention_delete_invalid_token_shows_error_and_does_not_delete(self):
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        response = self.client.post(
+            f"/masters/retention/{period.pk}/delete/", {"token": "invalid-token"}, follow=True
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+        period.refresh_from_db()
+        self.assertFalse(period.is_deleted)
+
+
+class MasterDefaultOrderByTests(TestCase):
+    """GroupListView/CategoryListViewの`default_order_by`（sortパラメータ省略時の
+    部課コード→コード順の初期表示）が直接検証されていなかった（明示的なsort指定時の
+    並び替えのみ検証されていた。テストカバレッジ棚卸しで発見、2026-08-26追加）。
+
+    doc_kbnはorder_byの最終キー（_DOC_KBN_ORDER）だが、code自体がis_deleted=False同士で
+    グローバルに一意（models.Group/Category Meta.constraints）のため、同一部署・同一コードで
+    doc_kbnのみ異なる2件は作成できず、doc_kbnタイブレークが実際に効く場面は事実上無い。
+    そのため本テストは部課コード→コードの複合キー部分のみを検証する。
+    """
+
+    def setUp(self):
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="pass1234",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_list_default_order_is_department_then_code(self):
+        # 作成順をあえて並び順と逆にし、DBの挿入順ではなくdefault_order_byが効いていることを
+        # 確認する。
+        g_b2 = Group.objects.create(code="9", name="G-B2", doc_kbn=DocKbn.DOCUMENT, department=self.dept_b)
+        g_a2 = Group.objects.create(code="8", name="G-A2", doc_kbn=DocKbn.DOCUMENT, department=self.dept_a)
+        g_a1 = Group.objects.create(code="1", name="G-A1", doc_kbn=DocKbn.DOCUMENT, department=self.dept_a)
+        response = self.client.get("/masters/class/")
+        self.assertEqual(list(response.context["page_obj"]), [g_a1, g_a2, g_b2])
+
+    def test_category_list_default_order_is_department_then_code(self):
+        group = Group.objects.create(code="G", name="共通分類", doc_kbn=DocKbn.DOCUMENT)
+        c_b2 = Category.objects.create(
+            code="9", name="C-B2", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.dept_b
+        )
+        c_a2 = Category.objects.create(
+            code="8", name="C-A2", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.dept_a
+        )
+        c_a1 = Category.objects.create(
+            code="1", name="C-A1", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.dept_a
+        )
+        response = self.client.get("/masters/cat/")
+        self.assertEqual(list(response.context["page_obj"]), [c_a1, c_a2, c_b2])
 
 
 def _noop_validate_constraints(self, exclude=None):
@@ -526,6 +912,330 @@ class MasterIntegrityErrorViewTests(TestCase):
         )
 
 
+class MasterAuditLogContentTests(TestCase):
+    """masters/views.py全体の操作履歴ログ(audit_services.log)は、分類の新規登録1件を除いて
+    内容が一切検証されていなかった（GroupEditView/GroupDeleteView/CategoryRegistView/
+    CategoryEditView/CategoryDeleteView/RetentionRegistView/RetentionEditView/
+    RetentionDeleteViewの計8箇所、テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_edit_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        group = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        token = self.client.get(f"/masters/class/{group.pk}/edit/").context["token"]
+        self.client.post(
+            f"/masters/class/{group.pk}/edit/",
+            {
+                "token": token, "code": "1", "name": "分類Ａ改", "doc_kbn": DocKbn.DOCUMENT,
+                "department": self.department.pk,
+            },
+        )
+        entry = AuditLog.objects.get(action="分類管理 更新")
+        self.assertIn("分類Ａ改", entry.event_message)
+        self.assertIn(str(self.department), entry.event_message)
+
+    def test_group_delete_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        group = Group.objects.create(code="2", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
+        self.client.post(f"/masters/class/{group.pk}/delete/", {"token": token})
+        entry = AuditLog.objects.get(action="分類管理 削除")
+        self.assertIn("No.2", entry.event_message)
+        self.assertIn("分類Ｂ", entry.event_message)
+
+    def test_category_regist_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        token = self.client.get("/masters/cat/regist/").context["token"]
+        self.client.post(
+            "/masters/cat/regist/",
+            {
+                "token": token, "code": "001", "name": "新カテゴリー", "group": group.pk,
+                "doc_kbn": DocKbn.DOCUMENT, "department": self.department.pk,
+            },
+        )
+        entry = AuditLog.objects.get(action="カテゴリー管理 新規登録")
+        self.assertIn("新カテゴリー", entry.event_message)
+        self.assertIn("分類Ａ", entry.event_message)
+        self.assertIn(str(self.department), entry.event_message)
+
+    def test_category_edit_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        token = self.client.get(f"/masters/cat/{category.pk}/edit/").context["token"]
+        self.client.post(
+            f"/masters/cat/{category.pk}/edit/",
+            {
+                "token": token, "code": "001", "name": "カテゴリーＡ改", "group": group.pk,
+                "doc_kbn": DocKbn.DOCUMENT, "department": self.department.pk,
+            },
+        )
+        entry = AuditLog.objects.get(action="カテゴリー管理 更新")
+        self.assertIn("カテゴリーＡ改", entry.event_message)
+
+    def test_category_delete_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        category = Category.objects.create(
+            code="002", name="カテゴリーＢ", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        token = self.client.get(f"/masters/cat/{category.pk}/delete/").context["token"]
+        self.client.post(f"/masters/cat/{category.pk}/delete/", {"token": token})
+        entry = AuditLog.objects.get(action="カテゴリー管理 削除")
+        self.assertIn("No.002", entry.event_message)
+        self.assertIn("カテゴリーＢ", entry.event_message)
+
+    def test_retention_regist_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        token = self.client.get("/masters/retention/regist/?kbn=document").context["token"]
+        self.client.post(
+            "/masters/retention/regist/",
+            {
+                "token": token, "kbn": RetentionKbn.DOCUMENT, "doc_name": "",
+                "period_value": "5", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+            },
+        )
+        entry = AuditLog.objects.get(action="保存期間設定 新規登録")
+        self.assertIn("文書", entry.event_message)
+        self.assertIn("5年", entry.event_message)
+
+    def test_retention_edit_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        token = self.client.get(f"/masters/retention/{period.pk}/edit/").context["token"]
+        self.client.post(
+            f"/masters/retention/{period.pk}/edit/",
+            {
+                "token": token, "kbn": RetentionKbn.DOCUMENT, "doc_name": "",
+                "period_value": "7", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+            },
+        )
+        entry = AuditLog.objects.get(action="保存期間設定 更新")
+        self.assertIn("7年", entry.event_message)
+
+    def test_retention_delete_creates_audit_log_with_content(self):
+        from audit.models import AuditLog
+
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=3, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        token = self.client.get(f"/masters/retention/{period.pk}/delete/").context["token"]
+        self.client.post(f"/masters/retention/{period.pk}/delete/", {"token": token})
+        entry = AuditLog.objects.get(action="保存期間設定 削除")
+        self.assertIn("3年", entry.event_message)
+
+
+class MasterEditIntegrityErrorViewTests(TestCase):
+    """GroupEditView/CategoryEditView/RetentionEditViewはRegist側と同じtry/exceptパターン
+    （clean_code等のアプリ層チェック＋save_or_noneでのIntegrityError捕捉）を持つが、Regist側の
+    3画面（MasterIntegrityErrorViewTests）とは異なりEdit側の対応するテストが無かった
+    （テストカバレッジ棚卸しで発見、2026-08-26追加）。MasterIntegrityErrorViewTestsと同じ手法
+    （アプリ層チェック＋Model.validate_constraints()の両方を無効化してTOCTOU競合を再現）を使う。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_edit_integrity_error_shows_friendly_message(self):
+        Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        target = Group.objects.create(code="B", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT)
+        response = self.client.get(f"/masters/class/{target.pk}/edit/")
+        token = response.context["token"]
+        with (
+            patch.object(GroupForm, "clean_code", lambda self: self.cleaned_data["code"]),
+            patch.object(Group, "validate_constraints", _noop_validate_constraints),
+        ):
+            response = self.client.post(
+                f"/masters/class/{target.pk}/edit/",
+                {
+                    "token": token, "code": "A", "name": "分類Ｂ改", "doc_kbn": DocKbn.DOCUMENT,
+                    "department": self.department.pk,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "この分類コードは既に登録されています。")
+        target.refresh_from_db()
+        self.assertEqual(target.code, "B")
+
+    def test_category_edit_integrity_error_shows_friendly_message(self):
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        Category.objects.create(code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        target = Category.objects.create(code="002", name="カテゴリーＢ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        response = self.client.get(f"/masters/cat/{target.pk}/edit/")
+        token = response.context["token"]
+        with (
+            patch.object(CategoryForm, "clean_code", lambda self: self.cleaned_data["code"]),
+            patch.object(Category, "validate_constraints", _noop_validate_constraints),
+        ):
+            response = self.client.post(
+                f"/masters/cat/{target.pk}/edit/",
+                {
+                    "token": token, "code": "001", "name": "カテゴリーＢ改", "group": group.pk,
+                    "doc_kbn": DocKbn.DOCUMENT, "department": self.department.pk,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "このカテゴリーコードは既に登録されています。")
+        target.refresh_from_db()
+        self.assertEqual(target.code, "002")
+
+    def test_retention_edit_integrity_error_shows_friendly_message(self):
+        RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        target = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=2, period_unit=RetentionPeriodUnit.YEAR, display_order=2
+        )
+        response = self.client.get(f"/masters/retention/{target.pk}/edit/")
+        token = response.context["token"]
+        with (
+            patch.object(
+                RetentionPeriodForm, "clean_display_order", lambda self: self.cleaned_data["display_order"]
+            ),
+            patch.object(RetentionPeriod, "validate_constraints", _noop_validate_constraints),
+        ):
+            response = self.client.post(
+                f"/masters/retention/{target.pk}/edit/",
+                {
+                    "token": token, "kbn": RetentionKbn.DOCUMENT, "doc_name": "",
+                    "period_value": "2", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "この表示順は既に使用されています。")
+        target.refresh_from_db()
+        self.assertEqual(target.display_order, 2)
+
+
+class MasterDeleteDatabaseErrorFallbackTests(TestCase):
+    """core.master_views.BaseScopedMasterDeleteView.post()のobj.save(update_fields=[...])が
+    DBError（DB接続断・制約違反等）を送出した場合のフォールバック（品質レビューで発見・
+    2026-08-26に追加された最も新しい例外処理）に、Group/Categoryいずれの削除確認画面にも
+    回帰テストが伴っていなかった（テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    兄弟のBaseScopedMasterEditView側（MasterEditIntegrityErrorViewTests）と異なりsave_or_none
+    を経由しない直接のobj.save()呼び出しのため、Group.saveを直接patchして再現する。
+    MasterDoubleSubmitTokenTestsと同じ判断（GroupDeleteView/CategoryDeleteViewは
+    core.master_views.BaseScopedMasterDeleteViewの共通実装を完全共有）により、Group側のみ検証し
+    Category側は重複テストとして省略する。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_delete_db_error_shows_friendly_message_and_does_not_delete(self):
+        from django.db import DatabaseError
+
+        group = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
+        token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
+        with patch.object(Group, "save", side_effect=DatabaseError("simulated db error")):
+            response = self.client.post(
+                f"/masters/class/{group.pk}/delete/", {"token": token}, follow=True
+            )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("削除に失敗しました" in m for m in messages))
+        group.refresh_from_db()
+        self.assertFalse(group.is_deleted)
+
+
+class RetentionRedirectPreservesSelectionTests(TestCase):
+    """RetentionRegistView/RetentionEditView/RetentionDeleteViewは、登録・更新・削除完了後の
+    リダイレクト先(_retention_list_url)に選択中のkbn/doc_nameを引き継ぐ。ユーザー指摘で
+    修正された「編集画面から戻ると選択が解除される」不具合の再発防止として追加した回帰テスト
+    （テストカバレッジ棚卸しで発見、2026-08-26追加）。電子決裁(稟議書)区分を使うことで、
+    kbn=documentのデフォルト値へのフォールバックと区別できるようにしている。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_regist_redirect_preserves_eapproval_selection(self):
+        token = self.client.get(
+            "/masters/retention/regist/", {"kbn": RetentionKbn.EAPPROVAL, "doc_name": "ringisho"}
+        ).context["token"]
+        response = self.client.post(
+            "/masters/retention/regist/",
+            {
+                "token": token, "kbn": RetentionKbn.EAPPROVAL, "doc_name": "ringisho",
+                "period_value": "3", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+            },
+        )
+        self.assertIn("kbn=eapproval", response.url)
+        self.assertIn("doc_name=ringisho", response.url)
+
+    def test_edit_redirect_preserves_eapproval_selection(self):
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.EAPPROVAL, doc_name="ringisho", period_value=1,
+            period_unit=RetentionPeriodUnit.YEAR, display_order=1,
+        )
+        token = self.client.get(f"/masters/retention/{period.pk}/edit/").context["token"]
+        response = self.client.post(
+            f"/masters/retention/{period.pk}/edit/",
+            {
+                "token": token, "kbn": RetentionKbn.EAPPROVAL, "doc_name": "ringisho",
+                "period_value": "4", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+            },
+        )
+        self.assertIn("kbn=eapproval", response.url)
+        self.assertIn("doc_name=ringisho", response.url)
+
+    def test_delete_redirect_preserves_eapproval_selection(self):
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.EAPPROVAL, doc_name="ringisho", period_value=1,
+            period_unit=RetentionPeriodUnit.YEAR, display_order=1,
+        )
+        token = self.client.get(f"/masters/retention/{period.pk}/delete/").context["token"]
+        response = self.client.post(f"/masters/retention/{period.pk}/delete/", {"token": token})
+        self.assertIn("kbn=eapproval", response.url)
+        self.assertIn("doc_name=ringisho", response.url)
+
+
 class DepartmentScopingTests(TestCase):
     """Rev1.2（xlsx 分類管理!B35,B73-75、カテゴリー管理!B35,B78-80、2026-08-24反映）で追加された
     分類・カテゴリーマスタの部署スコープ。管理者は全部署、それ以外は自部署のみ閲覧・編集できる
@@ -581,12 +1291,22 @@ class DepartmentScopingTests(TestCase):
     def test_manager_cross_department_access_logs_warning(self):
         """部署スコープ外へのURL直叩きは、GroupDeleteView.post等の他の拒否パスと同じく
         セキュリティ上意味のある事象としてlogger.warningに残す（以前は404のみでログが
-        無かった。コード監査で発見、2026-08-24修正）。"""
+        無かった。コード監査で発見、2026-08-24修正）。masters.services.scoped_get_object_or_404は
+        2026-08-25にcore.scoping_services側へ委譲する形に集約されたため、ログの出所も
+        そちらのロガーになる（documents/contracts側と同じ実装・同じログ文言に統一された）。"""
         employee = self._login_as(self.dept_a, PermissionRole.MANAGER)
-        with self.assertLogs("masters.services", level="WARNING") as cm:
+        with self.assertLogs("core.scoping_services", level="WARNING") as cm:
             response = self.client.get(f"/masters/class/{self.group_b.pk}/edit/")
         self.assertEqual(response.status_code, 404)
         self.assertTrue(any(employee.employee_no in message for message in cm.output))
+
+    def test_manager_cannot_reach_other_department_group_delete_confirmation(self):
+        """GroupEditViewの他部署404はカバーされているが、削除確認画面
+        （GroupDeleteView.scoped_lookup）側のURL直叩き404は未検証だった
+        （テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get(f"/masters/class/{self.group_b.pk}/delete/")
+        self.assertEqual(response.status_code, 404)
 
     def test_manager_cannot_reach_other_department_category_edit(self):
         """CategoryEditView._get_objectでも同じ部署スコープが効くことを確認する
@@ -597,6 +1317,16 @@ class DepartmentScopingTests(TestCase):
         )
         self._login_as(self.dept_a, PermissionRole.MANAGER)
         response = self.client.get(f"/masters/cat/{category_b.pk}/edit/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_manager_cannot_reach_other_department_category_delete_confirmation(self):
+        """GroupDeleteView側と同じ理由（テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        category_b = Category.objects.create(
+            code="B02", name="経理部カテゴリー2", group=self.group_b, doc_kbn=DocKbn.DOCUMENT,
+            department=self.dept_b,
+        )
+        self._login_as(self.dept_a, PermissionRole.MANAGER)
+        response = self.client.get(f"/masters/cat/{category_b.pk}/delete/")
         self.assertEqual(response.status_code, 404)
 
     def test_non_admin_sort_by_department_is_ignored(self):

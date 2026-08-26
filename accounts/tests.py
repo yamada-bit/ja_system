@@ -5,9 +5,9 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 
 from accounts.csv_import_services import CsvImportError, import_staff_csv
-from accounts.forms import LoginForm, StaffEditForm, StaffRegistForm
+from accounts.forms import LoginForm, StaffEditForm, StaffRegistForm, StaffSearchForm
 from accounts.models import Employee, Position, Rank
-from accounts.services import reset_permission_profile_if_needed
+from accounts.services import filter_staff_queryset, reset_permission_profile_if_needed
 from audit.models import AuditLog
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
@@ -269,6 +269,71 @@ class ResetPermissionProfileTests(TestCase):
         self.assertFalse(AuditLog.objects.filter(action="権限管理 自動リセット").exists())
 
 
+class FilterStaffQuerysetTests(TestCase):
+    """screen-staff-listの検索条件・ソート順（accounts.services.filter_staff_queryset）の
+    回帰テスト。permissions側のAuthorityListSortTestsに相当するものが無く、絞り込み・ソートの
+    実データ検証が丸ごと無テストだった（コード監査で発見、2026-08-25追加）。
+    """
+
+    def setUp(self):
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="99", section_name="総務部"
+        )
+        self.dept_b = Department.objects.create(
+            branch_code="999", branch_name="支店", section_code="01", section_name="営業部"
+        )
+        self.emp_a = Employee.objects.create_user(
+            employee_no="2", name="部署A所属", password="x",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.emp_b = Employee.objects.create_user(
+            employee_no="1", name="部署B所属", password="x",
+            department=self.dept_b, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.retired = Employee.objects.create_user(
+            employee_no="3", name="退職太郎", password="x",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+            is_retired=True,
+        )
+
+    def test_default_sort_uses_branch_code_before_section_code(self):
+        """xlsx 職員マスタ!B51-54: 初期ソート順は本支所コード→部課コード→職階コード→役職コード。
+        dept_a(branch=000)のほうがdept_b(branch=999)より先に来ること。"""
+        form = StaffSearchForm(data={})
+        qs = filter_staff_queryset(form)
+        self.assertEqual(list(qs), [self.emp_a, self.emp_b])
+
+    def test_employee_no_sort(self):
+        form = StaffSearchForm(data={})
+        qs = filter_staff_queryset(form, sort_key="employee_no", sort_dir="asc")
+        self.assertEqual(list(qs), [self.emp_b, self.emp_a])
+
+    def test_branch_code_filter(self):
+        form = StaffSearchForm(data={"branch_code": "999"})
+        qs = filter_staff_queryset(form)
+        self.assertEqual(list(qs), [self.emp_b])
+
+    def test_section_code_filter(self):
+        form = StaffSearchForm(data={"section_code": "01"})
+        qs = filter_staff_queryset(form)
+        self.assertEqual(list(qs), [self.emp_b])
+
+    def test_name_filter(self):
+        form = StaffSearchForm(data={"name": "部署A"})
+        qs = filter_staff_queryset(form)
+        self.assertEqual(list(qs), [self.emp_a])
+
+    def test_include_retired_false_excludes_retired_by_default(self):
+        form = StaffSearchForm(data={})
+        qs = filter_staff_queryset(form)
+        self.assertNotIn(self.retired, list(qs))
+
+    def test_include_retired_true_includes_retired(self):
+        form = StaffSearchForm(data={"include_retired": "on"})
+        qs = filter_staff_queryset(form)
+        self.assertIn(self.retired, list(qs))
+
+
 class LoginLogoutAuditLogTests(TestCase):
     """原本index.html:3223,3226等の操作履歴ログサンプルに「ログイン」「ログアウト」行があるが、
     以前はaudit.services.log()がdocuments/contracts以外から一切呼ばれておらず記録されていなかった
@@ -431,6 +496,42 @@ class StaffSettingsMenuAccessControlTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class StaffDetailViewTests(TestCase):
+    """screen-staff-detail。以前は丸ごと無テストだった
+    （アクセス拒否側＝所属長403のみStaffSettingsMenuAccessControlTestsでカバー済み、
+    コード監査で発見、2026-08-25追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.target = Employee.objects.create_user(
+            employee_no="2", name="対象太郎", password="secret-pass",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_admin_can_access_staff_detail(self):
+        response = self.client.get(f"/accounts/staff/{self.target.pk}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "対象太郎")
+
+    def test_password_is_masked_not_shown_in_plaintext(self):
+        """原本は平文表示だが、ハッシュ化必須の規約上マスク表示にする（CLAUDE.md参照）。"""
+        response = self.client.get(f"/accounts/staff/{self.target.pk}/")
+        self.assertNotContains(response, "secret-pass")
+
+    def test_nonexistent_pk_returns_404(self):
+        response = self.client.get("/accounts/staff/999999/")
+        self.assertEqual(response.status_code, 404)
+
+
 class StaffRegistEditAuditLogTests(TestCase):
     """職員マスタの新規登録・更新もmasters/permissions系の登録・更新ビューと同様に
     audit_services.log()で操作履歴ログへ記録されること（コード監査で発見された記録漏れの修正）。
@@ -483,6 +584,120 @@ class StaffRegistEditAuditLogTests(TestCase):
         entry = AuditLog.objects.get(action="職員マスタ 更新")
         self.assertEqual(entry.employee_no, "1")
         self.assertIn("3030", entry.event_message)
+
+    def test_regist_post_with_invalid_token_shows_error_and_does_not_create(self):
+        """二重送信対策トークン不正時（core.double_submit.consume_tokenがFalseを返すケース）の
+        分岐が未テストだった（コード監査で発見、2026-08-25追加）。"""
+        response = self.client.post(
+            "/accounts/staff/regist/",
+            {
+                "token": "invalid-token",
+                "employee_no": "5050",
+                "name": "無効太郎",
+                "department": self.department.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KACHO,
+            },
+            follow=True,
+        )
+        self.assertFalse(Employee.objects.filter(employee_no="5050").exists())
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+
+
+class StaffEditViewResetPermissionIntegrationTests(TestCase):
+    """StaffEditView.postがbefore_department_id等の差分検出ロジックを介して
+    reset_permission_profile_if_neededを実際に「変更あり」で駆動する経路の統合テスト。
+    既存のtest_edit_creates_audit_log（StaffRegistEditAuditLogTests）は変更前と同一の値で
+    POSTしているため、この結線自体は一度もHTTP経由で通っていなかった
+    （コード監査で発見、2026-08-25追加）。
+    """
+
+    def setUp(self):
+        self.dept1 = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept2 = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_department_change_via_post_resets_permission_profile(self):
+        target = Employee.objects.create_user(
+            employee_no="3030", name="編集対象", password="x",
+            department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        profile = PermissionProfile.objects.create(
+            employee=target, role=PermissionRole.ADMIN, doc_download=True
+        )
+        token = self.client.get(f"/accounts/staff/{target.pk}/edit/").context["token"]
+        self.client.post(
+            f"/accounts/staff/{target.pk}/edit/",
+            {
+                "token": token,
+                "name": "編集対象",
+                "department": self.dept2.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KACHO,
+            },
+        )
+        profile.refresh_from_db()
+        self.assertEqual(profile.role, PermissionRole.STAFF)
+        self.assertFalse(profile.doc_download)
+        self.assertTrue(AuditLog.objects.filter(action="権限管理 自動リセット").exists())
+
+    def test_no_change_via_post_does_not_reset_permission_profile(self):
+        """比較対象として、実際に値を変えないPOSTではリセットされないことも合わせて確認する。"""
+        target = Employee.objects.create_user(
+            employee_no="4040", name="編集対象2", password="x",
+            department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        profile = PermissionProfile.objects.create(
+            employee=target, role=PermissionRole.ADMIN, doc_download=True
+        )
+        token = self.client.get(f"/accounts/staff/{target.pk}/edit/").context["token"]
+        self.client.post(
+            f"/accounts/staff/{target.pk}/edit/",
+            {
+                "token": token,
+                "name": "編集対象2",
+                "department": self.dept1.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KACHO,
+            },
+        )
+        profile.refresh_from_db()
+        self.assertEqual(profile.role, PermissionRole.ADMIN)
+        self.assertTrue(profile.doc_download)
+
+    def test_edit_post_with_invalid_token_does_not_save_or_reset(self):
+        """二重送信対策トークン不正時（core.double_submit.consume_tokenがFalseを返すケース）の
+        分岐が未テストだった（コード監査で発見、2026-08-25追加）。"""
+        target = Employee.objects.create_user(
+            employee_no="6060", name="編集対象3", password="x",
+            department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        response = self.client.post(
+            f"/accounts/staff/{target.pk}/edit/",
+            {
+                "token": "invalid-token",
+                "name": "改ざん太郎",
+                "department": self.dept2.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KACHO,
+            },
+            follow=True,
+        )
+        target.refresh_from_db()
+        self.assertEqual(target.name, "編集対象3")
+        self.assertEqual(target.department_id, self.dept1.pk)
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
 
 
 class StaffRegistIntegrityErrorTests(TestCase):
@@ -794,6 +1009,17 @@ class StaffCsvImportViewTests(TestCase):
         messages = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("新規登録1件" in m for m in messages))
 
+    def test_post_with_invalid_token_shows_error_and_does_not_import(self):
+        """二重送信対策トークン不正時（core.double_submit.consume_tokenがFalseを返すケース）の
+        分岐が未テストだった（コード監査で発見、2026-08-25追加）。"""
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役,0"])
+        response = self.client.post(
+            "/accounts/staff/csv/import/", {"token": "invalid-token", "csv_file": upload}, follow=True
+        )
+        self.assertFalse(Employee.objects.filter(employee_no="0832").exists())
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages))
+
     def test_post_invalid_extension_shows_error(self):
         token = self.client.get("/accounts/staff/").context["csv_import_token"]
         upload = SimpleUploadedFile("staff.txt", b"dummy", content_type="text/plain")
@@ -802,3 +1028,34 @@ class StaffCsvImportViewTests(TestCase):
         )
         messages = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("csv" in m.lower() for m in messages))
+
+    def test_post_with_csv_import_error_shows_error_message(self):
+        """import_staff_csvがCsvImportErrorを送出した場合（ここではヘッダー不正CSV）の
+        messages.error案内はView統合テストとして未テストだった（サービス層の例外送出自体は
+        ImportStaffCsvServiceTests.test_invalid_header_raisesでカバー済み、コード監査で発見、
+        2026-08-25追加）。"""
+        token = self.client.get("/accounts/staff/").context["csv_import_token"]
+        upload = SimpleUploadedFile("staff.csv", b"a,b,c\n1,2,3\n", content_type="text/csv")
+        response = self.client.post(
+            "/accounts/staff/csv/import/", {"token": token, "csv_file": upload}, follow=True
+        )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("CSVの列構成が想定と異なります" in m for m in messages))
+
+    def test_post_with_row_errors_shows_warning_message(self):
+        """summary.errorsが1件以上ある場合のmessages.warning分岐（部分成功時の警告表示）は
+        View経由では未テストだった（サービス層のsummary.errors自体はImportStaffCsvServiceTests.
+        test_row_error_does_not_stop_other_rowsでカバー済み、コード監査で発見、2026-08-25追加）。"""
+        token = self.client.get("/accounts/staff/").context["csv_import_token"]
+        upload = _csv_upload(
+            [
+                ",氏名なし,000,本　店,01,総務部,16,課長,20,考査役,0",
+                "0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役,0",
+            ]
+        )
+        response = self.client.post(
+            "/accounts/staff/csv/import/", {"token": token, "csv_file": upload}, follow=True
+        )
+        self.assertTrue(Employee.objects.filter(employee_no="0832").exists())
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("一部エラーがありました" in m for m in messages))

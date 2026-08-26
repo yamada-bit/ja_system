@@ -18,7 +18,7 @@ from accounts.models import Employee
 from accounts.services import filter_staff_queryset, reset_permission_profile_if_needed
 from core.csv_services import sanitize_csv_row
 from core.double_submit import consume_token, issue_token
-from organizations.services import departments_json
+from organizations.services import departments_list
 from permissions.mixins import SettingsMenuAccessMixin
 
 logger = logging.getLogger(__name__)
@@ -94,10 +94,10 @@ class StaffListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 "form": form, "page_obj": page_obj, "sort_key": sort_key, "sort_dir": sort_dir,
                 # xlsx 職員マスタ!B38(検索パネル)「本支所を選択時に、部課プルダウン内容を
                 # 動的に更新する」。登録/編集画面（staff_regist.html/staff_edit.html）で
-                # 既に使っているdepartments_json＋クライアント側フィルタの仕組みを検索パネルにも
+                # 既に使っているdepartments_list＋クライアント側フィルタの仕組みを検索パネルにも
                 # 適用する（原本HTML自体はこの画面のみ静的な選択肢のままで連動JSを持たないが、
                 # 同じ挙動が登録/編集では実際に動作しており、検索パネルへの適用漏れと判断）。
-                "departments_json": departments_json(),
+                "departments_pulldown": departments_list(),
                 "csv_import_form": StaffCsvImportForm(),
                 "csv_import_token": issue_token(request.session, StaffCsvImportView.form_id),
             },
@@ -223,7 +223,7 @@ class StaffRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         return render(
             request,
             self.template_name,
-            {"form": form, "token": token, "departments_json": departments_json()},
+            {"form": form, "token": token, "departments_pulldown": departments_list()},
         )
 
     def post(self, request):
@@ -238,7 +238,7 @@ class StaffRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             return render(
                 request,
                 self.template_name,
-                {"form": form, "token": token, "departments_json": departments_json()},
+                {"form": form, "token": token, "departments_pulldown": departments_list()},
             )
 
         try:
@@ -259,7 +259,7 @@ class StaffRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             return render(
                 request,
                 self.template_name,
-                {"form": form, "token": token, "departments_json": departments_json()},
+                {"form": form, "token": token, "departments_pulldown": departments_list()},
             )
         logger.info("職員を新規登録しました: employee_no=%s", employee.employee_no)
         # xlsx側に職員マスタ登録の操作履歴ログサンプルは無いが、masters/permissions系の登録・更新
@@ -291,7 +291,7 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 "form": form,
                 "employee": employee,
                 "token": issue_token(request.session, self.form_id),
-                "departments_json": departments_json(),
+                "departments_pulldown": departments_list(),
             },
         )
 
@@ -313,7 +313,7 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             return render(
                 request,
                 self.template_name,
-                {"form": form, "employee": employee, "token": token, "departments_json": departments_json()},
+                {"form": form, "employee": employee, "token": token, "departments_pulldown": departments_list()},
             )
 
         try:
@@ -328,7 +328,7 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             return render(
                 request,
                 self.template_name,
-                {"form": form, "employee": employee, "token": token, "departments_json": departments_json()},
+                {"form": form, "employee": employee, "token": token, "departments_pulldown": departments_list()},
             )
         reset_permission_profile_if_needed(
             employee,

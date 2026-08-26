@@ -1,5 +1,6 @@
 import datetime
 import os
+import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from django.contrib.sessions.backends.db import SessionStore
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.db import OperationalError
+from django.db import DatabaseError, OperationalError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from pypdf import PdfReader, PdfWriter
@@ -21,7 +22,8 @@ from core import ocr_layout_services, pdf_text_embed_services
 from core.file_type_services import is_image_filename
 from core.csv_services import sanitize_csv_cell, sanitize_csv_row
 from core.forms import search_year_choices
-from core.notice_services import get_notice_counts, is_expiring_soon
+from core.middleware import SESSION_LAST_ACTIVITY_KEY
+from core.notice_services import add_months, get_notice_counts, is_expiring_soon
 from core.ocr_layout_services import OcrDisabledError
 from core.text_extraction_services import is_scanned, try_immediate_text_layer_extraction
 from core.upload_services import (
@@ -35,7 +37,15 @@ from core.upload_services import (
     save_upload_chunk,
 )
 from core.widgets import PopupSelectWidget
-from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
+from masters.models import (
+    Category,
+    DocKbn,
+    Group,
+    RetentionKbn,
+    RetentionPeriod,
+    RetentionPeriodUnit,
+    SystemSetting,
+)
 from organizations.models import Department, DepartmentViewScope
 from permissions.models import PermissionProfile, PermissionRole
 
@@ -411,6 +421,35 @@ class NoticeCountsTests(TestCase):
         self.assertEqual(counts.expired_documents, 1)
         self.assertEqual(counts.expired_contracts, 1)
 
+    def test_contract_expiring_soon_and_recently_deleted_counted(self):
+        """test_contract_counted_independently_of_documentはexpired_contractsのみ確認しており、
+        契約書側のexpiring_soon_contracts/recently_deleted_contractsは一度も検証されていなかった
+        （テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        today = timezone.localdate()
+        self._create_contract(expiry_date=today + datetime.timedelta(days=5))
+        self._create_contract(
+            expiry_date=today + datetime.timedelta(days=100),
+            is_deleted=True,
+            deleted_at=timezone.now(),
+        )
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expiring_soon_contracts, 1)
+        self.assertEqual(counts.recently_deleted_contracts, 1)
+
+    def test_other_department_contract_not_counted_for_staff(self):
+        """documents側のtest_other_department_document_not_counted_for_staffに対応する契約書側の
+        部署スコープ確認（permissions.services.contract_searchable_department_ids）。
+        配線自体が一度も確認されていなかった（テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        other_department = Department.objects.create(
+            branch_code="999", branch_name="他支店", section_code="09", section_name="他部署"
+        )
+        today = timezone.localdate()
+        other_contract = self._create_contract(expiry_date=today - datetime.timedelta(days=1))
+        other_contract.department = other_department
+        other_contract.save()
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expired_contracts, 0)
+
 
 @override_settings(NOTICE_DELETED_THRESHOLD_MONTHS=1)
 class PurgeExpiredDeletedRecordsCommandTests(TestCase):
@@ -561,6 +600,26 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
         self.assertFalse(any(f" pk=None " in message for message in cm.output))
 
 
+class AddMonthsClampTests(TestCase):
+    """core.notice_services.add_monthsの月末日クランプ（`min(base.day, _days_in_month(...))`）は
+    NoticeCountsTests内で日数加減算の副次的な結果として間接的に実行されてはいるが、月末日や
+    うるう年を跨ぐ入力を使ったテストが無く実質無検証だった（テストカバレッジ棚卸しで発見、
+    2026-08-26追加）。"""
+
+    def test_month_end_clamps_to_shorter_month(self):
+        # 1/31の1ヶ月後は2/31が存在しないため、2月の最終日(28日、平年)にクランプされる。
+        self.assertEqual(add_months(datetime.date(2026, 1, 31), 1), datetime.date(2026, 2, 28))
+
+    def test_leap_year_february_clamps_to_29(self):
+        self.assertEqual(add_months(datetime.date(2024, 1, 31), 1), datetime.date(2024, 2, 29))
+
+    def test_non_leap_year_february_clamps_to_28(self):
+        self.assertEqual(add_months(datetime.date(2025, 1, 31), 1), datetime.date(2025, 2, 28))
+
+    def test_year_boundary_crossed_correctly(self):
+        self.assertEqual(add_months(datetime.date(2026, 12, 15), 2), datetime.date(2027, 2, 15))
+
+
 class IsExpiringSoonTests(TestCase):
     """popup-detail「まもなく有効期限（更新月）」バナー用の判定（原本index.html:1146に対応する
     実データ上の状態。原本フィデリティ監査で発見・新設）。"""
@@ -576,6 +635,51 @@ class IsExpiringSoonTests(TestCase):
     def test_far_future_is_not_expiring_soon(self):
         today = timezone.localdate()
         self.assertFalse(is_expiring_soon(today + datetime.timedelta(days=400)))
+
+
+class SessionIdleTimeoutMiddlewareTests(TestCase):
+    """core.middleware.SessionIdleTimeoutMiddleware（自動ログアウト本体）。設定値の保存
+    （LogoutTimeForm経由）はOtherMainEditViewTests等でカバーされているが、保存された値が
+    実際にリクエスト処理でログアウトを引き起こすかというミドルウェア自身のロジックは
+    一切テストされていなかった（テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_idle_over_configured_timeout_logs_out_user(self):
+        SystemSetting.objects.create(pk=1, session_idle_timeout_minutes=1)
+        session = self.client.session
+        session[SESSION_LAST_ACTIVITY_KEY] = time.time() - 120
+        session.save()
+        response = self.client.get("/", follow=True)
+        self.assertRedirects(response, "/accounts/login/?next=/")
+
+    def test_idle_within_configured_timeout_keeps_session_active(self):
+        SystemSetting.objects.create(pk=1, session_idle_timeout_minutes=60)
+        session = self.client.session
+        session[SESSION_LAST_ACTIVITY_KEY] = time.time() - 10
+        session.save()
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+
+    @override_settings(SESSION_IDLE_TIMEOUT_MINUTES=1)
+    def test_no_system_setting_falls_back_to_settings_value(self):
+        # SystemSettingを1件も作らないことで、_get_timeout_minutes()のフォールバック
+        # （SystemSetting.objects.first()がNoneの場合にsettings.SESSION_IDLE_TIMEOUT_MINUTESを
+        # 使う分岐）を狙って通す。
+        session = self.client.session
+        session[SESSION_LAST_ACTIVITY_KEY] = time.time() - 120
+        session.save()
+        response = self.client.get("/", follow=True)
+        self.assertRedirects(response, "/accounts/login/?next=/")
 
 
 class OtherSettingsRoutingTests(TestCase):
@@ -746,6 +850,104 @@ class OtherMainEditViewTests(TestCase):
         token = response.context["token"]
         self.client.post("/settings/other/logout/edit/", {"session_idle_timeout_minutes": "30", "token": token})
         self.assertTrue(AuditLog.objects.filter(action="自動ログアウト時間設定 更新").exists())
+
+
+class OtherViewsDoubleSubmitTokenTests(TestCase):
+    """organizations/masters/permissions/accountsの各Viewは二重送信対策トークン不正時分岐
+    （core.double_submit.consume_tokenがFalseを返すケース）を自アプリのtests.pyで検証済みだが、
+    core/views.py自身が唯一の実装元であるOtherSettingsView/OtherMainEditView/
+    OtherLogoutEditViewの3画面はどのアプリからも間接カバーされず未検証のまま残っていた
+    （テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_other_settings_post_with_invalid_token_shows_error_and_does_not_change_password(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        response = self.client.post(
+            "/settings/other/",
+            {"token": "invalid-token", "new_password": "newpass123", "new_password_confirm": "newpass123"},
+            follow=True,
+        )
+        messages_list = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages_list))
+        self.employee.refresh_from_db()
+        self.assertTrue(self.employee.check_password("pass1234"))
+
+    def test_other_main_edit_post_with_invalid_token_shows_error_and_does_not_save(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.post(
+            f"/settings/other/main/{self.department.pk}/edit/",
+            {"token": "invalid-token"},
+            follow=True,
+        )
+        messages_list = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages_list))
+        self.assertFalse(AuditLog.objects.filter(action="メイン画面項目設定 更新").exists())
+
+    def test_other_logout_edit_post_with_invalid_token_shows_error_and_does_not_save(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.post(
+            "/settings/other/logout/edit/",
+            {"token": "invalid-token", "session_idle_timeout_minutes": "30"},
+            follow=True,
+        )
+        messages_list = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages_list))
+        self.assertFalse(AuditLog.objects.filter(action="自動ログアウト時間設定 更新").exists())
+
+
+class OtherViewsDatabaseWriteFailureTests(TestCase):
+    """OtherSettingsView.post（パスワード保存）/OtherMainEditView.post（メイン画面項目設定保存）の
+    DB書き込み失敗（IntegrityError/DatabaseError）分岐が未検証だった（正常系・バリデーション
+    エラー系は厚いが、DB境界の異常系はここでも手薄。テストカバレッジ棚卸しで発見、2026-08-26追加）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_other_settings_post_db_failure_shows_friendly_message(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF)
+        response = self.client.get("/settings/other/")
+        token = response.context["token"]
+        with patch.object(Employee, "save", side_effect=DatabaseError("simulated db error")):
+            response2 = self.client.post(
+                "/settings/other/",
+                {"token": token, "new_password": "newpass123", "new_password_confirm": "newpass123"},
+                follow=True,
+            )
+        messages_list = [str(m) for m in response2.context["messages"]]
+        self.assertTrue(any("パスワードの更新に失敗しました" in m for m in messages_list))
+        self.employee.refresh_from_db()
+        self.assertTrue(self.employee.check_password("pass1234"))
+
+    def test_other_main_edit_post_db_failure_shows_friendly_message(self):
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.get(f"/settings/other/main/{self.department.pk}/edit/")
+        token = response.context["token"]
+        with patch("core.forms.MenuItemSettingForm.save", side_effect=DatabaseError("simulated db error")):
+            response2 = self.client.post(
+                f"/settings/other/main/{self.department.pk}/edit/",
+                {"token": token},
+                follow=True,
+            )
+        messages_list = [str(m) for m in response2.context["messages"]]
+        self.assertTrue(any("メイン画面項目設定の更新に失敗しました" in m for m in messages_list))
 
 
 class UploadServicesErrorHandlingTests(TestCase):

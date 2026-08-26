@@ -795,6 +795,16 @@ class DownloadViewTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertFalse(AuditLog.objects.filter(action="契約書検索 ダウンロード").exists())
 
+    def test_display_name_strips_uuid_prefix(self):
+        """core.models.UuidPrefixedFilenameMixin.display_name。RelatedFile側（付属資料）は
+        値自体を直接検証済みだが、Contract本体側はDownloadViewTestsがレスポンスの成否のみを
+        見ており、値自体（UUIDプレフィックス除去後の元ファイル名）を確認するテストが無かった
+        （documents.tests.DownloadViewTests.test_display_name_strips_uuid_prefixと対の
+        テストカバレッジ棚卸しで発見、2026-08-26追加）。"""
+        basename = self.contract.file.name.rsplit("/", 1)[-1]
+        self.assertIn("_", basename)
+        self.assertEqual(self.contract.display_name, "dl.txt")
+
     def test_deleted_contract_download_returns_404(self):
         """documents.tests.DownloadViewTests.test_deleted_document_download_returns_404と同じ理由
         （xlsx 検索・閲覧・変更!B659(Rev1.2)「削除されている契約書は、ボタンを非表示とする」の

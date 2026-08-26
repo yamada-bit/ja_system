@@ -1,0 +1,165 @@
+permissions / accounts アプリ コードレビュー結果
+実施日: 2026-08-25
+対象: permissions/{models,views,api,mixins,forms,services,urls}.py,
+      accounts/{models,views,services,forms,csv_import_services,urls}.py
+      （関連テンプレート・テストは参照のみ、修正は未実施）
+方針: 正しさのバグ／再利用性・単純化・効率性の指摘を分離。CLAUDE.mdのコーディング規約との
+      整合性も確認対象に含めた。優先度は 高/中/低 の3段階。
+
+
+====================================================================
+■ 正しさのバグ
+====================================================================
+
+--- [優先度: 高] --------------------------------------------------
+CSV職員取込のemployee_noが登録フォームと同じ正規化・検証を経由しない
+--------------------------------------------------------------------
+場所: accounts/csv_import_services.py の _import_row()（102-119行付近）
+
+内容:
+  手動登録フォーム StaffRegistForm.clean_employee_no()（accounts/forms.py 107-121行）は
+  ①unicodedata.normalize("NFKC", ...) で全角数字を半角に変換し、②employee_no.isdigit() で
+  数字以外を弾いている（xlsx 職員マスタ!B173「半角数字のみ許可。全角の場合は登録時に半角へ
+  変換」に対応）。
+
+  一方 accounts/csv_import_services.py の _import_row() は
+  `employee_no = cell.strip()` のみで、上記の正規化・digit検証を一切行わずそのまま
+  Employee.objects.create_user()/employee.save() に渡している。
+
+失敗シナリオ:
+  HR側で作成されたCSVの職員番号列に全角の「１２３４」が含まれる行を取り込むと、
+  Employee.employee_no="１２３４"（全角）としてそのまま保存される。employee_noは
+  USERNAME_FIELDでありログイン画面（accounts/forms.py LoginForm）も正規化を行わないため、
+  当該職員が半角で"1234"と入力してログインしようとすると一致せず「職員番号またはパスワードが
+  誤っています」で恒久的にログインできなくなる。数字以外の文字が紛れ込むケース（全角/半角
+  混在の入力ミス等）も同様に無検証で保存される。
+
+--- [優先度: 中] --------------------------------------------------
+visible_groups()だけkind引数を検証しておらず、想定外の値が契約書向けクエリにフォールスルーする
+--------------------------------------------------------------------
+場所: permissions/services.py の visible_groups()（268-281行）
+
+内容:
+  同ファイルの can_download()（72-91行）・department_ids_for_group_scope()（239-265行）は
+  いずれも「kindが既知の値でなければValueErrorを送出する」よう2026-08-24に修正済みで、
+  department_ids_for_group_scope()のコメントには「can_download()と同じ理由：想定外のkindを
+  "document"扱いで握りつぶさず、呼び出し側の誤り（typo等）として早期に気付けるようにする
+  （コード監査で発見：以前はkindを検証しておらず、"document"分岐へ暗黙にフォールスルー
+  していた、2026-08-24修正）」と明記されている。
+
+  しかし visible_groups() は
+    qs = profile.doc_visible_groups if kind == "document" else profile.contract_visible_groups
+  という三項式のままで、"document"以外は全て契約書向け（contract_visible_groups）として
+  扱われる。同じ2026-08-24の監査で同種の関数群が修正された際に、この関数だけ取りこぼされて
+  いると見られる（permissions/tests.pyにも can_download/department_ids_for_group_scope の
+  「不正kindはValueError」テストはあるが、visible_groups()の同種テストは無い）。
+
+失敗シナリオ:
+  呼び出し側（core/api.py・core/forms.py）でkind文字列をtypoした場合や、将来新しい
+  kind種別を追加した場合に、文書向けの分類フィルタのつもりが契約書向け
+  contract_visible_groupsを返してしまい、検索/保管画面で本来のフィルタと異なる分類が
+  表示される／表示されない不具合になる。現状のkind呼び出しは全てハードコードされた
+  "document"/"contract"の2値のみのため即座には顕在化しないが、他の姉妹関数が同じ理由で
+  過去に一度実際に修正された「取りこぼしやすい」バグクラスであり、修正の横展開漏れとして
+  記録に値する。
+
+
+====================================================================
+■ 再利用性・単純化・効率性
+====================================================================
+
+--- [優先度: 高 / 効率性] ------------------------------------------
+権限管理一覧・CSV出力でPermissionProfileのM2MフィールドがprefetchされておらずN+1が発生する
+--------------------------------------------------------------------
+場所:
+  - permissions/services.py visible_employees()（154-168行）
+  - templates/permissions/authority_list.html（98,101,102行）
+  - permissions/views.py _flags_row()（124-143行、AuthorityCsvExportViewから呼ばれる）
+
+内容:
+  AuthorityListView・AuthorityCsvExportViewの双方が経由する filter_authority_queryset()は
+  内部で visible_employees() を呼ぶが、そこでは
+    Employee.objects.select_related("department", "permission_profile")
+  のみで、PermissionProfileの3つのManyToManyField
+  （doc_visible_groups / contract_visible_departments / contract_visible_groups）への
+  prefetch_relatedが無い。
+
+  にもかかわらず、
+  - authority_list.htmlは各行で {% for g in profile.doc_visible_groups.all %} 等を3箇所、
+  - _flags_row()（CSV出力）も同じ3つのM2Mを .all() で参照
+  しており、行ごとに追加のDBクエリが発生する。
+
+失敗シナリオ:
+  一覧画面はPAGE_SIZE=100件/ページのため、1ページ表示するだけで最大300件（3M2M×100件）の
+  追加クエリが発行される。CSV出力はページングが無いため全件が対象になり、職員数が
+  数百〜千名規模になるとエクスポート1回でそれに比例したDBラウンドトリップが発生し、
+  レスポンスタイムが大きく劣化する（他画面のprefetch_related利用箇所と比べても対応漏れ）。
+
+--- [優先度: 中 / 再利用性] ------------------------------------------
+_flags_row()がFLAG_FIELDS/MULTI_FIELDSを再利用せず個別にハードコードしている
+--------------------------------------------------------------------
+場所: permissions/views.py _flags_row()（124-143行）、permissions/models.py FLAG_FIELDS/
+      MULTI_FIELDS（16-36行）
+
+内容:
+  permissions/models.pyのコメントが自ら明記している通り、PermissionProfileのフラグ一覧は
+  本来 FLAG_FIELDS / MULTI_FIELDS の単一情報源に集約されており
+  （AuthorityEditForm、accounts.services.reset_permission_profile_if_neededは既にこれを
+  参照している）、_flags_row()だけが「このリストとは別に手動同期が必要な3箇所目
+  （コード監査で発見、2026-08-24追記）。フラグ追加時はそちらの更新も忘れないこと」と
+  コメントで自認されたまま個別ハードコードの状態で残っている。
+
+失敗シナリオ:
+  将来PermissionProfileに新しい権限フラグを追加してFLAG_FIELDS/MULTI_FIELDSとフォームは
+  更新したが、CSVヘッダー（AuthorityCsvExportView.get内のwriterow）または_flags_row()の
+  どちらか一方の更新を忘れると、CSV出力の列がヘッダーとずれる、または新フラグの値が
+  出力されないまま気付かれずリリースされる（同種の既知リスクとして開発者自身が既に
+  コード上に警告コメントを残している箇所）。
+
+
+====================================================================
+■ CLAUDE.mdコーディング規約との整合性
+====================================================================
+
+- ビューはCBVのみ: permissions/accounts双方とも全ビューがView/BaseLoginView/BaseLogoutView
+  のサブクラスで、関数ベースビューは無し。準拠。
+- モデルのverbose_name/help_text/エラーメッセージ/docstringの日本語統一: 確認した範囲で
+  すべて日本語。準拠。
+- 例外処理（try/exceptで具体的な例外型を捕捉しlogger.exceptionで記録、bare except:禁止）:
+  StaffRegistView/StaffEditViewのIntegrityError捕捉、csv_import_servicesのUnicodeDecodeError/
+  ValueError捕捉はいずれも具体的な例外型＋理由コメント付きで、bare exceptも無し。準拠。
+  （csv_import_services.import_staff_csvの`except Exception:`は一見広すぎるが、「1行の失敗で
+  全体を止めない」という設計判断がコメントで明記されており、CLAUDE.mdの「本質的でない処理の
+  失敗で本処理まで巻き込まない場合は握りつぶして良いが理由をコメントに明記する」に該当し
+  問題無い）。
+- ログ整備（logger = logging.getLogger(__name__)、権限拒否等はlogger.warning）:
+  両アプリ全モジュールでlogger定義済み。SettingsMenuAccessMixin・AuthorityEditView.dispatchの
+  権限拒否時にlogger.warningあり。準拠。
+- 一覧画面のページネーションはDjango Paginator: AuthorityListView・StaffListViewともに
+  Paginator使用。準拠。
+- 未実装機能をUIに残す場合はdisabled+titleで明示（alertで誤魔化さない）:
+  permissions/accountsのテンプレートで確認した範囲では、alert()は実際に機能している
+  パスワードリセット結果表示（staff_edit.html）のみで、未実装の隠蔽には使われていない。準拠。
+
+- [優先度: 低] permissions/api.py OptionListAPIViewがSettingsMenuAccessMixin等のロール制御を
+  持たない
+  場所: permissions/api.py（13-33行）
+  内容: LoginRequiredMixinのみで、権限管理画面自体へのアクセス権が無いSTAFFロールでも
+  `/permissions/api/options/?type=dept`（全部署一覧）や`?type=group&doc_kbn=contract`
+  （契約書向け分類一覧）を直接叩いて取得できる。CLAUDE.mdが明記する既知の落とし穴
+  「ボタンの表示/非表示（クライアント側・APIのURL生成）と、そのボタンが叩くエンドポイントの
+  サーバー側権限チェックは別物」と同種のパターンに近い（このAPI自体は選択肢の一覧を返す
+  だけでPermissionProfileの中身は変更できないため実害は限定的だが、部署名・契約書向け
+  分類名は本来この画面へのアクセス権が無い職員には見せる想定が無い情報である可能性がある）。
+  優先度は低いが、他のpopup-select系オプションAPI（core.api.BaseOptionListAPIView等）の
+  ゲーティング方針と揃っているか、別途確認する価値がある。
+
+
+====================================================================
+■ まとめ（優先度別件数）
+====================================================================
+高: 2件（CSV職員番号の正規化漏れ／権限管理一覧・CSV出力のN+1）
+中: 2件（visible_groups()のkind検証漏れ／_flags_row()の手動同期リスク）
+低: 1件（OptionListAPIViewのロール制御欠如）
+
+※本レビューは指摘一覧のみで、修正は未実施。
