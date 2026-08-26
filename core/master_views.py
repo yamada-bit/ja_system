@@ -1,3 +1,4 @@
+import copy
 import logging
 
 from django.contrib import messages
@@ -206,7 +207,7 @@ class BaseScopedMasterEditView(View):
             data=data, instance=obj, show_department=is_admin, **self.extra_form_kwargs(request, is_admin)
         )
 
-    def audit_event_message(self, obj):
+    def audit_event_message(self, obj, before):
         raise NotImplementedError
 
     def success_message(self, obj):
@@ -234,6 +235,12 @@ class BaseScopedMasterEditView(View):
         if resp is not None:
             return resp
 
+        # xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞の「更新した項目名：更新前データ ->
+        # 更新後データ」形式をGroup/Category更新にも適用するため、フォームで上書きされる前の
+        # 値をスナップショットしておく（浅いコピーで足りる。department等のFKはスカラーの
+        # `<field>_id`しか__dict__に残らないため、書き換え後でも`before.department`は
+        # コピー時点のIDで独立にDBから引き直され、正しく「更新前」の関連オブジェクトになる）。
+        before = copy.copy(obj)
         is_admin = _is_admin(request.user)
         form = self.build_form(request, obj, is_admin, data=request.POST)
         if not form.is_valid():
@@ -248,7 +255,9 @@ class BaseScopedMasterEditView(View):
             return render(request, self.template_name, {"form": form, self.context_object_name: obj, "token": token})
 
         logger.info("%sを更新しました: code=%s", self.entity_label, obj.code)
-        audit_services.log(employee=request.user, action=self.audit_action, event_message=self.audit_event_message(obj))
+        audit_services.log(
+            employee=request.user, action=self.audit_action, event_message=self.audit_event_message(obj, before)
+        )
         messages.success(request, self.success_message(obj))
         return redirect(self.list_url_name)
 

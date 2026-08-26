@@ -585,6 +585,77 @@ class StaffRegistEditAuditLogTests(TestCase):
         self.assertEqual(entry.employee_no, "1")
         self.assertIn("3030", entry.event_message)
 
+    def test_edit_creates_audit_log_with_diff_content(self):
+        """xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞「職員：職員名(職員番号),更新した項目名：
+        更新前データ -> 更新後データ,………」形式で、実際に変更されたフィールドのみが記録されること
+        （原本フィデリティ監査で発見：以前は更新後の職員番号・氏名のみを記録し、何がどう変わったか
+        一切記録していなかった）。氏名と職階を変更し、部署・役職は変更しない。
+        """
+        target = Employee.objects.create_user(
+            employee_no="3031", name="差分太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        token = self.client.get(f"/accounts/staff/{target.pk}/edit/").context["token"]
+        self.client.post(
+            f"/accounts/staff/{target.pk}/edit/",
+            {
+                "token": token,
+                "name": "差分太郎改",
+                "department": self.department.pk,
+                "rank": Rank.CHOSAYAKU,
+                "position": Position.KACHO,
+            },
+        )
+        entry = AuditLog.objects.get(action="職員マスタ 更新", employee_no="1")
+        self.assertEqual(
+            entry.event_message,
+            "職員：差分太郎改(3031),氏名：差分太郎 -> 差分太郎改,職階：考査役 -> 調査役",
+        )
+
+    def test_edit_with_no_field_changes_creates_audit_log_without_diff(self):
+        """変更が無いフィールドは列挙しない（build_diff_messageは差分が0件なら対象識別子のみ返す）。"""
+        target = Employee.objects.create_user(
+            employee_no="3032", name="無変更太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        token = self.client.get(f"/accounts/staff/{target.pk}/edit/").context["token"]
+        self.client.post(
+            f"/accounts/staff/{target.pk}/edit/",
+            {
+                "token": token,
+                "name": "無変更太郎",
+                "department": self.department.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KACHO,
+            },
+        )
+        entry = AuditLog.objects.get(action="職員マスタ 更新", employee_no="1")
+        self.assertEqual(entry.event_message, "職員：無変更太郎(3032)")
+
+    def test_edit_password_change_records_marker_without_actual_value(self):
+        """CLAUDE.mdのパスワードマスキング方針により、パスワード自体の値はログに残さない
+        （core.views.OtherSettingsView.postの「パスワード 更新」と同じ判断）。
+        """
+        target = Employee.objects.create_user(
+            employee_no="3033", name="鍵太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        token = self.client.get(f"/accounts/staff/{target.pk}/edit/").context["token"]
+        self.client.post(
+            f"/accounts/staff/{target.pk}/edit/",
+            {
+                "token": token,
+                "name": "鍵太郎",
+                "department": self.department.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KACHO,
+                "password": "shinpasuwaado",
+            },
+        )
+        entry = AuditLog.objects.get(action="職員マスタ 更新", employee_no="1")
+        self.assertNotIn("shinpasuwaado", entry.event_message)
+        self.assertEqual(entry.event_message, "職員：鍵太郎(3033),パスワード：(変更あり) -> (変更あり)")
+
     def test_regist_post_with_invalid_token_shows_error_and_does_not_create(self):
         """二重送信対策トークン不正時（core.double_submit.consume_tokenがFalseを返すケース）の
         分岐が未テストだった（コード監査で発見、2026-08-25追加）。"""

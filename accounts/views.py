@@ -15,7 +15,7 @@ from audit import services as audit_services
 from accounts.csv_import_services import CsvImportError, import_staff_csv
 from accounts.forms import LoginForm, StaffCsvImportForm, StaffEditForm, StaffRegistForm, StaffSearchForm
 from accounts.models import Employee
-from accounts.services import filter_staff_queryset, reset_permission_profile_if_needed
+from accounts.services import build_staff_edit_diff_message, filter_staff_queryset, reset_permission_profile_if_needed
 from core.csv_services import sanitize_csv_row
 from core.double_submit import consume_token, issue_token
 from organizations.services import departments_list
@@ -97,7 +97,10 @@ class StaffListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 # 既に使っているdepartments_list＋クライアント側フィルタの仕組みを検索パネルにも
                 # 適用する（原本HTML自体はこの画面のみ静的な選択肢のままで連動JSを持たないが、
                 # 同じ挙動が登録/編集では実際に動作しており、検索パネルへの適用漏れと判断）。
-                "departments_pulldown": departments_list(),
+                # exclude_retired=True：検索パネルの部課プルダウンから退職(99)を除外する
+                # （xlsx 職員マスタ!B41）。登録/編集画面の部署欄（退職者への変更を含む実際の
+                # 所属設定用途）は従来通り除外しない。
+                "departments_pulldown": departments_list(exclude_retired=True),
                 "csv_import_form": StaffCsvImportForm(),
                 "csv_import_token": issue_token(request.session, StaffCsvImportView.form_id),
             },
@@ -302,6 +305,8 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("accounts:staff_edit", pk=pk)
 
+        before_name = employee.name
+        before_department = employee.department
         before_department_id = employee.department_id
         before_rank = employee.rank
         before_position = employee.position
@@ -342,12 +347,23 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             actor=request.user,
         )
         logger.info("職員情報を更新しました: employee_no=%s", employee.employee_no)
-        # 職員マスタ登録と同様、更新操作も操作履歴ログに記録する（masters系登録・更新ビューと
-        # 同じ扱い。権限プロファイルの自動リセット自体は別イベントとしてservices.py側で記録する）。
+        # 職員マスタ登録と同様、更新操作も操作履歴ログに記録する（権限プロファイルの自動
+        # リセット自体は別イベントとしてservices.py側で記録する）。イベントメッセージは
+        # xlsx B69-70＜職員マスタ更新　例＞の「更新した項目名：更新前データ -> 更新後データ」
+        # 形式（原本フィデリティ監査で発見：以前は更新後の職員番号・氏名のみで、何がどう
+        # 変わったか一切記録していなかった）。
         audit_services.log(
             employee=request.user,
             action="職員マスタ 更新",
-            event_message=f"職員番号：{employee.employee_no},氏名：{employee.name}",
+            event_message=build_staff_edit_diff_message(
+                employee,
+                before_name=before_name,
+                before_department=before_department,
+                before_rank=before_rank,
+                before_position=before_position,
+                before_is_retired=before_is_retired,
+                password_changed=bool(form.cleaned_data.get("password")),
+            ),
         )
         messages.success(request, f"職員「{employee.name}」を更新しました。")
         return redirect("accounts:staff_list")

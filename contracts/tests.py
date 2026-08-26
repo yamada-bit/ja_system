@@ -753,6 +753,41 @@ class RelatedFilesMultiUploadTests(TestCase):
         self.assertIn("rel_b", created[1].related_files.get().file.name)
 
 
+class SearchAuditLogTests(TestCase):
+    """documents.tests.SearchAuditLogTestsと同じ理由。原本index.html:3315の操作履歴ログサンプル
+    「契約書　検索｜分類：XXX,年：XXX,カテゴリー：XXX,タイトル：XXX,フリーワード：XXX」に対応
+    （原本フィデリティ監査で発見：検索操作自体が一度も監査ログに記録されていなかった）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_bare_screen_open_does_not_create_audit_log(self):
+        self.client.get("/contracts/search/")
+        self.assertFalse(AuditLog.objects.filter(action="契約書検索 検索").exists())
+
+    def test_search_submission_creates_audit_log_with_filled_fields_only(self):
+        response = self.client.get("/contracts/search/", {"title": "覚書", "title_match": "or"})
+        self.assertEqual(response.status_code, 200)
+        entry = AuditLog.objects.get(action="契約書検索 検索")
+        self.assertEqual(entry.employee_no, "1")
+        self.assertEqual(entry.event_message, "契約書タイトル：覚書")
+
+    def test_pagination_click_does_not_create_duplicate_audit_log(self):
+        self.client.get("/contracts/search/", {"title": "覚書"})
+        self.assertEqual(AuditLog.objects.filter(action="契約書検索 検索").count(), 1)
+        self.client.get("/contracts/search/", {"title": "覚書", "page": "1"})
+        self.assertEqual(AuditLog.objects.filter(action="契約書検索 検索").count(), 1)
+
+
 class DownloadViewTests(TestCase):
     """documents.tests.DownloadViewTestsと同じ理由（screen-search（契約書モード）
     「ダウンロード」ボタン、2026-08-12追加対応）。"""
@@ -788,7 +823,9 @@ class DownloadViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         entry = AuditLog.objects.get(action="契約書検索 ダウンロード")
         self.assertEqual(entry.employee_no, "1")
-        self.assertIn("DL対象", entry.event_message)
+        # 原本index.html:3310の操作履歴ログサンプル「ファイル名：契約書_001」形式
+        # （タイトルではなく実ファイル名）。
+        self.assertEqual(entry.event_message, "ファイル名：dl.txt")
 
     def test_denied_download_does_not_create_audit_log(self):
         response = self.client.get(f"/contracts/{self.contract.pk}/download/")

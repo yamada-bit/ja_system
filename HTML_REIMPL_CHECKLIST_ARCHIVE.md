@@ -1960,3 +1960,104 @@ xlsx メイン画面!B55「設定メニュー『その他設定』の『メイ�
   それぞれ検証する7ケースに拡充。
 - [x] `manage.py test core`（115件）・`manage.py test core organizations documents contracts
   permissions audit masters accounts`（645件）で全件PASSを確認。
+
+## 「保存期間設定」シートの行単位フル監査・retention_permanent_years の.env移行（2026-08-27）
+
+ユーザー依頼により、xlsx「保存期間設定」シートを行単位（[1]〜[7]の全画面・全annotation）で
+機械的に再監査した。Rev1.0/Rev1.1/Rev1.2間でこのシートのセルテキスト・埋め込み画像（8枚、
+ハッシュ一致）に差分が無いことをまず確認済み（本シートはRev1.0時点の内容がそのまま確定）。
+
+一覧・新規登録・編集・削除（文書/電子決裁とも）の全項目は実装済みで、原本HTML
+（`html4/index.html:3079-3261`）とも一致を確認。`handlePermanent()`はxlsx文言が
+"(readonly)"だが原本HTML自体のJS実装が`disabled`のため、HTML優先の既存方針通り`disabled`で
+正しい（乖離ではない）。
+
+- [x] 唯一の齟齬として、`masters.SystemSetting.retention_permanent_years`（「永年」の実年数、
+  既定50年、xlsx B74「設定ファイル等で定義し、先方より変更依頼を受けた際に容易に変更できる
+  こと」）を変更する手段がDB直接操作以外に存在しないことを発見した。同じ理由・同じxlsx文言
+  パターンで`notice_threshold_months`/`contract_retention_years`は2026-08-13に
+  `.env`経由（`NOTICE_EXPIRING_THRESHOLD_MONTHS`等）へ既に移行済みだったにもかかわらず、
+  この項目だけ移行漏れになっていた。
+- [x] `config/settings/base.py`に`RETENTION_PERMANENT_YEARS`（`.env`経由、既定50）を追加し、
+  `.env.example`にも追記。`masters.SystemSetting`から`retention_permanent_years`フィールドを
+  削除し、開発中マイグレーション0001整理の方針（本ファイル直前セクション「開発中の
+  マイグレーションをアプリごとに0001のみへ整理」）に揃えて`masters/migrations/0001_initial.py`
+  を直接編集（新規マイグレーション追加ではない）。
+- [x] `documents/services.py` `calculate_expiry_date`を`SystemSetting.objects.first()`参照から
+  `settings.RETENTION_PERMANENT_YEARS`参照に変更（`CONTRACT_RETENTION_YEARS`と同じ形）。
+- [x] `documents/tests.py`の`test_permanent_respects_custom_system_setting`を
+  `test_permanent_respects_custom_setting`に改名し、DBレコード作成から`@override_settings
+  (RETENTION_PERMANENT_YEARS=30)`に変更。未使用になった`SystemSetting`importも削除。
+- [x] `manage.py makemigrations --check --dry-run masters documents`で差分無しを確認したうえで
+  `manage.py test masters documents`（213件）で全件PASSを確認。
+- [ ] 注記：この修正前に一度`manage.py migrate`済みの開発DB（`ja_db`）には
+  `retention_permanent_years`列が実列として残存している（Django側は列の存在を認識しないだけで
+  実害は無い）。次回の開発DBリセット・マイグレーション再作成のタイミングで自然に解消される想定。
+
+なお、xlsx B77/B191「保存期間や表示順の重複登録は出来ないように制御」は表示順(display_order)
+のみを一意制約の対象とする実装（`RetentionPeriodFormTests.test_duplicate_display_order_
+within_same_kbn_rejected`で明記済み）。保存期間の値自体（例：「1年」を複数行登録）は制約して
+いないが、これは新規発見ではなく既存の意識的な解釈のため今回は変更しなかった。
+
+## 操作履歴ログの行単位全数監査・記録漏れ修正（2026-08-27）
+
+xlsx「操作履歴ログ」シート（Rev1.2、B6〜B76全セル＋Rev1.1改訂注記4箇所）を1行ずつ現行コード
+（`audit`アプリ、および各アプリの`audit_services.log()`呼び出し箇所全件）と突き合わせ、
+一次情報源の`index.html`の`screen-log-list`セクション（サンプルデータ行含む、
+`index.html:3263-3320`）とも照合した。
+
+### 実装済み・仕様通りと確認できた項目
+職員番号完全一致検索・職員名全角スペース区切りフルネーム検索（Rev1.1）・イベントメッセージ
+スペース区切りAND検索（Rev1.1）・個人情報書類チェックボックス絞り込み・初期ソート順（操作日時
+降順）・ページャー（1ページ100件、Rev1.1で50→100件）・総件数表示・内部スクロール・CSV出力・
+分類/カテゴリー管理の新規登録イベントメッセージ形式。
+
+### 既に意図的な乖離と確定済みだった項目（対応不要、再確認のみ）
+- 保存件数上限／CSV出力最大対象期間（B48-52）：2026-08-19にユーザー確認済みで実装見送りが
+  確定済み（本ファイル「実装とxlsx Rev1.1全文の突合監査・実装漏れ修正」節参照）。
+  `masters.SystemSetting.audit_log_retention_months`フィールドのみ存在し未使用のまま。
+- パスワード更新：原本サンプルは新旧パスワードを平文diffで表示するが、CLAUDE.mdのマスキング
+  方針によりあえて含めていない（`core/views.py`に理由コメント済み）。
+- 権限管理更新：原本サンプルはフラグ単位の差分形式だが、フラグ数が多いため対象職員のみ記録する
+  方針が既に確定・理由コメント済み（`permissions/views.py`）。
+
+### 新たに発見し、ユーザー確認の上で対応した3件
+1. **検索操作自体の記録漏れ**：文書検索・契約書検索とも「検索開始」ボタン押下がAuditLogに
+   一度も記録されていなかった。ユーザー判断により文書・契約書検索のみ対応（他マスタ検索は
+   対象外）。`core/search_services.py`に`is_search_form_submission()`（ページャー/ソートの
+   再アクセスと実際の検索送信を`page`/`sort`パラメータの有無で区別）・
+   `build_search_audit_message()`（フォームで実際に値が入力されたフィールドのみ「ラベル：値」で
+   列挙、`(条件指定なし)`は全欄空欄時のフォールバック）を追加し、
+   `documents/views.py`・`contracts/views.py`の`SearchView.get()`から呼ぶ。
+   実装中に、空のQuerySet（`department`等のModelMultipleChoiceField）がDjangoの`__eq__`
+   未定義により`value in (None, "", [], ())`のようなタプル比較では検出できず「部署：」という
+   空ラベルが漏れる不具合を発見し、`bool(value)`判定に修正した
+   （`documents.tests.SearchAuditLogTests.test_search_submission_with_department_multiselect_field`
+   で回帰確認）。
+2. **ダウンロード/プレビュー/登録のメッセージ形式が原本と不一致**：原本サンプル
+   （`index.html:3310,3312,3316,3317,3320`）は全て「ファイル名：{実ファイル名}」形式だが、
+   `core/record_views.py` `BaseFileServeView`は「{文書|契約書}「{タイトル}」を{ダウンロード
+   しました|プレビュー表示しました}。」という原本に無い独自形式で、しかも実ファイル名
+   (`display_name`)ではなくタイトル(`title`)を使っていた（2026-08-12追加のダウンロード監査
+   ログ自体は原本に無い機能追加だったため、原本のメッセージ書式との突き合わせが漏れていた）。
+   `documents/views.py`・`contracts/views.py`の登録(保管)イベントも同様に修正。
+3. **更新イベントに変更前後の差分が記録されていない**：xlsx B69-70＜職員マスタ更新　例＞
+   「職員：職員名(職員番号),更新した項目名：更新前データ -> 更新後データ,………」に対し、
+   `accounts.views.StaffEditView`（職員マスタ更新）・`masters/views.py`
+   （分類/カテゴリー/保存期間設定の更新）はいずれも更新後の値のスナップショットのみを記録し、
+   何がどう変わったか記録していなかった。`audit/services.py`に`build_diff_message()`
+   （`(項目名, 更新前, 更新後)`のタプル列から差分メッセージを組み立てる共通ヘルパー）を追加し、
+   `accounts/services.py`に`build_staff_edit_diff_message()`を追加（パスワード自体の値は
+   含めず`(変更あり)`のみ記録、パスワード更新と同じマスキング方針）。
+   `core/master_views.py` `BaseScopedMasterEditView`は`audit_event_message(obj)`を
+   `audit_event_message(obj, before)`に変更し、`post()`でフォーム上書き前に`copy.copy(obj)`で
+   スナップショットを取得するようにした。`masters.RetentionEditView`は
+   `BaseScopedMasterEditView`を使わない独自実装のため、同じパターンを個別に適用した。
+
+### 対応したテスト
+`accounts/tests.py`（診断3件追加：差分内容・無変更時・パスワードマスキング）、
+`masters/tests.py`（`test_group_edit_creates_audit_log_with_content`を実際に部署を変更する
+シナリオへ強化）、`documents/tests.py`・`contracts/tests.py`（`SearchAuditLogTests`クラスを
+新規追加、ダウンロードテストのメッセージ形式アサーションを更新）。
+`manage.py test`（全660件）PASS確認済み、`manage.py makemigrations --check --dry-run`も
+差分無しを確認済み（モデル変更を伴わない実装のため）。

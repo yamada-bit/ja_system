@@ -23,7 +23,7 @@ from contracts.services import (
     parse_remove_related_ids,
     scoped_get_object_or_404,
 )
-from core import bulk_edit_services, record_views, upload_services, upload_views
+from core import bulk_edit_services, record_views, search_services, upload_services, upload_views
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
 from core.text_extraction_services import try_immediate_text_layer_extraction
@@ -204,10 +204,14 @@ class UploadStep2View(RequiresContractEditMixin, View):
                         created_related.append(
                             RelatedFile.objects.create(contract=contract, file=related, display_order=i)
                         )
+                    # イベントメッセージは原本index.html:3320の操作履歴ログサンプル
+                    # 「文書　アップロード｜ファイル名：契約書_100」に合わせ、タイトルではなく
+                    # 実ファイル名(display_name)を「ファイル名：」形式で記録する
+                    # （原本フィデリティ監査で発見：以前は原本に無い独自形式だった）。
                     audit_services.log(
                         employee=request.user,
                         action="保管画面２ 登録",
-                        event_message=f"契約書「{contract.title}」を保管しました。",
+                        event_message=f"ファイル名：{contract.display_name}",
                     )
                     created.append(contract)
         except (OSError, DBError):
@@ -597,6 +601,17 @@ class SearchView(LoginRequiredMixin, View):
         )
         paginator = Paginator(qs, self.PAGE_SIZE)
         page_obj = paginator.get_page(request.GET.get("page"))
+        # 原本index.html:3315の操作履歴ログサンプル「契約書　検索｜分類：XXX,年：XXX,カテゴリー：
+        # XXX,タイトル：XXX,フリーワード：XXX」に対応（未実装改善候補の棚卸しで発見：検索操作
+        # 自体が一度も監査ログに記録されていなかった）。ページャー/ソートの再アクセスは新たな
+        # 検索操作ではないため対象外にする（core.search_services.is_search_form_submission
+        # docstring参照）。
+        if form.is_valid() and search_services.is_search_form_submission(request.GET, form.fields.keys()):
+            audit_services.log(
+                employee=request.user,
+                action="契約書検索 検索",
+                event_message=search_services.build_search_audit_message(form),
+            )
         return render(
             request,
             self.template_name,

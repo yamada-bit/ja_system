@@ -62,11 +62,14 @@ class BaseFileServeView(View):
         # 記録されるのに、文書管理システムの核心操作である「誰がいつ閲覧・持ち出したか」の
         # ダウンロード/プレビューだけ監査ログに一切残っていなかった（未実装改善候補の棚卸しで
         # 発見）。ファイルI/O成功後（ユーザーが実際に中身を受け取れる状態になった後）に記録する。
-        verb = "ダウンロードしました" if self.as_attachment else "プレビュー表示しました"
+        # イベントメッセージは原本index.html:3310,3312,3316,3317の操作履歴ログサンプル
+        # （「ファイル名：契約書_001」等）に合わせ、タイトルではなく実ファイル名(display_name)を
+        # 「ファイル名：」形式で記録する（原本フィデリティ監査で発見：以前は
+        # 「{entity_label}「{title}」を〜しました。」という原本に無い独自形式だった）。
         audit_services.log(
             employee=request.user,
             action=self.audit_action,
-            event_message=f"{self.entity_label}「{obj.title}」を{verb}。",
+            event_message=f"ファイル名：{obj.display_name}",
             **self.audit_extra_kwargs(obj),
         )
         return response

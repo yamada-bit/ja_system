@@ -157,11 +157,20 @@ class GroupEditView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.Ba
     def scoped_lookup(self, request, pk):
         return scoped_get_object_or_404(Group.objects.filter(is_deleted=False), request.user, pk)
 
-    def audit_event_message(self, obj):
-        return (
-            f"No.{obj.code},分類名：{obj.name},書類管理区分：{obj.get_doc_kbn_display()},"
-            f"部署：{obj.department}"
-        )
+    def audit_event_message(self, obj, before):
+        # xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞と同じ「更新した項目名：更新前データ ->
+        # 更新後データ」形式（原本フィデリティ監査で発見：以前は更新後の値のスナップショットのみで
+        # 何がどう変わったか記録していなかった）。
+        changes = []
+        if obj.code != before.code:
+            changes.append(("分類コード", before.code, obj.code))
+        if obj.name != before.name:
+            changes.append(("分類名", before.name, obj.name))
+        if obj.doc_kbn != before.doc_kbn:
+            changes.append(("書類管理区分", before.get_doc_kbn_display(), obj.get_doc_kbn_display()))
+        if obj.department_id != before.department_id:
+            changes.append(("部署", before.department, obj.department))
+        return audit_services.build_diff_message(f"No.{obj.code},分類名：{obj.name}", changes)
 
     def success_message(self, obj):
         return f"分類「{obj.name}」を更新しました。"
@@ -333,12 +342,20 @@ class CategoryEditView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views
     def extra_form_kwargs(self, request, is_admin):
         return {"employee": request.user}
 
-    def audit_event_message(self, obj):
-        return (
-            f"No.{obj.code},カテゴリー名：{obj.name},"
-            f"書類管理区分：{obj.get_doc_kbn_display()},分類：{obj.group.name},"
-            f"部署：{obj.department}"
-        )
+    def audit_event_message(self, obj, before):
+        # GroupEditView.audit_event_messageと同じ理由・同じ形式。
+        changes = []
+        if obj.code != before.code:
+            changes.append(("カテゴリーコード", before.code, obj.code))
+        if obj.name != before.name:
+            changes.append(("カテゴリー名", before.name, obj.name))
+        if obj.doc_kbn != before.doc_kbn:
+            changes.append(("書類管理区分", before.get_doc_kbn_display(), obj.get_doc_kbn_display()))
+        if obj.group_id != before.group_id:
+            changes.append(("分類", before.group, obj.group))
+        if obj.department_id != before.department_id:
+            changes.append(("部署", before.department, obj.department))
+        return audit_services.build_diff_message(f"No.{obj.code},カテゴリー名：{obj.name}", changes)
 
     def success_message(self, obj):
         return f"カテゴリー「{obj.name}」を更新しました。"
@@ -490,6 +507,13 @@ class RetentionEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         if resp is not None:
             return resp
 
+        # GroupEditView/CategoryEditViewと同じ理由（core.master_views.BaseScopedMasterEditView.post
+        # docstring参照）。RetentionPeriodはBaseScopedMasterEditViewを使わない独自実装のため、
+        # ここでも同様にフォーム上書き前の値をスナップショットする。__str__(period_value+
+        # period_unitの組み合わせ)を「保存期間」欄の比較に使う。
+        before_str = str(period)
+        before_display_order = period.display_order
+
         form = RetentionPeriodForm(request.POST, instance=period)
         if not form.is_valid():
             token = issue_token(request.session, self.form_id)
@@ -509,10 +533,19 @@ class RetentionEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             return render(request, self.template_name, {"form": form, "period": period, "token": token})
 
         logger.info("保存期間設定を更新しました: id=%s %s", period.pk, period)
+        # xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞と同じ「更新した項目名：更新前データ ->
+        # 更新後データ」形式（原本フィデリティ監査で発見：以前は更新後の値のスナップショットのみ）。
+        changes = []
+        if str(period) != before_str:
+            changes.append(("保存期間", before_str, str(period)))
+        if period.display_order != before_display_order:
+            changes.append(("表示順", before_display_order, period.display_order))
         audit_services.log(
             employee=request.user,
             action="保存期間設定 更新",
-            event_message=f"区分：{period.get_kbn_display()},保存期間：{period}",
+            event_message=audit_services.build_diff_message(
+                f"区分：{period.get_kbn_display()},保存期間名：{period.doc_name}", changes
+            ),
         )
         messages.success(request, "保存期間設定を更新しました。")
         return redirect(_retention_list_url(period.kbn, period.doc_name))

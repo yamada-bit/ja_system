@@ -51,6 +51,21 @@ def log(*, employee, action, event_message, personal_info_flag=False):
     )
 
 
+def build_diff_message(subject_label, changes):
+    """更新イベントの「更新した項目名：更新前データ -> 更新後データ」形式メッセージを組み立てる
+    （xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞「職員：職員名(職員番号),更新した項目名：
+    更新前データ -> 更新後データ,………」）。
+
+    `changes`は実際に変更されたフィールドのみを`(項目名, 更新前, 更新後)`のタプルで渡すこと
+    （変更の無いフィールドを列挙しない判断は呼び出し側の責務）。accounts.services.
+    build_staff_edit_diff_message・masters.views.py各Edit系の`audit_event_message()`から使う。
+    """
+    diff_parts = [f"{label}：{before} -> {after}" for label, before, after in changes]
+    if not diff_parts:
+        return subject_label
+    return subject_label + "," + ",".join(diff_parts)
+
+
 def log_raw(*, employee_no, employee_name, department_name, action, event_message, personal_info_flag=False):
     """`log()`のうち、認証済みEmployeeインスタンスを経由できない場面向けの下位関数。
 

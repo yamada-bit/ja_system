@@ -931,20 +931,31 @@ class MasterAuditLogContentTests(TestCase):
         self.client.login(username="1", password="pass1234")
 
     def test_group_edit_creates_audit_log_with_content(self):
+        """xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞と同じ「更新した項目名：更新前データ ->
+        更新後データ」形式（原本フィデリティ監査で発見・2026-08-27対応：以前は更新後の値の
+        スナップショットのみで、何がどう変わったか記録していなかった）。実際に変更した
+        分類名・部署のみが列挙され、変更していないdoc_kbnは列挙されないことを確認する。
+        """
         from audit.models import AuditLog
 
+        other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
         group = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
         token = self.client.get(f"/masters/class/{group.pk}/edit/").context["token"]
         self.client.post(
             f"/masters/class/{group.pk}/edit/",
             {
                 "token": token, "code": "1", "name": "分類Ａ改", "doc_kbn": DocKbn.DOCUMENT,
-                "department": self.department.pk,
+                "department": other_department.pk,
             },
         )
         entry = AuditLog.objects.get(action="分類管理 更新")
-        self.assertIn("分類Ａ改", entry.event_message)
-        self.assertIn(str(self.department), entry.event_message)
+        self.assertEqual(
+            entry.event_message,
+            f"No.1,分類名：分類Ａ改,分類名：分類Ａ -> 分類Ａ改,部署：{self.department} -> {other_department}",
+        )
+        self.assertNotIn("書類管理区分", entry.event_message)
 
     def test_group_delete_creates_audit_log_with_content(self):
         from audit.models import AuditLog

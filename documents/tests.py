@@ -13,7 +13,7 @@ from audit.models import AuditLog
 from documents.forms import SearchForm
 from documents.search_services import build_queryset
 from documents.services import calculate_expiry_date, can_delete, used_retention_periods
-from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit, SystemSetting
+from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
 
@@ -40,8 +40,8 @@ class CalculateExpiryDateTests(TestCase):
         result = calculate_expiry_date(datetime.date(2026, 1, 1), period)
         self.assertEqual(result, datetime.date(2076, 1, 1))
 
-    def test_permanent_respects_custom_system_setting(self):
-        SystemSetting.objects.create(retention_permanent_years=30)
+    @override_settings(RETENTION_PERMANENT_YEARS=30)
+    def test_permanent_respects_custom_setting(self):
         period = self._period(RetentionPeriodUnit.PERMANENT)
         result = calculate_expiry_date(datetime.date(2026, 1, 1), period)
         self.assertEqual(result, datetime.date(2056, 1, 1))
@@ -710,6 +710,74 @@ class DeleteViewAjaxTests(TestCase):
         self.assertFalse(response.json()["success"])
 
 
+class SearchAuditLogTests(TestCase):
+    """screen-search「検索開始」ボタン。xlsx 操作履歴ログ!B72-73＜文書検索　例＞「検索した項目：
+    検索入力したデータ,………」、原本index.html:3315の契約書検索サンプルに対応する文書側の実装
+    （原本フィデリティ監査で発見：検索操作自体が一度も監査ログに記録されていなかった）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_bare_screen_open_does_not_create_audit_log(self):
+        """クエリパラメータが1つも無い初回アクセスは「検索開始」ボタンの送信ではないため
+        記録しない（is_search_form_submissionのdocstring参照）。"""
+        self.client.get("/documents/search/")
+        self.assertFalse(AuditLog.objects.filter(action="文書検索 検索").exists())
+
+    def test_search_submission_creates_audit_log_with_filled_fields_only(self):
+        response = self.client.get(
+            "/documents/search/",
+            {"title": "規定", "freeword": "テスト 資料", "title_match": "or", "freeword_match": "or"},
+        )
+        self.assertEqual(response.status_code, 200)
+        entry = AuditLog.objects.get(action="文書検索 検索")
+        self.assertEqual(entry.employee_no, "1")
+        self.assertEqual(entry.event_message, "文書タイトル：規定,フリーワード：テスト 資料")
+
+    def test_search_submission_with_all_fields_blank_records_placeholder(self):
+        """全欄空欄のまま「検索開始」を押した場合（=全件表示）も操作としては記録するが、
+        個別項目が無いため定型文言にする。"""
+        response = self.client.get("/documents/search/", {"title": "", "freeword": ""})
+        self.assertEqual(response.status_code, 200)
+        entry = AuditLog.objects.get(action="文書検索 検索")
+        self.assertEqual(entry.event_message, "(条件指定なし)")
+
+    def test_pagination_click_does_not_create_duplicate_audit_log(self):
+        """ページャー/ソートの再アクセスは新たな検索操作ではないため対象外にする
+        （is_search_form_submissionのdocstring参照）。"""
+        self.client.get("/documents/search/", {"title": "規定"})
+        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+        self.client.get("/documents/search/", {"title": "規定", "page": "1"})
+        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+
+    def test_search_submission_with_department_multiselect_field(self):
+        """department/group/category/yearはModelMultipleChoiceField/MultipleChoiceFieldで
+        cleaned_dataがQuerySet/リストになる。空選択時はDjangoがQuerySet.__eq__を定義しないため
+        `value in (None, "", [], ())`では検出できず「部署：」という空ラベルが漏れる不具合を
+        実装時に発見・修正した（core.search_services.build_search_audit_message参照）。
+        実際に1件選択した場合に正しく部署名が列挙されることを確認する。
+        """
+        response = self.client.get("/documents/search/", {"department": str(self.department.pk)})
+        self.assertEqual(response.status_code, 200)
+        entry = AuditLog.objects.get(action="文書検索 検索")
+        self.assertEqual(entry.event_message, f"部署：{self.department}")
+
+    def test_sort_click_does_not_create_duplicate_audit_log(self):
+        self.client.get("/documents/search/", {"title": "規定"})
+        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+        self.client.get("/documents/search/", {"title": "規定", "sort": "title", "dir": "asc"})
+        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+
+
 class DownloadViewTests(TestCase):
     """screen-search「ダウンロード」ボタン（単体）。ダウンロード操作自体は監査ログに一切
     記録されていなかった（未実装改善候補の棚卸しで発見、2026-08-12追加対応）。
@@ -750,7 +818,9 @@ class DownloadViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         entry = AuditLog.objects.get(action="文書検索 ダウンロード")
         self.assertEqual(entry.employee_no, "1")
-        self.assertIn("DL対象", entry.event_message)
+        # 原本index.html:3310の操作履歴ログサンプル「ファイル名：契約書_001」形式
+        # （タイトルではなく実ファイル名）。
+        self.assertEqual(entry.event_message, "ファイル名：dl.txt")
 
     def test_denied_download_does_not_create_audit_log(self):
         response = self.client.get(f"/documents/{self.document.pk}/download/")

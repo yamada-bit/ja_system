@@ -1,7 +1,7 @@
 import logging
 
 from audit import services as audit_services
-from accounts.models import Employee
+from accounts.models import Employee, Position, Rank
 from core.text_normalization import filter_by_full_name
 from permissions.models import FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
 
@@ -100,3 +100,35 @@ def reset_permission_profile_if_needed(
             "所属/職階/役職変更または退職に伴い権限設定を自動リセットしました"
         ),
     )
+
+
+def build_staff_edit_diff_message(
+    employee, *, before_name, before_department, before_rank, before_position, before_is_retired, password_changed
+):
+    """screen-staff-edit「更新」ボタンのイベントメッセージ（xlsx 操作履歴ログ!B69-70
+    ＜職員マスタ更新　例＞「職員：職員名(職員番号),更新した項目名：更新前データ -> 更新後データ,
+    ………」）。実際に変更されたフィールドのみを列挙する（原本フィデリティ監査で発見：以前は
+    更新後の職員番号・氏名のみを記録し、何がどう変わったか一切記録していなかった）。
+
+    `before_*`は呼び出し側（accounts.views.StaffEditView.post）がform.save()実行前に
+    保存しておいた変更前の値。`password_changed`は新しいパスワードが入力されたかどうかの
+    真偽値のみを渡すこと（パスワード自体の値はCLAUDE.mdのマスキング方針によりログに残さない、
+    core.views.OtherSettingsView.postの「パスワード 更新」と同じ判断）。
+    """
+    subject = f"職員：{employee.name}({employee.employee_no})"
+    changes = []
+    if employee.name != before_name:
+        changes.append(("氏名", before_name, employee.name))
+    if employee.department_id != before_department.pk:
+        changes.append(("所属部署", before_department, employee.department))
+    if employee.rank != before_rank:
+        changes.append(("職階", Rank(before_rank).label, employee.get_rank_display()))
+    if employee.position != before_position:
+        changes.append(("役職", Position(before_position).label, employee.get_position_display()))
+    if employee.is_retired != before_is_retired:
+        before_text = "退職" if before_is_retired else "在籍"
+        after_text = "退職" if employee.is_retired else "在籍"
+        changes.append(("退職", before_text, after_text))
+    if password_changed:
+        changes.append(("パスワード", "(変更あり)", "(変更あり)"))
+    return audit_services.build_diff_message(subject, changes)
