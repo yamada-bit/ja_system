@@ -1931,3 +1931,32 @@ python manage.py test audit coreで確認してから次に進んで。低優先
 全件PASSを確認しながら進めた。最終的に`manage.py test audit core`は130件PASS（棚卸し時点の
 115件から15件純増）、影響範囲を含めた`manage.py test audit core documents contracts masters`は
 467件全件PASSで完了。
+
+## メイン画面ボタン制御をMenuItemSettingへ再連動（2026-08-26）
+
+xlsx メイン画面!B55「設定メニュー『その他設定』の『メイン画面項目』にて部署ごとに設定された
+内容でボタンの押下可不可を制御する」について、2026-08-19に一度`organizations.MenuItemSetting`
+を`core.views.MenuView`へ連動させたが、未設定部署でボタンが全て消え原本HTML（常時表示の
+静的モック）の見た目から乖離するとして撤回していた（本ファイル1130〜1143行目「Rev1.1反映の
+過剰実装を原本一致に戻す・見落とし修正」参照）。
+
+ユーザーから改めて「原本フィデリティより実データ連動を優先する」方針変更の指示があったため、
+再度連動させた。
+
+- [x] `core/views.py` `MenuView.get_context_data`：`request.user.department`の
+  `menu_item_setting`（`getattr`でNone許容、未設定部署はNone＝xlsx その他設定!B73
+  「デフォルトは全項目OFF」通り全非表示）から`show_search_document`/`show_search_contract`/
+  `show_storage_document`/`show_storage_contract`をcontextに追加。
+- [x] `templates/core/menu.html`：検索・閲覧・変更／保管の文書・契約書4ボタンをそれぞれ
+  `{% if %}`で囲み表示/非表示化（disabledではなく非表示。2026-08-19時点の「×は押下不可
+  →×は非表示」の判断を踏襲）。電子決裁ボタンは実画面が無いため従来通り恒久的に
+  disabled+titleのまま変更なし。
+- [x] 保管枠内「契約書」ボタンは`show_storage_contract`（部署設定）と`can_edit_contract`
+  （権限管理、Rev1.2 xlsx 権限管理!B196-197）をANDで判定。両者は独立した制御軸のため、
+  どちらか一方でもOFFなら非表示にする。
+- [x] `core/tests.py` `MenuButtonVisibilityTests`を「常時表示」前提から「部署設定に連動」
+  前提へ全面書き換え。未設定部署で全非表示になること、各ボタンが部署設定ONで個別に表示
+  されること、契約書保管ボタンが部署設定・権限の両方を満たした時のみ表示されることを
+  それぞれ検証する7ケースに拡充。
+- [x] `manage.py test core`（115件）・`manage.py test core organizations documents contracts
+  permissions audit masters accounts`（645件）で全件PASSを確認。

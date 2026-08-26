@@ -33,12 +33,18 @@ class MenuView(LoginRequiredMixin, TemplateView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["notice_counts"] = get_notice_counts(self.request.user)
-        # xlsx メイン画面!N65-67(Rev1.1)は「○は表示、×は非表示」という制御方針を文言で示すのみで、
-        # 原本HTML（screen-menu）自体はメニューボタンを常に静的表示するモックのまま
-        # （SettingsMenuView docstring「HTML確定版自体にもボタン出し分けのJSは実装されていない」と
-        # 同じ状況）。organizations.MenuItemSettingを実際にメイン画面へ連動させる試みを一度入れたが、
-        # 未設定部署でボタンが全て消えてしまい原本の見た目から大きく逸脱したため撤回した
-        # （2026-08-19ユーザー指摘）。
+        # xlsx メイン画面!B55「設定メニュー『その他設定』の『メイン画面項目』にて部署ごとに
+        # 設定された内容でボタンの押下可不可を制御する」を実データで反映する。2026-08-19に
+        # 一度連動させた後、未設定部署でボタンが全て消え原本の静的モックの見た目から乖離すると
+        # して撤回した経緯があるが、2026-08-26にユーザーが「原本フィデリティより実データ連動を
+        # 優先する」方針へ再度変更したため改めて配線する。未設定部署（menu_item_settingレコード
+        # 無し）はxlsx その他設定!B73「デフォルトは全項目OFF」通り全ボタン非表示になる
+        # （disabledではなく非表示。archive「メイン画面ボタンの表示制御」の判断を踏襲）。
+        menu_item_setting = getattr(self.request.user.department, "menu_item_setting", None)
+        context["show_search_document"] = bool(menu_item_setting and menu_item_setting.show_search_document)
+        context["show_search_contract"] = bool(menu_item_setting and menu_item_setting.show_search_contract)
+        context["show_storage_document"] = bool(menu_item_setting and menu_item_setting.show_storage_document)
+        context["show_storage_contract"] = bool(menu_item_setting and menu_item_setting.show_storage_contract)
         # 原本index.html:121-122の「X ヶ月」は実際にはJSでも一度も置換されない静的モック文言
         # だったが（原本フィデリティ監査で発見）、件数側は既に実データを表示しているため、
         # こちらも実際の設定値（settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/
@@ -46,7 +52,9 @@ class MenuView(LoginRequiredMixin, TemplateView):
         context["notice_expiring_threshold_months"] = settings.NOTICE_EXPIRING_THRESHOLD_MONTHS
         context["notice_deleted_threshold_months"] = settings.NOTICE_DELETED_THRESHOLD_MONTHS
         # xlsx 権限管理!B196-197(Rev1.2)「保存不可…メイン画面の保管枠内「契約書」ボタンを
-        # 非表示にする」。文書側に対応するフラグは無いため、文書の保管ボタンは常に表示のまま。
+        # 非表示にする」。部署設定（show_storage_contract）とは独立した職員単位の権限制御のため、
+        # テンプレート側で両方をANDして最終的な表示可否とする。文書側に対応する権限フラグは
+        # 無いため、文書の保管ボタンはshow_storage_documentのみで判定する。
         context["can_edit_contract"] = can_edit_contract(self.request.user)
         return context
 

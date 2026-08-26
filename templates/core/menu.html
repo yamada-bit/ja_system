@@ -22,8 +22,17 @@
       <div class="menu-box search-zone">
         <h2>検索・閲覧・変更</h2>
         <div class="menu-buttons">
+          {% comment %}
+            xlsx メイン画面!B55「設定メニュー『その他設定』の『メイン画面項目』にて部署ごとに
+            設定された内容でボタンの押下可不可を制御する」。organizations.MenuItemSettingの
+            部署ごとの設定値（未設定部署は全項目OFF）で表示/非表示を切り替える。
+          {% endcomment %}
+          {% if show_search_document %}
           <button type="button" onclick="window.location.href='{% url 'documents:search' %}'">文書</button>
+          {% endif %}
+          {% if show_search_contract %}
           <button type="button" onclick="window.location.href='{% url 'contracts:search' %}'">契約書</button>
+          {% endif %}
     {% comment "下記の部分はコメントアウト" %}
           {# 電子決裁の検索・閲覧・変更画面自体が原本HTML/xlsxのいずれにも存在しない
              （権限管理・保存期間設定マスタにのみ電子決裁関連の項目があるのみ）。将来陣で
@@ -35,12 +44,16 @@
       <div class="menu-box storage-zone">
         <h2>保管</h2>
         <div class="menu-buttons">
+          {% if show_storage_document %}
           <button type="button" onclick="window.location.href='{% url 'documents:upload_step1' %}'">文書</button>
+          {% endif %}
           {% comment %}
             xlsx 権限管理!B193-197(Rev1.2)「契約書-契約書-契約書情報変更」がOFFの場合、
             保存不可＝このボタンを非表示にする（permissions.services.can_edit_contract）。
+            部署ごとのshow_storage_contract設定とはANDで組み合わせ、どちらか一方でも非表示なら
+            ボタンを出さない。
           {% endcomment %}
-          {% if can_edit_contract %}
+          {% if show_storage_contract and can_edit_contract %}
           <button type="button" onclick="window.location.href='{% url 'contracts:upload_step1' %}'">契約書</button>
           {% endif %}
         </div>

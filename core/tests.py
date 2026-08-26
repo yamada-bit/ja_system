@@ -46,7 +46,7 @@ from masters.models import (
     RetentionPeriodUnit,
     SystemSetting,
 )
-from organizations.models import Department, DepartmentViewScope
+from organizations.models import Department, DepartmentViewScope, MenuItemSetting
 from permissions.models import PermissionProfile, PermissionRole
 
 
@@ -173,17 +173,19 @@ class MenuNoticeTwoColumnLayoutTests(TestCase):
 
 
 class MenuButtonVisibilityTests(TestCase):
-    """screen-menuは原本HTML同様、メニューボタン（検索・閲覧・変更/保管の文書・契約書）を
-    部署設定に関わらず常に表示する静的な画面である（organizations.MenuItemSettingは
-    screen-other-main-editの設定値保持のみに使い、メイン画面の表示制御には連動させない。
-    一度連動させる変更を入れたが、未設定部署でボタンが全て消え原本の見た目から大きく逸脱したため
-    撤回した、2026-08-19ユーザー指摘）。
+    """screen-menuのメニューボタン（検索・閲覧・変更/保管の文書・契約書）は
+    organizations.MenuItemSettingの部署ごとの設定値で表示/非表示が決まる
+    （xlsx メイン画面!B55「部署ごとに設定された内容でボタンの押下可不可を制御する」）。
 
-    ただしRev1.2で「保管枠内『契約書』ボタン」のみ、権限管理「契約書-契約書-契約書情報変更」
-    （permissions.services.can_edit_contract）による表示制御が別途追加された
-    （xlsx 権限管理!B196-197「保存不可…メイン画面の保管枠内「契約書」ボタンを非表示にする」）。
-    これは部署設定とは無関係の職員単位の権限制御のため、上記の「部署設定には連動させない」
-    方針とは矛盾しない。
+    2026-08-19に一度連動させた後、未設定部署でボタンが全て消え原本の静的モックの見た目から
+    乖離するとして撤回していたが、2026-08-26にユーザーが「実データ連動を優先する」方針へ
+    再度変更したため改めて連動させた。未設定部署（MenuItemSettingレコード無し）は
+    xlsx その他設定!B73「デフォルトは全項目OFF」通り全ボタン非表示になる。
+
+    保管枠内「契約書」ボタンのみ、部署設定（show_storage_contract）に加えてRev1.2で追加された
+    権限管理「契約書-契約書-契約書情報変更」（permissions.services.can_edit_contract）による
+    表示制御がANDで重なる（xlsx 権限管理!B196-197「保存不可…メイン画面の保管枠内「契約書」
+    ボタンを非表示にする」）。これは部署設定とは無関係の職員単位の権限制御。
     """
 
     def setUp(self):
@@ -196,25 +198,60 @@ class MenuButtonVisibilityTests(TestCase):
         )
         self.client.login(username="1", password="pass1234")
 
-    def test_menu_always_shows_search_and_document_storage_buttons(self):
+    def test_all_buttons_hidden_for_unconfigured_department(self):
         from django.urls import reverse
 
         response = self.client.get("/")
-        self.assertContains(response, f"window.location.href='{reverse('documents:search')}'")
-        self.assertContains(response, f"window.location.href='{reverse('contracts:search')}'")
-        self.assertContains(response, f"window.location.href='{reverse('documents:upload_step1')}'")
+        self.assertNotContains(response, f"window.location.href='{reverse('documents:search')}'")
+        self.assertNotContains(response, f"window.location.href='{reverse('contracts:search')}'")
+        self.assertNotContains(response, f"window.location.href='{reverse('documents:upload_step1')}'")
+        self.assertNotContains(response, f"window.location.href='{reverse('contracts:upload_step1')}'")
 
-    def test_contract_storage_button_hidden_without_contract_edit_permission(self):
-        """Rev1.2で追加。契約書-契約書-契約書情報変更がOFF（PermissionProfile未設定含む）の
-        職員には保管枠内「契約書」ボタンを表示しない。"""
+    def test_search_document_button_shown_when_department_setting_on(self):
         from django.urls import reverse
 
+        MenuItemSetting.objects.create(department=self.department, show_search_document=True)
+        response = self.client.get("/")
+        self.assertContains(response, f"window.location.href='{reverse('documents:search')}'")
+        self.assertNotContains(response, f"window.location.href='{reverse('contracts:search')}'")
+
+    def test_search_contract_button_shown_when_department_setting_on(self):
+        from django.urls import reverse
+
+        MenuItemSetting.objects.create(department=self.department, show_search_contract=True)
+        response = self.client.get("/")
+        self.assertContains(response, f"window.location.href='{reverse('contracts:search')}'")
+
+    def test_storage_document_button_shown_when_department_setting_on(self):
+        from django.urls import reverse
+
+        MenuItemSetting.objects.create(department=self.department, show_storage_document=True)
+        response = self.client.get("/")
+        self.assertContains(response, f"window.location.href='{reverse('documents:upload_step1')}'")
+
+    def test_contract_storage_button_hidden_without_contract_edit_permission_even_if_department_setting_on(self):
+        """Rev1.2で追加。部署設定がONでも、契約書-契約書-契約書情報変更がOFF
+        （PermissionProfile未設定含む）の職員には保管枠内「契約書」ボタンを表示しない。"""
+        from django.urls import reverse
+
+        MenuItemSetting.objects.create(department=self.department, show_storage_contract=True)
         response = self.client.get("/")
         self.assertNotContains(response, f"window.location.href='{reverse('contracts:upload_step1')}'")
 
-    def test_contract_storage_button_shown_with_contract_edit_permission(self):
+    def test_contract_storage_button_hidden_without_department_setting_even_with_contract_edit_permission(self):
+        """権限がONでも部署設定がOFF（未設定含む）なら保管枠内「契約書」ボタンを表示しない。"""
         from django.urls import reverse
 
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
+        response = self.client.get("/")
+        self.assertNotContains(response, f"window.location.href='{reverse('contracts:upload_step1')}'")
+
+    def test_contract_storage_button_shown_with_both_department_setting_and_contract_edit_permission(self):
+        from django.urls import reverse
+
+        MenuItemSetting.objects.create(department=self.department, show_storage_contract=True)
         PermissionProfile.objects.create(
             employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
         )
