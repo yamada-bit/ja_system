@@ -76,29 +76,39 @@
         2026-08-24）。件数と遷移先は各列内で常に1対1対応するため、2026-08-13と同種の不一致は
         再発しない。
       {% endcomment %}
-      <div style="display:flex; gap:40px; flex-wrap:wrap;">
-        <ul style="flex:1; min-width:280px;">
-          <li>有効期限切れの文書が
-            <a href="{% url 'documents:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired_documents }} 件</span></a>
-            あります。</li>
-          <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の文書が
-            <a href="{% url 'documents:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon_documents }} 件</span></a>
-            あります。</li>
-          <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された文書が
-            <a href="{% url 'documents:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted_documents }} 件</span></a>
-            あります。</li>
-        </ul>
-        <ul style="flex:1; min-width:280px;">
-          <li>有効期限切れの契約書が
-            <a href="{% url 'contracts:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired_contracts }} 件</span></a>
-            あります。</li>
-          <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の契約書が
-            <a href="{% url 'contracts:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon_contracts }} 件</span></a>
-            あります。</li>
-          <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された契約書が
-            <a href="{% url 'contracts:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted_contracts }} 件</span></a>
-            あります。</li>
-        </ul>
+      {% comment %}
+        レイアウトは原本index.html(html5)準拠：notice-columnsのflex（.notice-columns>divがflex:1で
+        左右等幅、style.css）に統一。文書側リンクは各検索画面へ配線（原本html5は契約書側を
+        onclick="return false;"の死んだリンクにしているが、件数集計と遷移先を一致させるため
+        ja_pjでは契約書側も実リンクにする。上のコメント参照）。
+      {% endcomment %}
+      <div class="notice-columns">
+        <div>
+          <ul>
+            <li>有効期限切れの文書が
+              <a href="{% url 'documents:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired_documents }} 件</span></a>
+              あります。</li>
+            <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の文書が
+              <a href="{% url 'documents:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon_documents }} 件</span></a>
+              あります。</li>
+            <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された文書が
+              <a href="{% url 'documents:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted_documents }} 件</span></a>
+              あります。</li>
+          </ul>
+        </div>
+        <div>
+          <ul>
+            <li>有効期限切れの契約書が
+              <a href="{% url 'contracts:search' %}?notice=expired"><span class="alert-text">{{ notice_counts.expired_contracts }} 件</span></a>
+              あります。</li>
+            <li>有効期限切れまで {{ notice_expiring_threshold_months }} ヶ月以内の契約書が
+              <a href="{% url 'contracts:search' %}?notice=expiring_soon"><span class="alert-text">{{ notice_counts.expiring_soon_contracts }} 件</span></a>
+              あります。</li>
+            <li>直近 {{ notice_deleted_threshold_months }} ヶ月内で削除された契約書が
+              <a href="{% url 'contracts:search' %}?notice=recently_deleted"><span class="alert-text">{{ notice_counts.recently_deleted_contracts }} 件</span></a>
+              あります。</li>
+          </ul>
+        </div>
       </div>
       {% comment %}
         xlsx メイン画面!B50-51(Rev1.2)「＜補足：削除されている文書、契約書について＞

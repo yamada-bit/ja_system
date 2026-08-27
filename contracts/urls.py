@@ -8,6 +8,7 @@ urlpatterns = [
     path("upload/step1/", views.UploadStep1View.as_view(), name="upload_step1"),
     path("upload/chunk/", api.ChunkUploadAPIView.as_view(), name="upload_chunk"),
     path("upload/step2/", views.UploadStep2View.as_view(), name="upload_step2"),
+    path("upload/step2/remove/", views.UploadStep2RemoveView.as_view(), name="upload_step2_remove"),
     path("upload/step2/preview/<int:index>/", views.PendingPreviewView.as_view(), name="upload_step2_preview"),
     path("search/", views.SearchView.as_view(), name="search"),
     path("api/options/", api.OptionListAPIView.as_view(), name="api_options"),
@@ -19,4 +20,5 @@ urlpatterns = [
     path("bulk-edit/start/", views.BulkEditStartView.as_view(), name="bulk_edit_start"),
     path("bulk-edit/", views.BulkEditView.as_view(), name="bulk_edit"),
     path("<int:pk>/delete/", views.DeleteView.as_view(), name="delete"),
+    path("<int:pk>/edit-delete/", views.EditDeleteView.as_view(), name="edit_delete"),
 ]

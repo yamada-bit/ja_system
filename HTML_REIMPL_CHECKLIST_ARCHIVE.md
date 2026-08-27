@@ -458,8 +458,10 @@
 ユーザー指示により意図的に未修正。将来対応する場合の参考として記録する。
 - 詳細ポップアップの削除完了メッセージ文言が原本「文書を削除しました。」に対し実装は
   「削除しました。」（`static/js/common.js`の`triggerDeleteFromDetail()`）。
-- 保管画面のメモ欄「削除」ボタン（`clearMemo()`）に、原本には無い確認ダイアログ・実消去機能が
-  独自に追加されている（原本はonclick未設定の完全な無反応ボタン）。
+- ~~保管画面のメモ欄「削除」ボタン（`clearMemo()`）に、原本には無い確認ダイアログ・実消去機能が
+  独自に追加されている（原本はonclick未設定の完全な無反応ボタン）。~~
+  → **2026-08-27解消**。ユーザー確定でレコード削除／アップロード取り消しに再定義し、`clearMemo()`
+  は廃止。下記「保管画面２「削除」ボタンをメモ消去→レコード削除／アップロード取り消しへ変更」節参照。
 - 編集画面（documents/contracts双方の`edit.html`）ヘッダーの「＜ 戻る」ボタン遷移先が、原本の
   `transitionTo('screen-storage1')`（ファイル選択画面）ではなく検索画面になっている
   （原本側がこの导線を更新し忘れている疑いがあり、実装側の解釈は妥当と考えられる）。
@@ -1634,6 +1636,73 @@ DepartmentScopingTests.test_admin_list_department_column_is_leftmost`・
 AuthorityListOperationColumnPositionTests`（1件）。`python manage.py test`（全406件）・
 `manage.py check`で確認済み。
 
+## 簡易設計指示書 Rev1.3改訂の反映（2026-08-27）
+
+`HTML/文書管理システム_簡易設計指示書_Rev1_2.xlsx`→`Rev1_3.xlsx`への改訂（印刷枠外の
+"Rev1.3"表記で変更箇所を明示、担当:原田、改訂日2026-08-26、表紙J27「権限管理 画面変更
+及び 誤記修正」）。html4からのHTML側の改訂は無く、xlsx（指示書）のみの改訂。
+Rev1.1/Rev1.2の時と同じくopenpyxlでのセル単位比較＋`xl/media`配下画像のバイト比較で
+機械的に差分抽出してから反映した。
+
+### 差分の内容（openpyxlセル単位diff＋画像バイト比較、対象3シート）
+- **表紙**：Rev1.3の版数・改訂日（2026-08-26）・担当者・改訂概要の記録のみ。
+- **権限管理**：AI10（[1]権限管理一覧）とAI89（[2]権限管理編集）に「Rev1.3 画面変更」
+  マーカー。テキストセルの変更は無く、埋め込みスクショ（drawing6のimage19=一覧／
+  image20=編集）が差し替わっている。
+  - **image20（権限管理編集）＝実装対象**：「文書管理-分類-表示」「契約書-部門間閲覧設定」
+    「契約書-分類-表示」の3欄の表示用要素が、1行の`<input type="text" readonly>`から
+    複数行の`<textarea readonly>`（4行程度＋リサイズ可）に変更された。選択済みの分類・部署が
+    カンマ区切りで長くなっても全件見えるようにする意図。「選択」ボタンはtextarea上端に揃う。
+  - **image19（権限管理一覧）＝行内「編集」ボタンの背景色変更**：カラム構成・見出し・データは
+    OLD/NEWで一致するが、行内の「編集」ボタンの背景色が既定(白)から**ピンク`#FFCCFF`**に
+    変更されている（ボーダー`#D1C7BD`・角丸4pxは既定のまま）。他ボタン（設定メニューへ戻る／
+    検索／CSV出力）や権限管理編集画面のボタンは変更なし。当初この差分を「表示倍率違いの
+    再取得のみ」と誤判定して見落とし、ユーザー指摘で修正（下記「編集ボタンの背景色変更の
+    見落とし」参照）。
+- **保管**：B194-201（保存期間プルダウン／削除ボタン／登録ボタンの説明文）を削除。
+  AI194「Rev1.3 不要文言削除」。これらの機能自体は実装済みで存続しており、指示書上の
+  重複記述を整理しただけ。実装影響なし。保管シートの埋め込み画像も無変更。
+
+### 反映した変更ファイル
+- **core**：`widgets.py`の`PopupSelectWidget`に`display_multiline`引数を追加。Trueのとき
+  表示用要素を`<textarea rows="4" readonly>`で描画する（値は属性ではなくタグ内容として持つ）。
+  既定値Falseのため他画面（検索フォーム・保管画面2等）の見た目は不変。`common.js`の
+  popup-select確定処理・`authority_edit.html`の`toggleAllCheckboxesForAuth()`はいずれも
+  `.value`の読み書きで、`<input>`/`<textarea>`とも同一に動作するためJS側の変更は不要。
+- **permissions**：`forms.py`の`AuthorityEditForm.Meta.widgets`で上記3ウィジェットに
+  `display_multiline=True`を指定、`display_attrs`に`vertical-align:top`を追加（「選択」
+  ボタンをtextarea上端に揃える）。
+- **編集ボタンの背景色**（下記「見落とし」節参照）：`templates/permissions/authority_list.html`
+  の行内「編集」`<button>`に`class="btn-edit-auth"`を付与、`static/css/style.css`に
+  `.data-table-auth td .btn-edit-auth { background-color: #FFCCFF; }`を追加。他一覧画面の
+  編集ボタンには波及させない（Rev1.3でモック差し替えがあったのは権限管理一覧のみ）。
+
+### 実機確認
+dev serverで権限管理編集画面を開き、3欄が`<textarea>`（rows=4, readonly, width:200px,
+vertical-align:top）で描画されること、「選択」ポップアップ→「確定」でtextareaに
+ラベルがセットされること、「一括無許可」で3欄がクリアされることをブラウザで確認。
+権限管理一覧では「編集」ボタンの`background-color`が`rgb(255,204,255)`＝`#FFCCFF`で
+描画されることをブラウザで確認。
+
+### テスト
+`core.tests.PopupSelectWidgetTamperResistanceTests`に
+`test_display_element_is_single_line_input_by_default`・
+`test_display_multiline_renders_readonly_textarea_with_value_as_content`、
+`permissions.tests.AuthorityEditFormTests`に
+`test_multi_select_display_fields_render_as_textarea`、
+`permissions.tests.AuthorityListEditButtonStyleTests`（クラス付与＋CSS定義の2件）を追加。
+`manage.py test permissions core.tests.PopupSelectWidgetTamperResistanceTests`で確認済み。
+
+### 編集ボタンの背景色変更の見落とし（ユーザー指摘で修正）
+Rev1.3反映の初回対応時、権限管理一覧（image19）のOLD/NEWをカラム・見出し・データ行まで
+突き合わせて「表示倍率違いの再取得のみ、内容不変」と誤判定し、行内「編集」ボタンの
+背景色変更（白→`#FFCCFF`）を見落とした。ユーザーから「権限管理の一覧画面、ボタン色変更は
+実装した？」と指摘を受けて再確認。ボタン塗り色をピクセル単位でサンプリングし
+（全行・全ボタンが一様に`#FFCCFF`＝スタイル定義による変更で、hover等の一時状態ではない）
+確定、上記の通り修正した。**教訓**：「Rev1.x 画面変更」マーカーが付いた画像は、
+レイアウト・文言・データだけでなく、ボタン/セルの色・装飾といった見た目の属性まで
+OLD/NEWで突き合わせる（本ファイル冒頭「画像埋め込み表」の教訓に色の観点を追加）。
+
 ## 論理削除した文書・契約書の復元機能：不要と最終確定（2026-08-24）
 
 `doc/文書管理システム_残項目_本番リリース手順書.xlsx`②要ユーザー判断事項（xlsx番号なし・
@@ -2061,3 +2130,223 @@ xlsx「操作履歴ログ」シート（Rev1.2、B6〜B76全セル＋Rev1.1改�
 新規追加、ダウンロードテストのメッセージ形式アサーションを更新）。
 `manage.py test`（全660件）PASS確認済み、`manage.py makemigrations --check --dry-run`も
 差分無しを確認済み（モデル変更を伴わない実装のため）。
+
+## 検索結果一覧 一括編集：原本html4との挙動差異の修正（2026-08-27）
+
+ユーザーから「xlsx 検索・閲覧・変更シートの一括編集の実装が原本html4の動作と違う」との指摘。
+xlsx側（B269-272、契約書はB599「文書管理と同じ」）の文言は初版から実質不変
+（「・選択チェックボックスがONの検索結果の文書の編集画面へ遷移する。」「※選択チェックボックスで
+指定した複数の文書を一括編集。」）で、"一括" の語意からは「共通値を全選択文書へ一括適用」
+とも読めるが、**一次情報源は原本HTMLの実挙動**（CLAUDE.md「xlsxのセル文言diffは手がかりに
+過ぎない」）。原本html4のモックJS（`startBulkEdit`/`changeActiveDoc`/`updateBulkEditView`/
+`startUpdateMock`、`index.html:1807-1921`）は「選択件数分の編集フォームをページャー ＜ ＞ で
+1件ずつ巡回し、各レコードは自身の値で個別編集、最後に『更新』で全件を完了ポップアップに一覧」
+という**順次ウィザード**であり、2026-08-20の実装（本ファイル「検索結果一覧 一括編集の実装」節）
+でもこの方式を採っていた。差異は次の2点で、ユーザー確認のうえ原本html4に合わせた：
+
+1. **未選択時の挙動**：原本`startBulkEdit()`は選択0件なら`alert("編集するデータが選択されて
+   いません。")`して中断する純クライアント処理。実装はサーバー側(`BulkEditStartView`)へPOSTして
+   messagesで「編集する文書/契約書を選択してください。」を出していた → ユーザー指示で原本どおり
+   `alert()`に変更。`common.js`に`startBulkEdit()`（原本と同名。未選択ガードのみ担う。
+   `alert()`自体が原本の最終仕様として機能している箇所のため文言も踏襲）を追加し、
+   `templates/documents/search.html`・`templates/contracts/search.html`の「一括編集」ボタンに
+   `onclick="return startBulkEdit();"`を付与。サーバー側の検証（`if not pks` /
+   `if not ordered_pks`）はJS無効・URL直POST向けのフォールバックとして残し、文言のみ
+   「編集するデータが選択されていません。」に合わせた。
+2. **送信ボタン**：原本html4には「次へ」ボタンが存在せず（`storage-submit-btn`は常に「更新」、
+   レコード間移動はページャー ＜ ＞ の`changeActiveDoc`のみ）、「更新」(`startUpdateMock`)は
+   現在何件目を表示していても即座に選択全件を確定する。実装は`bulk.has_next`なら「次へ」・
+   最終レコードのみ「更新」で、「更新」は最終ステップでしか押せなかった →
+   `templates/documents/edit.html`・`templates/contracts/edit.html`の送信ボタンを常時「更新」に、
+   `BulkEditView.post`のナビゲーション分岐を「`bulk_nav`が`prev`/`next`のときだけ移動、
+   `bulk_nav`なし（＝更新ボタン）はどのページでも全件確定」に変更（ユーザー選択：「どの位置でも
+   即座に全件確定（html4忠実）」）。save-as-you-go方式（ページャー移動時に表示中の1件を都度保存。
+   ModelChoiceFieldをセッションに載せられないための2026-08-20からの既定の逸脱）自体は維持。
+   結果として、更新ボタンを途中で押すと表示中の1件だけがDB更新され、未訪問レコードは既存値の
+   まま完了ポップアップに一覧表示される（原本`startUpdateMock`のブラウザ内配列dump相当）。
+
+### 対応したテスト
+`documents/contracts.tests.BulkEditViewTests`：中間ステップの遷移を`bulk_nav="next"`
+（ページャー＞）に変更、`test_start_without_selection_redirects_with_message`（＝JS無効時の
+サーバー側フォールバック）のメッセージ文言アサーションを追加、
+`test_update_button_finalizes_from_any_position`を新規追加（3件選択→1件目表示のまま「更新」→
+全件が完了一覧・表示中の1件のみDB更新・AuditLog 1件）。クライアント側`startBulkEdit()`の
+`alert()`はJSのため単体テスト対象外。`manage.py test documents contracts`（261件）
+PASS確認済み。モデル変更なし。
+
+## 保管画面２「削除」ボタンをメモ消去→レコード削除／アップロード取り消しへ変更（2026-08-27、ユーザー確定）
+
+### 背景
+簡易設計指示書（xlsx）保管シートの「削除　ボタン」は当初から「誤ってアップロードした文書／
+不要な文書を削除する（本登録から除外する）」（Rev1.2 B197-198・B298-300・B487-488・B579-581。
+Rev1.3で登録側B194-201は「不要文言削除」として整理されたが機能自体は存続、AI194）と定義されて
+いた。しかし原本HTMLの当該ボタン（[4]メモ欄直下の赤ボタン）は`onclick`未設定の死んだモック
+だったため、DOM位置からメモ欄クリア用と解釈し`static/js/common.js`の`clearMemo()`として実装し、
+意図的逸脱として「見送った低優先度」に記録していた。
+
+2026-08-27にユーザーと確認し、以下に確定した（原本にない動的制御の追加になるが、ユーザー明示
+指示のため原本一致より指示を優先。CLAUDE.md「原本フィデリティに関する運用方針」）:
+
+- **編集画面**（`edit.html`、単独編集＋一括編集）の削除ボタン = **レコードの論理削除**
+  （`is_deleted=True`）。xlsx B300/B581 通り「初回登録（保存）から1週間以上経過・削除済みは
+  ボタンを非表示」。削除後の遷移は **単独編集＝検索画面へ戻る／一括編集＝その1件を対象から
+  外して次のレコードへ進む**（最後の1件なら検索画面へ）。
+- **登録画面**（`storage2.html`、mode=create）の削除ボタン = **表示中のファイルのアップロード
+  取り消し**（セッションの保留ファイル一覧から1件除外、他のファイルは登録処理を続行）。
+  サーバー往復が必要なため入力途中の他項目は破棄する（確認ダイアログで警告）。
+
+### 設計（既存実装の再利用を優先）
+- **編集画面のレコード削除**：`core.record_views.BaseDeleteView`（詳細ポップアップの削除と共通）を
+  再利用。非AJAX時の末尾を`_post_delete_redirect()`に抽出し、`documents/contracts.views.
+  EditDeleteView`（既存`DeleteView`を継承）が (1)監査ログのaction名を「保管画面２ 削除」に、
+  (2)`from_bulk` hidden の有無で単独／一括を判定して遷移先を分岐、だけをオーバーライドする。
+  7日ウィンドウ・削除済み判定は`core.deletion_services.can_delete`（`save_date`から7日）を
+  そのまま使い、`can_delete=False`ならテンプレートでボタンごと非表示＋`BaseDeleteView.post`で
+  URL直POSTも拒否。契約書側は`DeleteView`継承で`extra_permission_check`（`can_edit_contract`）を
+  引き継ぐ。
+- **一括編集中の削除**：`core.bulk_edit_services.remove_bulk_edit_pk()`を新設。`state["pks"]`から
+  当該pkを外し、除去位置が現在位置より前なら`index`を1詰め、末尾超過はクランプ（＝現在位置の
+  要素を消すと次のレコードが同じindexに繰り上がる）。0件になったら`clear_bulk_edit_state`して
+  `None`を返し、呼び出し側は検索画面へ。
+- **登録画面のアップロード取り消し**：`core.upload_services.remove_pending_file()`（保留一覧から
+  index指定で1件外し実体も`unlink`）＋`core.upload_views.BaseUploadStep2RemoveView`を新設。
+  documents側は`LoginRequiredMixin`、contracts側は`RequiresContractEditMixin`を継承側で組み合わせ。
+  除去後は保管画面２へredirect（GETがN-1件でフォーム再生成）、0件なら文書/契約書選択画面へ。
+  レコード未生成のため監査ログ対象外（`logger.info`のみ）。JS側は`storage2.html`インライン
+  スクリプトのIIFE（`activeDocIndex`保持）にクリックハンドラを足し、メインフォーム外の
+  隠しフォームへ`index`を詰めてsubmitする。
+
+### 変更ファイル
+- `core/record_views.py`（`_post_delete_redirect`抽出）、`core/bulk_edit_services.py`
+  （`remove_bulk_edit_pk`）、`core/upload_services.py`（`remove_pending_file`）、
+  `core/upload_views.py`（`BaseUploadStep2RemoveView`）
+- `documents/views.py`・`contracts/views.py`（`EditDeleteView`・`UploadStep2RemoveView`・
+  `_edit_delete_context`ヘルパー・編集系renderコンテキストに`can_delete`/`delete_action_url`追加）
+- `documents/urls.py`・`contracts/urls.py`（`edit_delete`・`upload_step2_remove`）
+- `templates/documents/edit.html`・`templates/contracts/edit.html`
+  （メモ欄下ボタン→`{% if can_delete %}`＋メインフォーム外の`record-delete-form`へsubmit）
+- `templates/documents/storage2.html`・`templates/contracts/storage2.html`
+  （ボタン→`btn-remove-upload`、隠し`remove-upload-form`、IIFEにハンドラ追加）
+- `static/js/common.js`（`clearMemo()`削除。参照は上記4テンプレートのみで削除後未参照）
+
+### 検証
+- `manage.py check` 問題なし。`manage.py test` **693件PASS**（保管画面2削除関連で新規26件：
+  `documents/contracts.tests.EditDeleteViewTests`・`UploadStep2RemoveViewTests`、
+  `core.tests.RemoveBulkEditPkTests`・`UploadServicesErrorHandlingTests`に`remove_pending_file`分）。
+- dev サーバーで手動確認：2件選択→保管画面2で1件目「削除」→2件目のみ残し登録／新規文書を
+  編集画面で「削除」→検索一覧から消える／新規2件を一括編集→1件目「削除」→2件目へ進み
+  N/M が 1/1／`save_date`を8日前にした文書で編集画面に削除ボタンが出ないこと。
+
+## 原本HTML改訂差分の確認（html4→html5）・簡易設計指示書 Rev1.4改訂の反映（2026-08-28）
+
+### 受領物と機械diffの結果
+- `HTML/html5/index.html`（+ 同ディレクトリ`style.css`）、`HTML/文書管理システム_簡易設計指示書_Rev1_4.xlsx`。
+- **xlsx（Rev1_3→Rev1_4 / Rev1_2→Rev1_4）のセル文言diff**：実質改訂は「保管」シートのみ。
+  Rev1.3で「不要文言削除」として消していた説明文言（B194-195 保存期間プルダウン／B197-198 削除ボタン／
+  B200-201 登録ボタン）を「Rev1.4 不要文言復活」として元に戻し（AI195）、「図1：スクロールの続き」の
+  説明画像追加マーカー（V71/T395、AI71/AI395）が付いただけ。**新しい業務挙動の追加はゼロ**。
+  復活した文言の挙動は「保管画面２『削除』ボタンをメモ消去→…へ変更（2026-08-27）」節で実装済み。
+- **埋め込み画像のハッシュ突き合わせ**：Rev1_3→Rev1_4で`image69.png`/`image70.png`が新規追加
+  （保管シートdrawing13、`srcRect`クロップあり・白塗りsp矩形なし）。内容は文書／契約書の登録
+  フォームを下端までスクロールした状態の図で、[4]メモ欄ボックスの**外側**に赤い「削除」ボタンが
+  独立配置されている（html5のHTML変更と対応、下記B項）。`image19`/`image20`（権限管理、Rev1.2→Rev1.3で
+  差し替え済み）はRev1.4では無変更。
+- **html4→html5のHTML実体diff**は大きいが、大半は**モックHTMLがRev1.2/Rev1.3の指示書内容に
+  ようやく追いついたもの**で、ja_pj側は指示書ベースで先行実装済み（分類・カテゴリー管理の部署列、
+  メイン画面お知らせの契約書対応、権限管理編集レイアウトのRev1.3化、権限管理一覧の契約書情報変更列・
+  編集ボタンのピンク化）。html5で**新規に**発生した反映対象は下記A〜Eのみ。洗い出しの詳細は
+  受領時レポート（scratchpad `html5_rev1_4_diff_report.md`）に記録。
+
+### A. 権限管理一覧：「操作」列を横スクロール追従（固定）列にする
+- **差分**：html5で`<th class="sticky-col col-6">操作</th>` ＋ 行セル`<td class="sticky-col-td col-td-6">`、
+  style.cssに`.col-6 { left: 382px; z-index: 200 !important; }`・`.col-td-6 { left: 382px; }`を追加。
+  「操作」列を権限付与フラグ群の前へ置く列順自体はRev1.2で反映済み、Rev1.3の画像で固定列化された分が
+  html5でマークアップに現れた。原本style.cssは`th:nth-of-type(5)`の`box-shadow`（固定列右端の影）を
+  移動していないため、ja_pj側もそのまま（影は権限列の右に出たまま）。
+- **変更ファイル**：`templates/permissions/authority_list.html`（th/tdにクラス付与）、
+  `static/css/style.css`（`.col-6`/`.col-td-6`定義追加、`.col-5`/`.col-td-5`の誤ったコメントを整理）、
+  `static/js/common.js`（`fixAuthorityStickyOffsets`のループを`i <= 5`→`i <= 6`に拡張、下記）。
+- **`fixAuthorityStickyOffsets`の拡張が必須**：この一覧の固定列left値は`common.js`が実描画幅から
+  都度再計算している（`.col-1〜.col-5`のCSS固定値は原本モックの固定文言前提で実データとズレるため）。
+  当初この関数のループが`i <= 5`のままだったため、追加した「操作」列（col-6）はCSSの`left: 382px`が
+  そのまま効き、実データの1〜5列合計幅（約282px）と約100pxズレて「操作」列が権限付与（文書管理）の
+  列に重なった（ユーザー報告で発覚）。ループを`i <= 6`にして解消。実プレビューで既定表示・横スクロール時
+  とも col-5→操作→権限付与 がフラッシュに並ぶことを確認（seam ±1〜2px、opaque背景＋z-indexで被覆）。
+- **テスト**：`permissions.tests.AuthorityListOperationColumnStickyTests`を新規追加（th/tdのクラス付与、
+  style.cssの`left: 382px`定義、common.jsのループが`i <= 6`まで回ることをセットで検証。
+  いずれか欠けると固定が効かない/列が重なるため全部まとめて確認）。関連3クラスとも PASS。
+
+### B. 保管画面（登録）：「削除」ボタンの div を [4]メモ欄ボックスの外へ移動
+- **差分**：html4では赤い「削除」ボタンの`<div style="text-align:right;margin-top:10px">`が`[4]メモ欄`の
+  `<div class="form-section">`の内側にあったが、html5でその外（スクロール領域の末尾、`storage-outer-actions`
+  の手前）へ移動。Rev1.4で追加された説明画像`image69.png`（文書）/`image70.png`（契約書）がこの配置を
+  示している。ボタンのクラス・`id`・挙動（`btn-remove-upload`＝アップロード取り消し、
+  2026-08-27確定分）は不変。
+- **変更ファイル**：`templates/documents/storage2.html`・`templates/contracts/storage2.html`
+  （`form-section`の閉じ`</div>`をボタン`div`の前へ移動しただけ。関連コメントもインデント調整）。
+  `feedback_repeated_ui_notes_verification`の観点で文書・契約書の両テンプレートを個別に確認・修正。
+  移動ついでに当該箇所の`{# … #}`が1行内で閉じているか（CLAUDE.md「Djangoテンプレートの複数行コメントの罠」）も確認済み。
+- **テスト**：`documents.tests.UploadStep2RemoveViewTests` / `contracts.tests.UploadStep2RemoveViewTests`に
+  `test_remove_button_div_is_outside_memo_form_section`を追加（`form.memo`はTextarea単体でdivを含まないため、
+  「メモ欄見出し～削除ボタン」の間に`</div>`が出ること＝form-section外にあることで判定）。両クラス11件PASS。
+
+### C. common.js `openPopupPopup`：ポップアップの縦位置反転を移植
+- **差分**：原本 html5 で `openPopupPopup` が (1)先頭で `renderPopupPopupItems()` を呼んで中身の実寸を
+  確定してから配置、(2)`rect.bottom + 5 + popRect.height > windowHeight`（下に置くと画面下端で切れる）なら
+  ポップアップをボタンの**上**（`rect.top - popRect.height - 5`）へ反転、上にも入らなければ `scrollY + 10`、
+  (3)右端はみ出しは再測してから補正、(4)`activePopupTargetInput = btn.previousElementSibling || btn.nextElementSibling`、
+  に変更された。Rev1.3で権限管理編集の表示欄が rows=5 textarea になりポップアップが縦に伸びたことへの追随。
+- **ja_pj への移植**：ja_pj は選択肢を非同期 `fetch` する場合があり、原本のように「先頭で render→即実寸測定」が
+  できない。配置ロジックを `positionPopupPopup(btn)` に切り出し、キャッシュヒット側・fetch解決側の
+  **両方で `renderPopupPopupItems()` の直後に呼ぶ**構成にした。縦反転・右端再測の式は原本 html5 と同一。
+  `|| btn.nextElementSibling` は ja_pj のウィジェット構造（表示要素→hidden input→ボタン順）では発火しないが、
+  原本との差異を残さないため移植（コメントで明記）。
+- **変更ファイル**：`static/js/common.js`（`openPopupPopup` 改修、`positionPopupPopup` 追加）。
+- **テスト**：本プロジェクトに JS 単体テストの仕組みは無い（クライアント JS は実プレビュー確認方針、
+  過去の `startBulkEdit()` 等と同じ）。`core.tests.PopupSelectPositioningJsTests` を回帰ガードとして追加
+  （静的ファイルを読み、`positionPopupPopup` 定義・縦反転式・両キャッシュ経路での呼び出し・`|| nextElementSibling`
+  を検証）。2件PASS。実挙動は dev サーバーで確認（下記「検証」）。
+
+### D. メイン画面お知らせ：ラッパを `.notice-columns` クラスに統一
+- **差分**：原本 html5 で文書列／契約書列のラッパが `<div class="notice-columns">`（＋ `notice-columns > div > ul`
+  構造）になり、style.css に `.notice-columns { display:flex; justify-content:space-between; gap:20px }`
+  `.notice-columns > div { flex:1 }`、`.notice-area ul` に `margin:0` が追加された。お知らせを文書・契約書の
+  2列にすること自体は Rev1.2 で反映済みで、html5 は**モックの見た目定義がマークアップに現れた**もの。
+- **ja_pj の従来実装**：ラッパは `<div style="display:flex; gap:40px; flex-wrap:wrap;">`＋`<ul style="flex:1; min-width:280px;">`
+  のインライン style だった。html5 に合わせクラス＋CSS へ寄せ、`<ul>` を `<div>` で1段包む構造に変更。
+  件数集計と遷移先を一致させるため、**契約書側リンクは html5 の死んだリンク（`onclick="return false;"`）に
+  合わせず実際の検索画面へ配線したまま**（2026-08-13 の不一致対応と同じ方針、テンプレートのコメントに明記）。
+- **変更ファイル**：`templates/core/menu.html`（ラッパ構造）、`static/css/style.css`（`.notice-columns` 定義追加、
+  `.notice-area ul` に `margin:0`）。
+- **テスト**：`core.tests.MenuNoticeTwoColumnLayoutTests` に `test_notice_columns_wrapper_matches_html5` を追加
+  （`<div class="notice-columns">` の存在、旧インライン flex style が消えたこと、style.css の定義をセットで検証）。
+  既存の `test_notice_area_contains_two_ul_blocks`（`<ul` が2個）もそのままPASS。4件PASS。
+
+### E. 権限管理編集の表示欄 textarea を `rows="5"` に
+- **差分**：Rev1.3 で input→textarea 化した権限管理編集の3表示欄について、原本 index.html html5（Rev1.4時点の
+  マークアップ）では `rows="5"`。ja_pj は `core/widgets.py` の `PopupSelectWidget`（`display_multiline=True`）で
+  `rows="4"` を出していた。`rows="4"`→`"5"` の1箇所修正。
+- **影響範囲**：`rows` リテラルは `if self.display_multiline:` ブロック内にあり、`display_multiline=True` は
+  `permissions/forms.py` の `AuthorityEditForm` 3フィールドのみが指定（全数確認）。検索画面・保管画面2の
+  `PopupSelectWidget` は `else` の `<input type="text">` 分岐のため**影響なし**。
+- **変更ファイル**：`core/widgets.py`（`rows="4"`→`"5"`、コメントを html5/Rev1.4基準に更新）。
+- **テスト**：`core.tests.PopupSelectWidgetTamperResistanceTests.test_display_multiline_renders_readonly_textarea_with_value_as_content`
+  と `permissions.tests.AuthorityEditFormTests.test_multi_select_display_fields_render_as_textarea` に
+  `rows="5"` のアサーションを追加。PASS。
+
+### 検証
+- `manage.py test`（全件）exit 0。`manage.py test permissions core documents contracts` = 475件 OK。
+  `manage.py check` 問題なし。
+- dev サーバー（`django-dev`、employee_no=9005 でログイン）で computed style / DOM 実測により確認：
+  - A：権限管理一覧の「操作」th/td＝`position:sticky`（class `sticky-col col-6` / `sticky-col-td col-td-6`）、
+    `common.js`が実測でleftを補正し、既定表示・横スクロール時とも col-5(R292)→操作(L293/R350)→
+    権限付与(L348) がフラッシュに並ぶ（当初ループ`i<=5`のままで約100px重なっていたのを`i<=6`で解消）。
+    編集ボタン背景＝`rgb(255,204,255)`。
+  - C：権限管理編集で画面下部の「選択」ボタン押下 → viewport 460px では popup(高さ221px)が
+    ボタンの**上**へ反転（popBottom 326 ≤ btnTop 331）、viewport 720px では従来どおり**下**に展開
+    （popTop 363 ≥ btnBottom 358）。非同期 fetch 経路でも 3 件描画後に配置。コンソールエラーなし。
+  - D：メイン画面お知らせ `.notice-columns`＝`display:flex; justify-content:space-between; gap:20px`、
+    子 div 2つが `flex-grow:1`・各 604px・それぞれ `<ul>` 1本。
+  - E：権限管理編集の3表示欄すべて `<textarea rows="5">`。
+  - B：`documents/contracts.tests.UploadStep2RemoveViewTests` で step2 GET 後のマークアップ順
+    （[4]メモ欄見出し → `</div>`（form-section 閉じ）→ 削除ボタン）を検証。

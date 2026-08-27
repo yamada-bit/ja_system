@@ -1067,8 +1067,13 @@ class BulkEditViewTests(TestCase):
         return data
 
     def test_start_without_selection_redirects_with_message(self):
+        from django.contrib.messages import get_messages
+
         response = self.client.post("/documents/bulk-edit/start/", {})
         self.assertRedirects(response, "/documents/search/")
+        # 文言は原本html4のalert("編集するデータが選択されていません。")に合わせる。
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertIn("編集するデータが選択されていません。", texts)
 
     def test_start_with_invalid_pks_ignored_not_crashing(self):
         doc = self._create_document("test1")
@@ -1097,17 +1102,17 @@ class BulkEditViewTests(TestCase):
         doc2 = self._create_document("doc2")
         self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk]})
 
-        # 1件目: 内容を編集して「次へ」
+        # 1件目: 内容を編集してページャー「＞」で2件目へ
         get_response = self.client.get("/documents/bulk-edit/")
         self.assertContains(get_response, "1 / 2")
         response = self.client.post(
-            "/documents/bulk-edit/", self._step_data("doc1-編集後")
+            "/documents/bulk-edit/", self._step_data("doc1-編集後", bulk_nav="next")
         )
         self.assertRedirects(response, "/documents/bulk-edit/")
         doc1.refresh_from_db()
         self.assertEqual(doc1.title, "doc1-編集後")
 
-        # 2件目（最終ステップ）: 内容を編集して「更新」→completeが返る
+        # 2件目: 内容を編集して「更新」→全件確定しcompleteが返る
         get_response = self.client.get("/documents/bulk-edit/")
         self.assertContains(get_response, "2 / 2")
         response = self.client.post(
@@ -1133,9 +1138,9 @@ class BulkEditViewTests(TestCase):
         doc2 = self._create_document("doc2")
         self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk]})
         self.client.get("/documents/bulk-edit/")
-        self.client.post("/documents/bulk-edit/", self._step_data("doc1-編集後"))
+        self.client.post("/documents/bulk-edit/", self._step_data("doc1-編集後", bulk_nav="next"))
 
-        # 2件目に来たら内容を変更し、保存されないまま「＜」で1件目に戻る
+        # 2件目に来たら内容を変更し、「＜」で1件目に戻る（移動時に2件目も保存される）
         self.client.get("/documents/bulk-edit/")
         response = self.client.post(
             "/documents/bulk-edit/", self._step_data("doc2-編集後", bulk_nav="prev")
@@ -1146,6 +1151,39 @@ class BulkEditViewTests(TestCase):
 
         get_response = self.client.get("/documents/bulk-edit/")
         self.assertContains(get_response, "1 / 2")
+
+    def test_update_button_finalizes_from_any_position(self):
+        """原本html4のstartUpdateMockと同じく、「更新」ボタン（bulk_navなし）は最終レコード
+        以外で押しても即座に選択全件を確定し、完了モーダルに全件を一覧表示する。表示中の
+        1件は保存され、未訪問のレコードは既存値のまま残る（2026-08-27、原本フィデリティ監査）。"""
+        doc1 = self._create_document("doc1")
+        doc2 = self._create_document("doc2")
+        doc3 = self._create_document("doc3")
+        self.client.post(
+            "/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk, doc3.pk]}
+        )
+
+        # 1件目を表示した状態でそのまま「更新」
+        get_response = self.client.get("/documents/bulk-edit/")
+        self.assertContains(get_response, "1 / 3")
+        response = self.client.post("/documents/bulk-edit/", self._step_data("doc1-編集後"))
+
+        self.assertEqual(response.status_code, 200)
+        created = response.context["complete"]["created"]
+        self.assertEqual([d.pk for d in created], [doc1.pk, doc2.pk, doc3.pk])
+
+        doc1.refresh_from_db()
+        doc2.refresh_from_db()
+        doc3.refresh_from_db()
+        self.assertEqual(doc1.title, "doc1-編集後")
+        self.assertEqual(doc2.title, "doc2")
+        self.assertEqual(doc3.title, "doc3")
+
+        # 表示中だった1件分のAuditLogのみ
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 1)
+
+        # 完了後はセッション状態がクリアされる
+        self.assertIsNone(self.client.session.get("documents_bulk_edit"))
 
     def test_step_db_failure_shows_error_and_does_not_update_document(self):
         """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘1）で発見：
@@ -2583,3 +2621,211 @@ class StoragePathTests(TestCase):
         path1 = document_upload_path(instance, "同名.pdf")
         path2 = document_upload_path(instance, "同名.pdf")
         self.assertNotEqual(path1, path2)
+
+
+class EditDeleteViewTests(TestCase):
+    """保管画面２（編集・edit.html）の[4]メモ欄直下「削除」ボタン＝レコードの論理削除
+    （2026-08-27ユーザー確定。HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節参照）。単独編集は検索画面へ、
+    一括編集はその1件を対象から外して次のレコードへ進む。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def _create_document(self, title):
+        from documents.models import Document
+
+        doc = Document(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1),
+        )
+        doc.file.save(f"{title}.txt", ContentFile(b"hello"), save=False)
+        doc.save()
+        return doc
+
+    def test_edit_screen_shows_delete_form_for_fresh_document(self):
+        doc = self._create_document("新規文書")
+        response = self.client.get(f"/documents/{doc.pk}/edit/")
+        self.assertTrue(response.context["can_delete"])
+        self.assertContains(response, f"/documents/{doc.pk}/edit-delete/")
+        self.assertContains(response, 'id="record-delete-form"')
+
+    def test_edit_screen_hides_delete_form_after_window(self):
+        from documents.models import Document
+
+        doc = self._create_document("古い文書")
+        Document.objects.filter(pk=doc.pk).update(
+            save_date=timezone.now() - datetime.timedelta(days=8)
+        )
+        response = self.client.get(f"/documents/{doc.pk}/edit/")
+        self.assertFalse(response.context["can_delete"])
+        self.assertNotContains(response, 'id="record-delete-form"')
+
+    def test_single_delete_logical_deletes_and_redirects_to_search(self):
+        from documents.models import Document
+
+        doc = self._create_document("単独削除対象")
+        response = self.client.post(f"/documents/{doc.pk}/edit-delete/")
+        self.assertRedirects(response, "/documents/search/")
+        doc.refresh_from_db()
+        self.assertTrue(doc.is_deleted)
+        self.assertIsNotNone(doc.deleted_at)
+        self.assertTrue(Document.objects.filter(pk=doc.pk).exists())
+        self.assertTrue(
+            AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="単独削除対象").exists()
+        )
+
+    def test_delete_rejected_after_window_even_via_direct_post(self):
+        from documents.models import Document
+
+        doc = self._create_document("窓経過")
+        Document.objects.filter(pk=doc.pk).update(
+            save_date=timezone.now() - datetime.timedelta(days=8)
+        )
+        response = self.client.post(f"/documents/{doc.pk}/edit-delete/")
+        self.assertEqual(response.status_code, 403)
+        doc.refresh_from_db()
+        self.assertFalse(doc.is_deleted)
+
+    def test_bulk_edit_screen_renders_from_bulk_hidden_input(self):
+        doc1 = self._create_document("一括表示")
+        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk]})
+        response = self.client.get("/documents/bulk-edit/")
+        self.assertContains(response, 'name="from_bulk"')
+        self.assertContains(response, f"/documents/{doc1.pk}/edit-delete/")
+
+    def test_bulk_delete_removes_from_set_and_advances_to_next(self):
+        from documents.models import Document
+
+        doc1 = self._create_document("一括1")
+        doc2 = self._create_document("一括2")
+        doc3 = self._create_document("一括3")
+        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk, doc3.pk]})
+
+        # 2件目を表示中に削除
+        self.client.get("/documents/bulk-edit/")  # index=0
+        self.client.post("/documents/bulk-edit/", {
+            "token": self._bulk_token(), "department": self.department.pk, "group": self.group.pk,
+            "category": self.category.pk, "year": 2026, "retention_period": self.retention_period.pk,
+            "privacy_flag": "False", "memo": "", "title_0": "一括1", "bulk_nav": "next",
+        })  # index=1（doc2）へ
+        response = self.client.post(f"/documents/{doc2.pk}/edit-delete/", {"from_bulk": "1"})
+        self.assertRedirects(response, "/documents/bulk-edit/")
+
+        doc2.refresh_from_db()
+        self.assertTrue(doc2.is_deleted)
+        state = self.client.session["documents_bulk_edit"]
+        self.assertEqual(state["pks"], [doc1.pk, doc3.pk])
+        # 現在位置の要素を消したので、次のレコード（doc3）が同じindexに繰り上がる
+        self.assertEqual(state["index"], 1)
+        self.client.get("/documents/bulk-edit/")  # doc3 が表示できること（404にならない）
+
+    def test_bulk_delete_last_remaining_clears_state_and_redirects_to_search(self):
+        doc1 = self._create_document("最後の1件")
+        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk]})
+        self.client.get("/documents/bulk-edit/")
+        response = self.client.post(f"/documents/{doc1.pk}/edit-delete/", {"from_bulk": "1"})
+        self.assertRedirects(response, "/documents/search/")
+        self.assertIsNone(self.client.session.get("documents_bulk_edit"))
+
+    def _bulk_token(self):
+        import re
+
+        page = self.client.get("/documents/bulk-edit/")
+        return re.search(r'name="token" value="([^"]+)"', page.content.decode("utf-8")).group(1)
+
+
+class UploadStep2RemoveViewTests(TestCase):
+    """保管画面２（登録）の「削除」ボタン＝表示中ファイルのアップロード取り消し
+    （2026-08-27ユーザー確定。他のファイルは登録処理を続行、入力途中は破棄）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def _select_files(self, *names):
+        self.client.post(
+            "/documents/upload/step1/",
+            {"files": [SimpleUploadedFile(n, b"dummy", content_type="application/pdf") for n in names]},
+        )
+
+    def test_step2_get_renders_remove_button_and_hidden_form(self):
+        self._select_files("a.pdf", "b.pdf")
+        response = self.client.get("/documents/upload/step2/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="btn-remove-upload"')
+        self.assertContains(response, 'id="remove-upload-form"')
+        self.assertContains(response, "/documents/upload/step2/remove/")
+
+    def test_remove_button_div_is_outside_memo_form_section(self):
+        """html5 で「削除」ボタンの div は [4]メモ欄の form-section の外
+        （スクロール領域末尾）へ移動した（Rev1.4 追加の説明画像 image69/image70 と対応）。
+        form.memo は Textarea 単体で div を含まないため、メモ欄見出しと削除ボタンの間に
+        </div>（form-section の閉じ）が現れることで「外側にある」ことを判定できる。"""
+        self._select_files("a.pdf", "b.pdf")
+        content = self.client.get("/documents/upload/step2/").content.decode("utf-8")
+        memo_idx = content.index("[4] メモ欄")
+        button_idx = content.index('id="btn-remove-upload"')
+        self.assertIn("</div>", content[memo_idx:button_idx])
+        self.assertLess(button_idx, content.index("storage-outer-actions"))
+
+    def test_remove_one_keeps_others_and_deletes_temp_file(self):
+        from core.upload_services import get_pending_files
+
+        self._select_files("a.pdf", "b.pdf")
+        pending_before = get_pending_files(self.client.session, "documents_pending_upload")
+        removed_temp = pending_before[0]["temp_name"]
+
+        response = self.client.post("/documents/upload/step2/remove/", {"index": "0"})
+        self.assertRedirects(response, "/documents/upload/step2/")
+
+        pending_after = get_pending_files(self.client.session, "documents_pending_upload")
+        self.assertEqual([p["original_name"] for p in pending_after], ["b.pdf"])
+
+        from pathlib import Path
+
+        from django.conf import settings
+
+        self.assertFalse(
+            (Path(settings.MEDIA_ROOT) / "tmp_uploads" / removed_temp).exists()
+        )
+
+    def test_remove_last_pending_redirects_to_step1(self):
+        from core.upload_services import get_pending_files
+
+        self._select_files("only.pdf")
+        response = self.client.post("/documents/upload/step2/remove/", {"index": "0"})
+        self.assertRedirects(response, "/documents/upload/step1/")
+        self.assertEqual(
+            get_pending_files(self.client.session, "documents_pending_upload"), []
+        )
+
+    def test_out_of_range_index_does_not_crash(self):
+        self._select_files("a.pdf")
+        response = self.client.post("/documents/upload/step2/remove/", {"index": "5"})
+        self.assertRedirects(response, "/documents/upload/step2/")
+
+    def test_non_numeric_index_is_rejected_gracefully(self):
+        self._select_files("a.pdf")
+        response = self.client.post("/documents/upload/step2/remove/", {"index": "abc"})
+        self.assertRedirects(response, "/documents/upload/step2/")

@@ -108,6 +108,35 @@ def clear_pending_files(session, session_key):
     session.modified = True
 
 
+def remove_pending_file(session, session_key, index):
+    """保管画面２（登録）の「削除」ボタン用。ページャーで表示中の1ファイルだけを保留一覧から
+    外し、その一時ファイル実体も削除する（2026-08-27ユーザー確定：登録画面の削除ボタンは
+    「表示中のファイルのアップロード取り消し。他のファイルは登録処理を続行」）。
+
+    `index` が範囲外なら何もせず `None` を返す（多重送信で既に件数が変わっている等）。
+    範囲内なら該当エントリを取り除き、`tmp_uploads/` 配下の実体を削除して、取り除いた
+    エントリ（`original_name` 参照用）を返す。実体削除の失敗は `clear_pending_files` と同じく
+    `logger.exception` で記録した上で処理を止めない（セッションからの除去は必ず行う）。
+
+    セッション格納リストは `save_pending_files` と同じ理由で `list()` でコピーしてから
+    書き換える（SessionBase内部dictが保持する同一listを直接変更しない）。
+    """
+    pending = list(session.get(session_key, []))
+    if index < 0 or index >= len(pending):
+        return None
+
+    removed = pending.pop(index)
+    tmp_path = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR / removed["temp_name"]
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except OSError:
+        logger.exception("アップロード取り消し時の一時ファイル削除に失敗しました: %s", tmp_path)
+
+    session[session_key] = pending
+    session.modified = True
+    return removed
+
+
 def open_pending_file(temp_name):
     """一時保存されたファイルをDjangoのFileオブジェクトとして開く（モデルのFileFieldへ割り当てる用）。
     呼び出し側でクローズすること。

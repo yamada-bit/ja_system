@@ -249,5 +249,12 @@ class BaseDeleteView(View):
 
         if is_ajax:
             return JsonResponse({"success": True, "message": success_message})
+        return self._post_delete_redirect(request, obj, success_message)
+
+    def _post_delete_redirect(self, request, obj, success_message):
+        """非AJAX削除（画面フォームからのPOST）後の遷移。既定は完了メッセージを出して検索画面へ
+        戻る。保管画面２（edit.html）の削除ボタンのように、単独編集なら検索画面・一括編集なら
+        次のレコードへ、と遷移先を変えたいサブクラスはここをオーバーライドする
+        （documents/contracts.views.EditDeleteView）。"""
         messages.success(request, success_message)
         return redirect(self.search_url_name)

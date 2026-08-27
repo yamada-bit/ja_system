@@ -111,17 +111,37 @@
             <div class="form-section">
               <h4>[4] メモ欄</h4>
               {{ form.memo }}
-              <div style="text-align: right; margin-top: 10px;">
-                <button type="button" style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;" onclick="clearMemo()">削除</button>
-              </div>
+              {# 原本HTMLでは onclick 未設定の死んだモックだったが、xlsx 保管!B298-300（登録画面と #}
+              {# 同じ＝不要な文書を削除する。本登録から除外する）に基づき、2026-08-27ユーザー確定で #}
+              {# レコードの論理削除（documents:edit_delete → EditDeleteView）に変更した。 #}
+              {# can_delete が False（保存から1週間以上経過・削除済み）ならボタンごと非表示にする #}
+              {# （xlsx B300「初回登録から1週間以上経過しているものは削除不可。ボタンを非表示にする」）。 #}
+              {% if can_delete %}
+                <div style="text-align: right; margin-top: 10px;">
+                  <button type="submit" form="record-delete-form"
+                          style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;"
+                          onclick="return confirm('この文書を削除します。よろしいですか？')">削除</button>
+                </div>
+              {% endif %}
             </div>
           </div>
 
           <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
-            <button type="submit" class="btn-primary" style="padding:8px 30px;">{% if bulk and bulk.has_next %}次へ{% else %}更新{% endif %}</button>
+            {# 原本html4の一括編集は「次へ」ボタンを持たず、常に「更新」（startUpdateMock）。 #}
+            {# レコード間の移動はページャー ＜ ＞ のみが担い、「更新」はどのページでも全件確定する。 #}
+            <button type="submit" class="btn-primary" style="padding:8px 30px;">更新</button>
             <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:search' %}'">キャンセル</button>
           </div>
         </form>
+        {% if can_delete %}
+          {# [4]メモ欄直下の「削除」ボタン専用フォーム。フォーム入れ子を避けるためメインの #}
+          {# meta-input-form の外に置き、button[form=] 属性で関連付ける。一括編集ウィザードから #}
+          {# 開いた場合だけ from_bulk を送り、EditDeleteView がその1件を対象から外して次へ進む。 #}
+          <form method="post" action="{{ delete_action_url }}" id="record-delete-form">
+            {% csrf_token %}
+            {% if bulk %}<input type="hidden" name="from_bulk" value="1">{% endif %}
+          </form>
+        {% endif %}
       </div>
     </div>
     {% include "documents/_complete_modal.html" %}

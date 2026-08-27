@@ -13,7 +13,14 @@ from django.views import View
 from django.views.generic import UpdateView
 
 from audit import services as audit_services
-from core import bulk_edit_services, record_views, search_services, upload_services, upload_views
+from core import (
+    bulk_edit_services,
+    deletion_services,
+    record_views,
+    search_services,
+    upload_services,
+    upload_views,
+)
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
 from core.text_extraction_services import try_immediate_text_layer_extraction
@@ -242,6 +249,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
                 "title_field": form["title_0"],
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="document"),
+                **_edit_delete_context(self.object),
                 **_expiry_preview_context(form),
             },
         )
@@ -266,6 +274,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
                     "title_field": form["title_0"],
                     "preview_kind": get_preview_kind(self.object.display_name),
                     "can_download": can_download(request.user, kind="document"),
+                    **_edit_delete_context(self.object),
                     **_expiry_preview_context(form),
                 },
             )
@@ -303,6 +312,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
                 "complete": {"created": [doc], "mode": "update"},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="document"),
+                **_edit_delete_context(self.object),
                 **_expiry_preview_context(form),
             },
         )
@@ -338,8 +348,10 @@ class BulkEditStartView(LoginRequiredMixin, View):
 
     def post(self, request):
         pks = request.POST.getlist("pks")
+        # 文言は原本html4のstartBulkEdit（alert("編集するデータが選択されていません。")）に合わせる。
+        # alertではなくmessages機構を使う点のみ規約どおり据え置き（2026-08-27、原本フィデリティ監査）。
         if not pks:
-            messages.error(request, "編集する文書を選択してください。")
+            messages.error(request, "編集するデータが選択されていません。")
             return redirect("documents:search")
 
         # pks検証・部署スコープ絞り込みの実体はcore.bulk_edit_services.resolve_ordered_pksに
@@ -348,7 +360,7 @@ class BulkEditStartView(LoginRequiredMixin, View):
             pks, model=Document, dept_ids_resolver=document_searchable_department_ids, employee=request.user
         )
         if not ordered_pks:
-            messages.error(request, "編集する文書を選択してください。")
+            messages.error(request, "編集するデータが選択されていません。")
             return redirect("documents:search")
 
         bulk_edit_services.start_bulk_edit(request.session, BULK_EDIT_SESSION_KEY, ordered_pks)
@@ -360,9 +372,10 @@ class BulkEditView(LoginRequiredMixin, View):
     （edit.html）をそのまま再利用しつつ、BulkEditStartViewがセッションに積んだpk一覧を
     ページャー（＜ N/M ＞）で1件ずつ巡回する。原本html4差分のモックJSは全件をブラウザ内の
     配列に溜めて最後に一括保存する作りだったが、ModelChoiceFieldの値はセッションへの
-    JSONシリアライズに向かないため、本実装では「どのボタン（＜／次へ／更新）を押しても、
-    まず今表示している内容を検証・保存してから移動する」save-as-you-go方式にしている
-    （詳細な設計判断はHTML_REIMPL_CHECKLIST_ARCHIVE.md参照）。単体編集用のトークン名
+    JSONシリアライズに向かないため、本実装では「ページャー（＜／＞）で移動する際にまず
+    今表示している内容を検証・保存する」save-as-you-go方式にしている。「更新」ボタンは
+    原本と同じくどのページで押しても即座に選択全件を確定する（詳細な設計判断は
+    HTML_REIMPL_CHECKLIST_ARCHIVE.md参照）。単体編集用のトークン名
     （"documents_edit"）とは別の"documents_bulk_edit"を使い、別タブで単体編集中でも
     干渉しないようにする。
     """
@@ -431,16 +444,25 @@ class BulkEditView(LoginRequiredMixin, View):
             personal_info_flag=doc.privacy_flag,
         )
 
+        # 原本html4の一括編集は、レコード間の移動をページャー ＜ ＞（changeActiveDoc）だけで行い、
+        # 「更新」ボタン（startUpdateMock）を押した時点で、現在何件目を表示していても選択全件を
+        # 確定して完了ポップアップに一覧表示する（「次へ」ボタンは原本に存在しない）。本実装は
+        # ModelChoiceFieldをセッションに載せられないため各移動で表示中の1件を都度保存する
+        # save-as-you-go方式だが、「どのページで更新を押しても即全件確定」という原本の挙動自体は
+        # 踏襲する（2026-08-27、原本フィデリティ監査での指摘を受けて修正）。
         total = len(state["pks"])
         index = state["index"]
-        if request.POST.get("bulk_nav") == "prev" and index > 0:
-            bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index - 1)
+        nav = request.POST.get("bulk_nav")
+        if nav == "prev":
+            if index > 0:
+                bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index - 1)
             return redirect("documents:bulk_edit")
-        if index < total - 1:
-            bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index + 1)
+        if nav == "next":
+            if index < total - 1:
+                bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index + 1)
             return redirect("documents:bulk_edit")
 
-        # 最終ステップ完了。DocumentEditView.postと同じ理由でリダイレクトせず、
+        # 「更新」ボタン（bulk_navなし）。DocumentEditView.postと同じ理由でリダイレクトせず、
         # completeを付けてedit.htmlを再描画し完了モーダルを重ねる。
         edited_docs_by_pk = {d.pk: d for d in Document.objects.filter(pk__in=state["pks"])}
         edited_docs = [edited_docs_by_pk[pk] for pk in state["pks"] if pk in edited_docs_by_pk]
@@ -457,6 +479,7 @@ class BulkEditView(LoginRequiredMixin, View):
                 "complete": {"created": edited_docs, "mode": "update"},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="document"),
+                **_edit_delete_context(self.object),
                 **_expiry_preview_context(form),
             },
         )
@@ -477,6 +500,7 @@ class BulkEditView(LoginRequiredMixin, View):
                 "has_prev": index > 0,
                 "has_next": index < total - 1,
             },
+            **_edit_delete_context(self.object),
             **_expiry_preview_context(form),
         }
 
@@ -517,12 +541,32 @@ def _pending_preview_context(request, pending):
     )
 
 
+def _edit_delete_context(obj):
+    """edit.htmlの[4]メモ欄直下「削除」ボタン（EditDeleteView）用。can_deleteがFalseなら
+    テンプレート側でボタンごと非表示にする（xlsx 保管!B300「初回登録から1週間以上経過・
+    削除済みはボタンを非表示」。判定はcore.deletion_services.can_delete＝save_dateから7日）。"""
+    return {
+        "can_delete": deletion_services.can_delete(obj),
+        "delete_action_url": reverse("documents:edit_delete", args=[obj.pk]),
+    }
+
+
 class PendingPreviewView(LoginRequiredMixin, upload_views.BasePendingPreviewView):
     """実体はcore.upload_views.BasePendingPreviewViewに集約済み（contracts.views.
     PendingPreviewViewとの重複をコード監査で発見、2026-08-25修正）。"""
 
     pending_session_key = PENDING_SESSION_KEY
     kind = "document"
+
+
+class UploadStep2RemoveView(LoginRequiredMixin, upload_views.BaseUploadStep2RemoveView):
+    """保管画面２（登録）の「削除」ボタン。表示中の1ファイルだけをアップロード取り消しする。
+    実体はcore.upload_views.BaseUploadStep2RemoveViewに集約（contracts側と対称）。"""
+
+    pending_session_key = PENDING_SESSION_KEY
+    step1_url_name = "documents:upload_step1"
+    step2_url_name = "documents:upload_step2"
+    entity_label = "文書"
 
 
 class SearchView(LoginRequiredMixin, View):
@@ -649,3 +693,34 @@ class DeleteView(LoginRequiredMixin, record_views.BaseDeleteView):
 
     def audit_extra_kwargs(self, obj):
         return {"personal_info_flag": obj.privacy_flag}
+
+
+class EditDeleteView(DeleteView):
+    """保管画面２（編集・edit.html）の[4]メモ欄直下「削除」ボタン。xlsx 保管!B298-300は
+    「登録画面と同じ（＝不要な文書を削除する。本登録から除外する）」＋「初回登録から1週間以上
+    経過・削除済みはボタンを非表示」。原本HTMLは当該ボタンがonclick未設定の死んだモックで、
+    以前はメモ欄クリア（common.jsのclearMemo）として実装していたが、2026-08-27ユーザー確定で
+    レコードの論理削除に変更した（HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節参照）。
+
+    削除自体はDeleteView（＝BaseDeleteView）と同一（スコープ取得・can_delete検証・論理削除・
+    監査ログ）。異なるのは (1) 監査ログのaction名、(2) 削除後の遷移先だけ。
+    詳細ポップアップからのfetch削除と違い画面フォームからの通常POSTのため常に非AJAXで、
+    _post_delete_redirect()だけをオーバーライドする。
+    """
+
+    audit_action = "保管画面２ 削除"
+    bulk_edit_session_key = BULK_EDIT_SESSION_KEY
+    bulk_edit_url_name = "documents:bulk_edit"
+
+    def _post_delete_redirect(self, request, obj, success_message):
+        messages.success(request, success_message)
+        # from_bulkは一括編集ウィザード（BulkEditView）が描画したedit.htmlの削除フォームにのみ
+        # 埋まる。別タブで単独編集中に一括編集セッションが残っていても誤検知しないよう、
+        # hiddenの有無で判定する（remove_bulk_edit_pkはpkがpks内に無ければNoneを返す）。
+        if request.POST.get("from_bulk"):
+            new_state = bulk_edit_services.remove_bulk_edit_pk(
+                request.session, self.bulk_edit_session_key, obj.pk
+            )
+            if new_state is not None:
+                return redirect(self.bulk_edit_url_name)
+        return redirect(self.search_url_name)

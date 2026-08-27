@@ -33,6 +33,7 @@ from core.upload_services import (
     clear_pending_files,
     combine_upload_chunks,
     open_pending_file,
+    remove_pending_file,
     save_pending_files,
     save_upload_chunk,
 )
@@ -170,6 +171,18 @@ class MenuNoticeTwoColumnLayoutTests(TestCase):
         content = response.content.decode("utf-8")
         notice_area = content.split('class="notice-area"')[1]
         self.assertEqual(notice_area.count("<ul"), 2)
+
+    def test_notice_columns_wrapper_matches_html5(self):
+        """原本 index.html html5 に合わせ、左右2列のラッパを notice-columns クラス
+        （＋ notice-columns>div > ul 構造）に統一し、style.css に flex 定義を持つ。"""
+        content = self.client.get("/").content.decode("utf-8")
+        notice_area = content.split('class="notice-area"')[1]
+        self.assertIn('<div class="notice-columns">', notice_area)
+        # 旧実装のインライン flex スタイルが残っていないこと
+        self.assertNotIn("display:flex; gap:40px", notice_area)
+        css = (settings.BASE_DIR / "static" / "css" / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".notice-columns {", css)
+        self.assertIn(".notice-columns > div {", css)
 
 
 class MenuButtonVisibilityTests(TestCase):
@@ -1055,6 +1068,90 @@ class UploadServicesErrorHandlingTests(TestCase):
         # 実体は削除に失敗しているため残っている（孤児ファイル）。後片付けする。
         (self.tmp_dir / temp_name).unlink(missing_ok=True)
 
+    def test_remove_pending_file_drops_one_entry_and_deletes_its_temp_file(self):
+        """保管画面２（登録）の「削除」ボタン（アップロード取り消し）。表示中の1件だけを
+        保留一覧から外し、その一時ファイル実体も消す。他のエントリはそのまま残る。"""
+        pending = save_pending_files(
+            self.session,
+            self.SESSION_KEY,
+            [SimpleUploadedFile("a.pdf", b"a"), SimpleUploadedFile("b.pdf", b"b")],
+        )
+        removed_temp = pending[0]["temp_name"]
+        kept_temp = pending[1]["temp_name"]
+
+        result = remove_pending_file(self.session, self.SESSION_KEY, 0)
+
+        self.assertEqual(result["original_name"], "a.pdf")
+        self.assertEqual(
+            [p["original_name"] for p in self.session[self.SESSION_KEY]], ["b.pdf"]
+        )
+        self.assertFalse((self.tmp_dir / removed_temp).exists())
+        self.assertTrue((self.tmp_dir / kept_temp).exists())
+        (self.tmp_dir / kept_temp).unlink(missing_ok=True)
+
+    def test_remove_pending_file_out_of_range_returns_none_without_side_effects(self):
+        pending = save_pending_files(
+            self.session, self.SESSION_KEY, [SimpleUploadedFile("a.pdf", b"a")]
+        )
+        self.assertIsNone(remove_pending_file(self.session, self.SESSION_KEY, 5))
+        self.assertIsNone(remove_pending_file(self.session, self.SESSION_KEY, -1))
+        self.assertEqual(len(self.session[self.SESSION_KEY]), 1)
+        (self.tmp_dir / pending[0]["temp_name"]).unlink(missing_ok=True)
+
+
+class RemoveBulkEditPkTests(TestCase):
+    """core.bulk_edit_services.remove_bulk_edit_pk（保管画面２〈edit.html〉一括編集中の削除）。
+    表示中の1件を対象から外し、index を新しい並びの範囲へ収める。"""
+
+    KEY = "test_bulk_edit"
+
+    def setUp(self):
+        from django.contrib.sessions.backends.db import SessionStore
+
+        self.session = SessionStore()
+
+    def _start(self, pks, index):
+        self.session[self.KEY] = {"pks": list(pks), "index": index}
+
+    def test_removing_current_index_advances_next_into_same_slot(self):
+        from core.bulk_edit_services import remove_bulk_edit_pk
+
+        self._start([10, 20, 30], index=1)
+        state = remove_bulk_edit_pk(self.session, self.KEY, 20)
+        self.assertEqual(state["pks"], [10, 30])
+        self.assertEqual(state["index"], 1)
+
+    def test_removing_earlier_item_shifts_index_back(self):
+        from core.bulk_edit_services import remove_bulk_edit_pk
+
+        self._start([10, 20, 30], index=2)
+        state = remove_bulk_edit_pk(self.session, self.KEY, 10)
+        self.assertEqual(state["pks"], [20, 30])
+        self.assertEqual(state["index"], 1)
+
+    def test_removing_last_item_while_on_it_clamps_index(self):
+        from core.bulk_edit_services import remove_bulk_edit_pk
+
+        self._start([10, 20, 30], index=2)
+        state = remove_bulk_edit_pk(self.session, self.KEY, 30)
+        self.assertEqual(state["pks"], [10, 20])
+        self.assertEqual(state["index"], 1)
+
+    def test_removing_only_item_clears_state_and_returns_none(self):
+        from core.bulk_edit_services import remove_bulk_edit_pk
+
+        self._start([10], index=0)
+        self.assertIsNone(remove_bulk_edit_pk(self.session, self.KEY, 10))
+        self.assertIsNone(self.session.get(self.KEY))
+
+    def test_unknown_pk_or_missing_state_returns_none(self):
+        from core.bulk_edit_services import remove_bulk_edit_pk
+
+        self._start([10, 20], index=0)
+        self.assertIsNone(remove_bulk_edit_pk(self.session, self.KEY, 999))
+        self.session.pop(self.KEY, None)
+        self.assertIsNone(remove_bulk_edit_pk(self.session, self.KEY, 10))
+
 
 class ChunkUploadServiceTests(TestCase):
     """core/upload_services.pyのチャンク分割アップロード（save_upload_chunk/combine_upload_chunks）。
@@ -1208,6 +1305,63 @@ class PopupSelectWidgetTamperResistanceTests(TestCase):
         html = widget.render("dept", f"abc,{self.department.pk}", attrs={"id": "id_dept"})
         self.assertIn("id_dept", html)
         self.assertIn(str(self.department), html)
+
+    def test_display_element_is_single_line_input_by_default(self):
+        widget = PopupSelectWidget(
+            popup_type="dept", mode="search", api_url="/core/api/options/",
+            queryset=Department.objects.all(), multi=True,
+        )
+        html = widget.render("dept", str(self.department.pk), attrs={"id": "id_dept"})
+        self.assertIn('<input type="text" id="id_dept_display"', html)
+        self.assertNotIn("<textarea", html)
+
+    def test_display_multiline_renders_readonly_textarea_with_value_as_content(self):
+        """簡易設計指示書 Rev1.3（権限管理編集）で追加。display_multiline=Trueのとき、表示用要素を
+        複数行<textarea readonly>で描画し、選択済みラベルは属性ではなくタグ内容として持つ。
+        """
+        widget = PopupSelectWidget(
+            popup_type="dept", mode="search", api_url="/core/api/options/",
+            queryset=Department.objects.all(), multi=True, display_multiline=True,
+        )
+        html = widget.render("dept", str(self.department.pk), attrs={"id": "id_dept"})
+        self.assertIn('<textarea id="id_dept_display"', html)
+        self.assertIn("readonly", html)
+        self.assertIn(f">{self.department}</textarea>", html)
+        # 原本 index.html html5（Rev1.3で画面変更、Rev1.4時点）の rows="5" に一致させる。
+        self.assertIn('rows="5"', html)
+        # 送信用hidden inputと「選択」ボタンは従来通り。
+        self.assertIn('type="hidden"', html)
+        self.assertIn("選択</button>", html)
+
+
+class PopupSelectPositioningJsTests(TestCase):
+    """common.js の popup-select 配置ロジック（原本 index.html html5 の openPopupPopup 移植）。
+    本プロジェクトに JS 単体テストの仕組みは無いため（クライアント JS は実プレビューで確認する
+    方針）、ここでは静的ファイルを読んで「縦位置の反転ロジックが positionPopupPopup に切り出され、
+    openPopupPopup から renderPopupPopupItems() の後に呼ばれる」構造が保たれているかを回帰ガード
+    として検証する（原本 html5 で Rev1.3 の rows=5 textarea 対応として追加された挙動）。
+    """
+
+    def _js(self):
+        return (settings.BASE_DIR / "static" / "js" / "common.js").read_text(encoding="utf-8")
+
+    def test_position_helper_defined_and_flips_upward(self):
+        js = self._js()
+        self.assertIn("function positionPopupPopup(btn)", js)
+        # 下端はみ出し時にボタンの上へ反転する式
+        self.assertIn("rect.bottom + 5 + popRect.height > windowHeight", js)
+        self.assertIn("rect.top - popRect.height - 5", js)
+
+    def test_open_calls_position_after_render_on_both_cache_paths(self):
+        js = self._js()
+        open_body = js.split("function openPopupPopup(btn, type, mode, apiUrl) {", 1)[1].split(
+            "function positionPopupPopup", 1
+        )[0]
+        # キャッシュヒット側・fetch解決側の両方で render の直後に position を呼ぶ
+        self.assertIn("renderPopupPopupItems();\n    positionPopupPopup(btn);", open_body)
+        self.assertIn("renderPopupPopupItems();\n        positionPopupPopup(btn);", open_body)
+        # 原本 html5 に合わせた previousElementSibling || nextElementSibling
+        self.assertIn("btn.previousElementSibling || btn.nextElementSibling", open_body)
 
 
 class IsScannedTests(TestCase):

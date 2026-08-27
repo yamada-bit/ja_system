@@ -13,20 +13,6 @@ function getCsrfToken() {
 }
 
 /*
- * 保管画面２（登録・編集）の「[4] メモ欄」直下にある「削除」ボタン用。原本HTMLでは
- * onclick未設定のまま（機能未実装のモック）だったが、この位置の削除ボタンはメモ欄の内容を
- * 消去するためのものと確認されたため、フォーム送信済みデータには触れずメモ欄をその場で
- * クリアするだけの処理にする（保存するには別途「登録」「更新」ボタンを押す必要がある）。
- * 文書の登録データ自体の削除は、検索結果一覧の詳細ポップアップの「削除」ボタン
- * （triggerDeleteFromDetail）が別途担う。
- */
-function clearMemo() {
-  if (!confirm("メモを削除しますか？")) return;
-  const memo = document.getElementById("id_memo");
-  if (memo) memo.value = "";
-}
-
-/*
  * 検索・閲覧画面の「一括選択」ボタン。原本index.htmlのtoggleAllCheckboxes()と同じロジック
  * （バックエンド不要な純クライアント処理のため、一括ダウンロード/一括編集と違いdisabledにしない）。
  */
@@ -37,6 +23,22 @@ function toggleAllCheckboxes() {
   allCheckedState = !allCheckedState;
   checkboxes.forEach((cb) => (cb.checked = allCheckedState));
   if (btn) btn.textContent = allCheckedState ? "一括解除" : "一括選択";
+}
+
+/*
+ * 検索・閲覧画面の「一括編集」ボタン。原本index.htmlのstartBulkEdit()の「1件も選択されて
+ * いなければalertして中断」する部分だけを再現する。原本は続けて選択行をJSでスクレイプし
+ * 遷移まで行うが、本実装は選択pksを通常のPOST送信でサーバー（BulkEditStartView）へ渡すため、
+ * ここが担うのはクライアント側の未選択ガードのみ（サーバー側にも同じ検証を残してある。
+ * 文言はalert()自体が原本の最終仕様として機能している箇所のため踏襲する）。
+ */
+function startBulkEdit() {
+  const checked = document.querySelectorAll(".row-checkbox:checked");
+  if (checked.length === 0) {
+    alert("編集するデータが選択されていません。");
+    return false;
+  }
+  return true;
 }
 
 /*
@@ -193,7 +195,10 @@ let activePopupMode = "storage";
 let activePopupApiUrl = "";
 
 function openPopupPopup(btn, type, mode, apiUrl) {
-  activePopupTargetInput = btn.previousElementSibling; // hidden input
+  // 原本index.html(html5)に合わせ previousElementSibling || nextElementSibling。ja_pjの
+  // PopupSelectWidgetは「表示要素→hidden input→選択ボタン」の順で描画するため実際には
+  // previousElementSiblingで確定するが、原本との差異を残さないため保険のorも移植する。
+  activePopupTargetInput = btn.previousElementSibling || btn.nextElementSibling; // hidden input
   activePopupDisplayInput = document.getElementById(activePopupTargetInput.dataset.display);
   activePopupType = type;
   activePopupMode = mode;
@@ -209,30 +214,18 @@ function openPopupPopup(btn, type, mode, apiUrl) {
   searchInput.value = "";
   searchInput.style.display = type === "year" ? "none" : "block";
 
-  const rect = btn.getBoundingClientRect();
   const pop = document.getElementById("popup-select");
   pop.classList.remove("hidden-popup");
-  pop.style.top = window.scrollY + rect.bottom + 5 + "px";
 
-  // 横位置の計算（基本は元のロジック：ボタンの左から-100pxの位置）
-  let leftPos = window.scrollX + rect.left - 100;
-  pop.style.left = leftPos + "px";
-
-  // 画面の右端からはみ出していないかチェックし、はみ出る場合は左側にスライドさせる
-  // （ポップアップの実際の横幅はCSSで固定されていないため、表示後の実測値で判定する）
-  const popRect = pop.getBoundingClientRect();
-  const windowWidth = window.innerWidth;
-  if (popRect.right > windowWidth) {
-    leftPos = window.scrollX + windowWidth - popRect.width - 10;
-    if (leftPos < window.scrollX) {
-      leftPos = window.scrollX + 10;
-    }
-    pop.style.left = leftPos + "px";
-  }
-
+  // 配置は「中身を描画して実寸を確定してから」行う（原本 html5 の openPopupPopup が
+  // renderPopupPopupItems() を先頭で呼ぶよう変更されたのに合わせる。Rev1.3で権限管理編集の
+  // 表示欄が rows=5 の textarea になりポップアップが縦に伸びたため、下端はみ出し判定に
+  // 実際の高さが要る）。ja_pjは選択肢を非同期fetchする場合があるので、renderの後に必ず
+  // positionPopupPopup() を呼ぶ。
   const cacheKey = `${apiUrl}|${type}`;
   if (popupOptionsCache[cacheKey]) {
     renderPopupPopupItems();
+    positionPopupPopup(btn);
   } else {
     // apiUrlが既にクエリ文字列を含む場合（permissions:api_optionsのdoc_kbn等）に備え、
     // 単純な文字列結合ではなく区切り文字を判定して連結する。
@@ -242,7 +235,43 @@ function openPopupPopup(btn, type, mode, apiUrl) {
       .then((data) => {
         popupOptionsCache[cacheKey] = data.items || [];
         renderPopupPopupItems();
+        positionPopupPopup(btn);
       });
+  }
+}
+
+/**
+ * popup-select をトリガーボタン基準で配置する（原本 index.html html5 の openPopupPopup 配置ロジックの移植）。
+ * 縦: 基本はボタン下(+5px)。ポップアップの実高さで下端からはみ出す場合はボタンの「上」へ反転し、
+ *     上にも収まらなければ画面最上部に10pxだけ余白を取って貼り付ける。
+ * 横: 基本はボタン左から-100px。描画後に再測して右端はみ出しを補正する。
+ * 呼び出し側は renderPopupPopupItems() で中身を描画した「後」に呼ぶこと（実寸が要るため）。
+ */
+function positionPopupPopup(btn) {
+  const rect = btn.getBoundingClientRect();
+  const pop = document.getElementById("popup-select");
+  const popRect = pop.getBoundingClientRect();
+  const windowWidth = window.innerWidth;
+  const windowHeight = window.innerHeight;
+
+  let topPos = window.scrollY + rect.bottom + 5;
+  if (rect.bottom + 5 + popRect.height > windowHeight) {
+    topPos = window.scrollY + rect.top - popRect.height - 5;
+    if (topPos < window.scrollY) {
+      topPos = window.scrollY + 10;
+    }
+  }
+  pop.style.top = topPos + "px";
+
+  let leftPos = window.scrollX + rect.left - 100;
+  pop.style.left = leftPos + "px";
+  const updatedPopRect = pop.getBoundingClientRect();
+  if (updatedPopRect.right > windowWidth) {
+    leftPos = window.scrollX + windowWidth - updatedPopRect.width - 10;
+    if (leftPos < window.scrollX) {
+      leftPos = window.scrollX + 10;
+    }
+    pop.style.left = leftPos + "px";
   }
 }
 
@@ -736,18 +765,21 @@ function closeRegisterModal() {
   document.getElementById("overlay-modal").style.display = "none";
 }
 
-// screen-authority-list（権限管理一覧）の固定列（職員番号/部署/氏名/役職/権限）。
-// style.css側の.col-1〜.col-5/.col-td-1〜.col-td-5は原本CSSそのまま（60px/102px/78px/100px幅を
+// screen-authority-list（権限管理一覧）の固定列（職員番号/部署/氏名/役職/権限/操作）。
+// style.css側の.col-1〜.col-6/.col-td-1〜.col-td-6は原本CSSそのまま（60px/102px/78px/100px幅を
 // 前提にしたleft固定値のハードコード）だが、これは原本モックの固定文言（「本　店|ＤＸ推進課」等）
 // を前提にした値で、実データ（部署名の長さ等）が変わると列幅がずれ、position:stickyの
 // left値が実際の列幅と食い違って隣接列が重なったり隙間が空いたりする（横スクロール時に
 // 「権限」列の手前で不自然な空白ができ、スクロールが終わらないように見える不具合の原因）。
 // 実際に描画された列幅からleftを都度計算し直すことで、データに依存せず正しく重なるようにする。
+// col-6（操作）は簡易設計指示書 Rev1.3（権限管理!AI10「画面変更」）でhtml5に追加された固定列。
+// これをループ範囲に含めないと、CSSの固定値（.col-6 left:382px）のまま実際の1〜5列合計幅とズレ、
+// 「操作」列が権限付与（文書管理）の列に重なる。
 function fixAuthorityStickyOffsets() {
   const table = document.querySelector(".data-table-auth");
   if (!table) return;
   let cumulative = 0;
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 6; i++) {
     const th = table.querySelector("thead th.col-" + i);
     if (!th) continue;
     th.style.left = cumulative + "px";

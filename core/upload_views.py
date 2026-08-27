@@ -137,6 +137,61 @@ class BaseUploadStep1View(View):
         return {"max_upload_size_bytes": settings.MAX_UPLOAD_SIZE_BYTES}
 
 
+class BaseUploadStep2RemoveView(View):
+    """保管画面２（登録）の「削除」ボタン共通実装。ページャーで表示中の1ファイルだけを
+    セッションの保留一覧から外し（実体も削除）、他のファイルはそのまま登録フローを続行させる
+    （2026-08-27ユーザー確定。xlsx 保管!B197-198「誤ってアップロードした文書、不要な文書を
+    削除する。(本登録から除外する)」に対応）。まだDBレコードは生成されていないため論理削除
+    （EditDeleteView）とは別物で、監査ログの対象にもしない（logger.infoのみ）。
+
+    documents側はLoginRequiredMixin、contracts側はRequiresContractEditMixinと要求する認可が
+    異なるため、認証・認可ミックスインはベースに含めず継承側で組み合わせる
+    （BaseUploadStep1Viewと同じ方針）。`pending_session_key`/`step1_url_name`/`step2_url_name`/
+    `entity_label`をクラス変数で指定して継承する。
+    """
+
+    pending_session_key = None
+    step1_url_name = None
+    step2_url_name = None
+    entity_label = None
+
+    def post(self, request):
+        try:
+            index = int(request.POST.get("index", ""))
+        except (TypeError, ValueError):
+            # indexはstorage2.htmlのJS（activeDocIndex）が埋めるhidden値で通常は正しい整数。
+            # 壊れたリクエスト・改ざんの兆候としてログに残し、そのまま保管画面２へ戻す。
+            logger.warning(
+                "アップロード取り消しに不正なindexが送られました: employee_no=%s value=%r",
+                request.user.employee_no,
+                request.POST.get("index"),
+            )
+            return redirect(self.step2_url_name)
+
+        removed = upload_services.remove_pending_file(
+            request.session, self.pending_session_key, index
+        )
+        if removed is None:
+            # 範囲外（多重送信等で既に件数が変わっている）。エラー表示はせず現状の一覧を再表示する。
+            return redirect(self.step2_url_name)
+
+        logger.info(
+            "保管画面２ アップロード取り消し: employee_no=%s file=%s",
+            request.user.employee_no,
+            removed["original_name"],
+        )
+
+        remaining = upload_services.get_pending_files(request.session, self.pending_session_key)
+        if not remaining:
+            messages.info(
+                request,
+                f"アップロードを取り消しました。{self.entity_label}を選択し直してください。",
+            )
+            return redirect(self.step1_url_name)
+        messages.info(request, f"「{removed['original_name']}」のアップロードを取り消しました。")
+        return redirect(self.step2_url_name)
+
+
 def file_rows(form, pending):
     """テンプレート側で`{{ item.original_name }}`と対応する`title_N`入力欄を並べて表示するための
     (pendingの要素, BoundField)組を作る。title_Nはファイル数に応じて動的に追加されるフィールドの

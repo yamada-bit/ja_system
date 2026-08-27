@@ -1014,8 +1014,13 @@ class BulkEditViewTests(TestCase):
         return data
 
     def test_start_without_selection_redirects_with_message(self):
+        from django.contrib.messages import get_messages
+
         response = self.client.post("/contracts/bulk-edit/start/", {})
         self.assertRedirects(response, "/contracts/search/")
+        # 文言は原本html4のalert("編集するデータが選択されていません。")に合わせる（B599「文書管理と同じ」）。
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertIn("編集するデータが選択されていません。", texts)
 
     def test_direct_access_without_session_state_redirects(self):
         response = self.client.get("/contracts/bulk-edit/")
@@ -1028,7 +1033,9 @@ class BulkEditViewTests(TestCase):
 
         get_response = self.client.get("/contracts/bulk-edit/")
         self.assertContains(get_response, "1 / 2")
-        response = self.client.post("/contracts/bulk-edit/", self._step_data("c1-編集後"))
+        response = self.client.post(
+            "/contracts/bulk-edit/", self._step_data("c1-編集後", bulk_nav="next")
+        )
         self.assertRedirects(response, "/contracts/bulk-edit/")
         contract1.refresh_from_db()
         self.assertEqual(contract1.title, "c1-編集後")
@@ -1087,9 +1094,9 @@ class BulkEditViewTests(TestCase):
         contract2 = self._create_contract("c2")
         self.client.post("/contracts/bulk-edit/start/", {"pks": [contract1.pk, contract2.pk]})
         self.client.get("/contracts/bulk-edit/")
-        self.client.post("/contracts/bulk-edit/", self._step_data("c1-編集後"))
+        self.client.post("/contracts/bulk-edit/", self._step_data("c1-編集後", bulk_nav="next"))
 
-        # 2件目に来たら内容を変更し、保存されないまま「＜」で1件目に戻る
+        # 2件目に来たら内容を変更し、「＜」で1件目に戻る（移動時に2件目も保存される）
         self.client.get("/contracts/bulk-edit/")
         response = self.client.post(
             "/contracts/bulk-edit/", self._step_data("c2-編集後", bulk_nav="prev")
@@ -1100,6 +1107,34 @@ class BulkEditViewTests(TestCase):
 
         get_response = self.client.get("/contracts/bulk-edit/")
         self.assertContains(get_response, "1 / 2")
+
+    def test_update_button_finalizes_from_any_position(self):
+        """documents.tests.BulkEditViewTests.test_update_button_finalizes_from_any_positionと
+        同じ観点（原本html4のstartUpdateMock。2026-08-27、原本フィデリティ監査）。"""
+        contract1 = self._create_contract("c1")
+        contract2 = self._create_contract("c2")
+        contract3 = self._create_contract("c3")
+        self.client.post(
+            "/contracts/bulk-edit/start/", {"pks": [contract1.pk, contract2.pk, contract3.pk]}
+        )
+
+        get_response = self.client.get("/contracts/bulk-edit/")
+        self.assertContains(get_response, "1 / 3")
+        response = self.client.post("/contracts/bulk-edit/", self._step_data("c1-編集後"))
+
+        self.assertEqual(response.status_code, 200)
+        created = response.context["complete"]["created"]
+        self.assertEqual([c.pk for c in created], [contract1.pk, contract2.pk, contract3.pk])
+
+        contract1.refresh_from_db()
+        contract2.refresh_from_db()
+        contract3.refresh_from_db()
+        self.assertEqual(contract1.title, "c1-編集後")
+        self.assertEqual(contract2.title, "c2")
+        self.assertEqual(contract3.title, "c3")
+
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 1)
+        self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
 
     def test_related_files_added_and_removed_affect_only_current_contract(self):
         """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘8）で発見：BulkEditViewでの
@@ -1116,9 +1151,9 @@ class BulkEditViewTests(TestCase):
         )
         self.client.post("/contracts/bulk-edit/start/", {"pks": [contract1.pk, contract2.pk]})
 
-        # 1件目: 新規の関連書類を追加
+        # 1件目: 新規の関連書類を追加し、ページャー「＞」で2件目へ
         self.client.get("/contracts/bulk-edit/")
-        data = self._step_data("c1-編集後")
+        data = self._step_data("c1-編集後", bulk_nav="next")
         response = self.client.post(
             "/contracts/bulk-edit/",
             {**data, "related_files": [ContentFile(b"AAAA", name="c1-related.pdf")]},
@@ -2431,3 +2466,192 @@ class StoragePathTests(TestCase):
         path1 = related_file_upload_path(instance, "同名.pdf")
         path2 = related_file_upload_path(instance, "同名.pdf")
         self.assertNotEqual(path1, path2)
+
+
+class EditDeleteViewTests(TestCase):
+    """保管画面２（編集・edit.html）の[4]メモ欄直下「削除」ボタン＝レコードの論理削除
+    （documents.tests.EditDeleteViewTestsと同じ観点。契約書側はcan_edit_contractも要る）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def _create_contract(self, title):
+        from contracts.models import Contract
+
+        contract = Contract(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+        )
+        contract.file.save(f"{title}.txt", ContentFile(b"hello"), save=False)
+        contract.save()
+        return contract
+
+    def test_edit_screen_shows_delete_form_for_fresh_contract(self):
+        contract = self._create_contract("新規契約書")
+        response = self.client.get(f"/contracts/{contract.pk}/edit/")
+        self.assertTrue(response.context["can_delete"])
+        self.assertContains(response, f"/contracts/{contract.pk}/edit-delete/")
+        self.assertContains(response, 'id="record-delete-form"')
+        # 単独編集では from_bulk は出さない（一括編集ウィザードからのみ）。
+        self.assertNotContains(response, 'name="from_bulk"')
+
+    def test_single_delete_logical_deletes_and_redirects_to_search(self):
+        from contracts.models import Contract
+
+        contract = self._create_contract("単独削除対象")
+        response = self.client.post(f"/contracts/{contract.pk}/edit-delete/")
+        self.assertRedirects(response, "/contracts/search/")
+        contract.refresh_from_db()
+        self.assertTrue(contract.is_deleted)
+        self.assertTrue(Contract.objects.filter(pk=contract.pk).exists())
+        self.assertTrue(
+            AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="単独削除対象").exists()
+        )
+
+    def test_delete_without_contract_edit_permission_is_rejected(self):
+        from contracts.models import Contract
+
+        other = Employee.objects.create_user(
+            employee_no="2", name="権限なし", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(
+            employee=other, role=PermissionRole.STAFF, contract_edit=False
+        )
+        contract = self._create_contract("権限テスト")
+        self.client.login(username="2", password="pass1234")
+        response = self.client.post(f"/contracts/{contract.pk}/edit-delete/")
+        self.assertEqual(response.status_code, 403)
+        contract.refresh_from_db()
+        self.assertFalse(contract.is_deleted)
+        self.assertTrue(Contract.objects.filter(pk=contract.pk, is_deleted=False).exists())
+
+    def test_delete_rejected_after_window(self):
+        from contracts.models import Contract
+
+        contract = self._create_contract("窓経過")
+        Contract.objects.filter(pk=contract.pk).update(
+            save_date=timezone.now() - datetime.timedelta(days=8)
+        )
+        response = self.client.get(f"/contracts/{contract.pk}/edit/")
+        self.assertFalse(response.context["can_delete"])
+        response = self.client.post(f"/contracts/{contract.pk}/edit-delete/")
+        self.assertEqual(response.status_code, 403)
+        contract.refresh_from_db()
+        self.assertFalse(contract.is_deleted)
+
+    def test_bulk_delete_removes_from_set_and_advances(self):
+        import re
+
+        from contracts.models import Contract
+
+        c1 = self._create_contract("一括1")
+        c2 = self._create_contract("一括2")
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk, c2.pk]})
+        self.client.get("/contracts/bulk-edit/")
+        response = self.client.post(f"/contracts/{c1.pk}/edit-delete/", {"from_bulk": "1"})
+        self.assertRedirects(response, "/contracts/bulk-edit/")
+        c1.refresh_from_db()
+        self.assertTrue(c1.is_deleted)
+        state = self.client.session["contracts_bulk_edit"]
+        self.assertEqual(state["pks"], [c2.pk])
+        self.assertEqual(state["index"], 0)
+
+    def test_bulk_delete_last_remaining_clears_state(self):
+        c1 = self._create_contract("最後の1件")
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk]})
+        self.client.get("/contracts/bulk-edit/")
+        response = self.client.post(f"/contracts/{c1.pk}/edit-delete/", {"from_bulk": "1"})
+        self.assertRedirects(response, "/contracts/search/")
+        self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
+
+
+class UploadStep2RemoveViewTests(TestCase):
+    """保管画面２（登録）の「削除」ボタン＝表示中ファイルのアップロード取り消し
+    （documents.tests.UploadStep2RemoveViewTestsと同じ観点。契約書側はRequiresContractEditMixin）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def _select_files(self, *names):
+        self.client.post(
+            "/contracts/upload/step1/",
+            {"files": [SimpleUploadedFile(n, b"dummy", content_type="application/pdf") for n in names]},
+        )
+
+    def test_remove_one_keeps_others_and_deletes_temp_file(self):
+        from pathlib import Path
+
+        from django.conf import settings
+
+        from core.upload_services import get_pending_files
+
+        self._select_files("a.pdf", "b.pdf")
+        pending_before = get_pending_files(self.client.session, "contracts_pending_upload")
+        removed_temp = pending_before[0]["temp_name"]
+
+        response = self.client.post("/contracts/upload/step2/remove/", {"index": "0"})
+        self.assertRedirects(response, "/contracts/upload/step2/")
+
+        pending_after = get_pending_files(self.client.session, "contracts_pending_upload")
+        self.assertEqual([p["original_name"] for p in pending_after], ["b.pdf"])
+        self.assertFalse((Path(settings.MEDIA_ROOT) / "tmp_uploads" / removed_temp).exists())
+
+    def test_step2_get_renders_remove_button_and_hidden_form(self):
+        self._select_files("a.pdf", "b.pdf")
+        response = self.client.get("/contracts/upload/step2/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="btn-remove-upload"')
+        self.assertContains(response, "/contracts/upload/step2/remove/")
+
+    def test_remove_button_div_is_outside_memo_form_section(self):
+        """html5 で「削除」ボタンの div は [4]メモ欄の form-section の外へ移動
+        （documents 側と同じ。Rev1.4 追加の説明画像 image69/image70 と対応）。"""
+        self._select_files("a.pdf", "b.pdf")
+        content = self.client.get("/contracts/upload/step2/").content.decode("utf-8")
+        memo_idx = content.index("[4] メモ欄")
+        button_idx = content.index('id="btn-remove-upload"')
+        self.assertIn("</div>", content[memo_idx:button_idx])
+        self.assertLess(button_idx, content.index("storage-outer-actions"))
+
+    def test_remove_last_pending_redirects_to_step1(self):
+        self._select_files("only.pdf")
+        response = self.client.post("/contracts/upload/step2/remove/", {"index": "0"})
+        self.assertRedirects(response, "/contracts/upload/step1/")
+
+    def test_requires_contract_edit_permission(self):
+        other = Employee.objects.create_user(
+            employee_no="2", name="権限なし", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(
+            employee=other, role=PermissionRole.STAFF, contract_edit=False
+        )
+        self._select_files("a.pdf")
+        self.client.login(username="2", password="pass1234")
+        response = self.client.post("/contracts/upload/step2/remove/", {"index": "0"})
+        self.assertEqual(response.status_code, 403)

@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.test import TestCase
 
@@ -366,6 +367,20 @@ class AuthorityEditFormTests(TestCase):
         form = AuthorityEditForm()
         self.assertEqual(expected_fields, set(form.fields.keys()))
 
+    def test_multi_select_display_fields_render_as_textarea(self):
+        """簡易設計指示書 Rev1.3（権限管理!AI89「画面変更」）で、文書管理-分類-表示／
+        契約書-部門間閲覧設定／契約書-分類-表示の3欄の表示用要素が1行inputから複数行textareaに
+        変更された。共通ウィジェットPopupSelectWidgetのdisplay_multilineフラグで切り替えている。
+        """
+        form = AuthorityEditForm()
+        for name in ("doc_visible_groups", "contract_visible_departments", "contract_visible_groups"):
+            html = str(form[name])
+            self.assertIn(f'<textarea id="id_{name}_display"', html)
+            # 原本 index.html html5（Rev1.4時点）の rows="5"。
+            self.assertIn('rows="5"', html)
+            # 送信用hidden inputは従来通り残っていること。
+            self.assertIn(f'name="{name}"', html)
+
 
 class AuthorityEditViewTests(TestCase):
     """xlsx 権限管理!B156「所属長は自分の権限の変更が不可」（要再確認No.2）。"""
@@ -693,3 +708,77 @@ class AuthorityListOperationColumnPositionTests(TestCase):
         grant_idx = content.index(">権限付与<")
         self.assertLess(role_idx, operation_idx)
         self.assertLess(operation_idx, grant_idx)
+
+
+class AuthorityListEditButtonStyleTests(TestCase):
+    """簡易設計指示書 Rev1.3（権限管理!AI10「画面変更」、埋め込みスクショの差し替えのみ）で、
+    権限管理一覧の行内「編集」ボタンだけ背景がピンク(#FFCCFF)に変更された。CSSは
+    `.data-table-auth td .btn-edit-auth`（style.css）で当てるため、テンプレート側でこの
+    クラスが付いていることを検証する。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_edit_button_has_btn_edit_auth_class(self):
+        response = self.client.get("/permissions/")
+        self.assertContains(response, 'class="btn-edit-auth"')
+
+    def test_style_css_defines_pink_background_for_edit_button(self):
+        """CSS側の定義漏れ防止（テンプレートのクラス付与とセットで初めて色が付くため）。"""
+        css_path = settings.BASE_DIR / "static" / "css" / "style.css"
+        css = css_path.read_text(encoding="utf-8")
+        self.assertIn(".data-table-auth td .btn-edit-auth", css)
+        self.assertIn("#FFCCFF", css)
+
+
+class AuthorityListOperationColumnStickyTests(TestCase):
+    """簡易設計指示書 Rev1.3（権限管理!AI10「画面変更」、モックのスクショが一次情報源）で、
+    「操作」列も横スクロール追従の固定列に変更された（html5 で index.html にも反映）。
+    テンプレートで sticky-col/col-6・sticky-col-td/col-td-6 のクラスが付き、style.css に
+    対応する left 指定があること、common.js の固定列 left 再計算ループが col-6 まで
+    回ることを検証する（style.css の固定値 382px は実データの1〜5列合計幅とズレて「操作」列が
+    権限付与の列に重なるため、JS 側で実測値に補正する必要がある）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_operation_header_and_cell_have_sticky_col_6_classes(self):
+        response = self.client.get("/permissions/")
+        content = response.content.decode("utf-8")
+        self.assertIn('class="sticky-col col-6">操作</th>', content)
+        self.assertIn('class="sticky-col-td col-td-6"', content)
+
+    def test_style_css_defines_left_offset_for_col_6(self):
+        css_path = settings.BASE_DIR / "static" / "css" / "style.css"
+        css = css_path.read_text(encoding="utf-8")
+        self.assertIn(".col-6 { left: 382px;", css)
+        self.assertIn(".col-td-6 { left: 382px;", css)
+
+    def test_common_js_recalculates_sticky_left_through_col_6(self):
+        """common.js の fixAuthorityStickyOffsets が col-6（操作）まで回っていること。
+        col-5 までしか回さないと、CSS の固定値 382px のままになり「操作」列が権限付与の
+        列に約44px重なる（実データの1〜5列合計幅は約282px）。"""
+        js_path = settings.BASE_DIR / "static" / "js" / "common.js"
+        js = js_path.read_text(encoding="utf-8")
+        self.assertIn("function fixAuthorityStickyOffsets()", js)
+        self.assertIn("for (let i = 1; i <= 6; i++)", js)
+        self.assertNotIn("for (let i = 1; i <= 5; i++)", js)
+

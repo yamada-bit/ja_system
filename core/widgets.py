@@ -23,11 +23,17 @@ class PopupSelectWidget(Widget):
 
     def __init__(
         self, *, popup_type, mode, api_url, queryset=None, label_func=str, attrs=None, multi=False, extra_query=None,
-        display_attrs=None,
+        display_attrs=None, display_multiline=False,
     ):
         self.popup_type = popup_type
         self.mode = mode
         self.api_url = api_url
+        # display_multiline: 表示用要素を1行の<input type="text">ではなく複数行の<textarea>で描画する。
+        # 原本の大半のpopup-selectは1行inputだが、権限管理編集（簡易設計指示書 Rev1.3 権限管理!AI89
+        # 「画面変更」、埋め込みスクショが唯一の一次情報源）では文書管理-分類-表示／契約書-部門間閲覧設定／
+        # 契約書-分類-表示の3欄が、選択した分類・部署がカンマ区切りで長くなっても全件見えるよう
+        # 複数行のtextareaに変更された。共通ウィジェットのためフラグで切り替え、他画面の見た目は変えない。
+        self.display_multiline = display_multiline
         # display_attrs: 表示用inputのHTML属性文字列を個別上書きする。mode="search"は本来
         # JS側の選択方式（チェックボックス複数選択）を切り替えるためのフラグであり、CSS幅とは
         # 無関係の概念。しかし原本では大半のsearch系popup-selectが250px固定だったため、当初は
@@ -142,9 +148,22 @@ class PopupSelectWidget(Widget):
                 f" <button type=\"button\" onclick=\"openPopupPopup(this, '{escape(self.popup_type)}', "
                 f"'{escape(self.mode)}', '{escape(api_url)}')\">選択</button>"
             )
+        if self.display_multiline:
+            # textareaは値を属性ではなくタグ内容として持つ。原本 index.html html5（Rev1.3で画面変更、
+            # Rev1.4時点のマークアップ）では rows="5" ＋リサイズ可（ブラウザ既定のresize）。
+            # 選択ボタンを上端に揃えるvertical-align:top等は呼び出し側のdisplay_attrsに含める
+            # （ここでstyle属性を二重に出さない）。
+            display_html = (
+                f'<textarea id="{escape(display_id)}" rows="5" {display_attrs} '
+                f'placeholder="選択ボタンより選択" readonly>{escape(display_value)}</textarea>'
+            )
+        else:
+            display_html = (
+                f'<input type="text" id="{escape(display_id)}" {display_attrs} '
+                f'value="{escape(display_value)}" placeholder="選択ボタンより選択" readonly>'
+            )
         html = (
-            f'<input type="text" id="{escape(display_id)}" {display_attrs} '
-            f'value="{escape(display_value)}" placeholder="選択ボタンより選択" readonly>'
+            f"{display_html}"
             f"<input{flatatt(hidden_attrs)}>"
             f"{button_html}"
         )

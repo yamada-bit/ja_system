@@ -66,5 +66,38 @@ def set_bulk_edit_index(session, session_key, index):
         session[session_key] = state
 
 
+def remove_bulk_edit_pk(session, session_key, pk):
+    """一括編集ウィザードの巡回中に、表示中の1件を対象から外して次へ進む
+    （保管画面２〈edit.html〉の削除ボタンから、対象レコードを論理削除した直後に呼ぶ。
+    2026-08-27ユーザー確定：一括編集中の削除は「その1件を対象から外して次のレコードへ進む」）。
+
+    `state["pks"]` から `pk` を除去し、`index` を新しい長さの範囲内へ収める（除去位置が
+    現在位置より前なら1つ前へずらし、末尾を削除した場合は最後の要素を指すよう詰める）。
+    対象が0件になったら `clear_bulk_edit_state` して `None` を返す。stateが無い場合も `None`。
+    それ以外は更新後のstate（dict）を返す。
+    """
+    state = session.get(session_key)
+    if state is None or pk not in state["pks"]:
+        return None
+
+    removed_at = state["pks"].index(pk)
+    state["pks"].remove(pk)
+    if not state["pks"]:
+        clear_bulk_edit_state(session, session_key)
+        return None
+
+    index = state["index"]
+    # 除去したのが現在位置より前なら、見かけ上の並びを保つため index を1つ詰める。
+    # 現在位置そのもの／後ろを除去した場合は index を動かさず、末尾を超えたらクランプする
+    # （＝現在位置の要素を消したときは「次のレコード」が繰り上がって同じ index に来る）。
+    if removed_at < index:
+        index -= 1
+    index = min(index, len(state["pks"]) - 1)
+    state["index"] = index
+    session[session_key] = state
+    session.modified = True
+    return state
+
+
 def clear_bulk_edit_state(session, session_key):
     session.pop(session_key, None)

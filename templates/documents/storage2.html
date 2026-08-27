@@ -120,9 +120,16 @@
             <div class="form-section">
               <h4>[4] メモ欄</h4>
               {{ form.memo }}
-              <div style="text-align: right; margin-top: 10px;">
-                <button type="button" style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;" onclick="clearMemo()">削除</button>
-              </div>
+            </div>
+            {# 原本HTMLでは onclick 未設定の死んだモックだったが、xlsx 保管!B197-198「誤って #}
+            {# アップロードした文書、不要な文書を削除する。(本登録から除外する)」に基づき、 #}
+            {# 2026-08-27ユーザー確定で「表示中のファイルのアップロード取り消し（他のファイルは #}
+            {# 登録処理を続行）」に変更した。まだDBレコードは無いため論理削除ではなく、セッションの #}
+            {# 保留ファイル一覧から1件外すだけ（documents:upload_step2_remove）。 #}
+            {# html5 で「削除」ボタンの div を [4]メモ欄ボックスの外（スクロール領域末尾）へ移動 #}
+            {# （Rev1.4 で追加された説明画像 image69/image70 がこの配置を示している）。 #}
+            <div style="text-align: right; margin-top: 10px;">
+              <button type="button" id="btn-remove-upload" style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;">削除</button>
             </div>
           </div>
 
@@ -130,6 +137,12 @@
             <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
             <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:upload_step1' %}'">キャンセル</button>
           </div>
+        </form>
+        {# [4]メモ欄「削除」ボタン（アップロード取り消し）専用フォーム。メインフォームの外に置き、 #}
+        {# JS がページャーの現在位置（activeDocIndex）を index に詰めて submit する。 #}
+        <form method="post" action="{% url 'documents:upload_step2_remove' %}" id="remove-upload-form">
+          {% csrf_token %}
+          <input type="hidden" name="index" id="remove-upload-index">
         </form>
       </div>
     </div>
@@ -198,6 +211,15 @@
       if (activeDocIndex >= fileNames.length) activeDocIndex = fileNames.length - 1;
       setupActiveDoc();
     };
+
+    // [4]メモ欄「削除」ボタン＝表示中ファイルのアップロード取り消し。サーバー往復が必要なため
+    // （セッションの保留ファイル一覧を書き換える）、入力途中の他項目は破棄される旨を確認する。
+    document.getElementById('btn-remove-upload').addEventListener('click', function () {
+      if (!confirm('「' + fileNames[activeDocIndex] + '」のアップロードを取り消します。'
+          + '入力中の内容は破棄されます。よろしいですか？')) return;
+      document.getElementById('remove-upload-index').value = activeDocIndex;
+      document.getElementById('remove-upload-form').submit();
+    });
 
     setupActiveDoc();
   })();

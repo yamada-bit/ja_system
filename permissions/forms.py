@@ -52,6 +52,9 @@ class AuthorityEditForm(forms.ModelForm):
         fields = ["role"] + _FLAG_FIELDS + _MULTI_FIELDS
         labels = {"role": "システム権限"}
         widgets = {
+            # 簡易設計指示書 Rev1.3（権限管理!AI89「画面変更」）で、この3欄の表示用要素が1行inputから
+            # 複数行textareaに変更された（選択した分類・部署がカンマ区切りで長くなっても全件見えるように）。
+            # display_multiline=True＋vertical-align:topで「選択」ボタンをtextarea上端に揃える。
             "doc_visible_groups": PopupSelectWidget(
                 popup_type="group",
                 mode="search",
@@ -60,7 +63,8 @@ class AuthorityEditForm(forms.ModelForm):
                 queryset=Group.objects.filter(doc_kbn=DocKbn.DOCUMENT, is_deleted=False),
                 label_func=lambda g: g.name,
                 multi=True,
-                display_attrs='style="width:200px; display:inline-block;"',
+                display_multiline=True,
+                display_attrs='style="width:200px; display:inline-block; vertical-align:top;"',
             ),
             "contract_visible_departments": PopupSelectWidget(
                 popup_type="dept",
@@ -68,7 +72,8 @@ class AuthorityEditForm(forms.ModelForm):
                 api_url=API_OPTIONS_URL,
                 queryset=Department.objects.all(),
                 multi=True,
-                display_attrs='style="width:200px; display:inline-block;"',
+                display_multiline=True,
+                display_attrs='style="width:200px; display:inline-block; vertical-align:top;"',
             ),
             "contract_visible_groups": PopupSelectWidget(
                 popup_type="group",
@@ -78,7 +83,8 @@ class AuthorityEditForm(forms.ModelForm):
                 queryset=Group.objects.filter(doc_kbn=DocKbn.CONTRACT, is_deleted=False),
                 label_func=lambda g: g.name,
                 multi=True,
-                display_attrs='style="width:200px; display:inline-block;"',
+                display_multiline=True,
+                display_attrs='style="width:200px; display:inline-block; vertical-align:top;"',
             ),
         }
 

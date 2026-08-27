@@ -240,8 +240,20 @@ button:disabled {
   font-size: 15px;
   margin-bottom: 10px;
 }
+/* お知らせの文書列／契約書列を左右に等幅で並べる（原本 index.html html5, style.css を移植。
+   簡易設計指示書 Rev1.2 の埋め込み画像モックが左右2ブロック構成だったのに対応。旧実装は
+   ul へインライン style で flex:1 を当てていたが、html5 に合わせ notice-columns>div に寄せた）。 */
+.notice-columns {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+}
+.notice-columns > div {
+  flex: 1;
+}
 .notice-area ul {
   padding-left: 20px;
+  margin: 0;
 }
 .notice-area li {
   margin-bottom: 5px;
@@ -854,6 +866,13 @@ textarea {
   text-align: center;
   background-color: #FCFCFC;
 }
+/* 簡易設計指示書 Rev1.3（権限管理一覧のモック差し替え、権限管理!AI10「画面変更」）で、
+   この一覧の行内「編集」ボタンだけ背景がピンク(#FFCCFF)に変更された。他の一覧画面
+   （職員マスタ・部署管理等）の編集ボタンはRev1.3でモック差し替えが無く従来どおりの
+   ため、この画面限定のスタイルにとどめる。ボーダー・角丸はブラウザ既定のまま。 */
+.data-table-auth td .btn-edit-auth {
+  background-color: #FFCCFF;
+}
 /* 複数行theadの各行ごとに上からの固定位置（top）を正確に指定する */
 .data-table-auth thead tr:nth-child(1) th {
 	position: sticky;
@@ -941,7 +960,11 @@ textarea {
 .col-2 { left: 60px; z-index: 200 !important;  }   /* 1列目の幅に合わせて調整 */
 .col-3 { left: 160px; z-index: 200 !important;  }  /* 1〜2列目の合計幅 */
 .col-4 { left: 238px; z-index: 200 !important;  }  /* 1〜3列目の合計幅 */
-.col-5 { left: 338px; z-index: 200 !important; } /* 1〜4列目の合計幅。一番右側に影や線をつけると綺麗です */
+.col-5 { left: 338px; z-index: 200 !important; } /* 1〜4列目の合計幅 */
+/* 簡易設計指示書 Rev1.3（権限管理!AI10「画面変更」）で「操作」列も固定列に変更された
+   （html5 で index.html にも反映）。col-5（権限）の右端 338px + 権限列の幅 44px = 382px。
+   影・線は従来どおり nth-of-type(5) 側に付けたまま（原本 style.css もこの箇所は変更なし）。 */
+.col-6 { left: 382px; z-index: 200 !important; }
 
 /* すべての固定列に共通する基本設定 */
 .sticky-col-td {
@@ -954,7 +977,8 @@ textarea {
 .col-td-2 { left: 60px; }   /* 1列目の幅に合わせて調整 */
 .col-td-3 { left: 160px; }  /* 1〜2列目の合計幅 */
 .col-td-4 { left: 238px; }  /* 1〜3列目の合計幅 */
-.col-td-5 { left: 338px; } /* 1〜4列目の合計幅。一番右側に影や線をつけると綺麗です */
+.col-td-5 { left: 338px; } /* 1〜4列目の合計幅 */
+.col-td-6 { left: 382px; } /* Rev1.3で追加された「操作」列（.col-6と対）。上のコメント参照 */
 
 .master-detail-box {
   background-color: var(--panel-bg);

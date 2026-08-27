@@ -23,7 +23,14 @@ from contracts.services import (
     parse_remove_related_ids,
     scoped_get_object_or_404,
 )
-from core import bulk_edit_services, record_views, search_services, upload_services, upload_views
+from core import (
+    bulk_edit_services,
+    deletion_services,
+    record_views,
+    search_services,
+    upload_services,
+    upload_views,
+)
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
 from core.text_extraction_services import try_immediate_text_layer_extraction
@@ -300,6 +307,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                 "title_field": form["title_0"],
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
+                **_edit_delete_context(self.object),
             },
         )
 
@@ -323,6 +331,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                     "title_field": form["title_0"],
                     "preview_kind": get_preview_kind(self.object.display_name),
                     "can_download": can_download(request.user, kind="contract"),
+                    **_edit_delete_context(self.object),
                 },
             )
 
@@ -370,6 +379,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                 "complete": {"created": [contract], "mode": "update"},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
+                **_edit_delete_context(self.object),
             },
         )
 
@@ -405,8 +415,10 @@ class BulkEditStartView(RequiresContractEditMixin, View):
 
     def post(self, request):
         pks = request.POST.getlist("pks")
+        # 文言は原本html4のstartBulkEdit（alert("編集するデータが選択されていません。")）に合わせる
+        # （B599「文書管理と同じ」。2026-08-27、原本フィデリティ監査）。
         if not pks:
-            messages.error(request, "編集する契約書を選択してください。")
+            messages.error(request, "編集するデータが選択されていません。")
             return redirect("contracts:search")
 
         # pks検証・部署スコープ絞り込みの実体はcore.bulk_edit_services.resolve_ordered_pksに
@@ -415,7 +427,7 @@ class BulkEditStartView(RequiresContractEditMixin, View):
             pks, model=Contract, dept_ids_resolver=contract_searchable_department_ids, employee=request.user
         )
         if not ordered_pks:
-            messages.error(request, "編集する契約書を選択してください。")
+            messages.error(request, "編集するデータが選択されていません。")
             return redirect("contracts:search")
 
         bulk_edit_services.start_bulk_edit(request.session, BULK_EDIT_SESSION_KEY, ordered_pks)
@@ -509,15 +521,25 @@ class BulkEditView(RequiresContractEditMixin, View):
             event_message=f"契約書「{contract.title}」を更新しました。",
         )
 
+        # 原本html4の一括編集は、レコード間の移動をページャー ＜ ＞（changeActiveDoc）だけで行い、
+        # 「更新」ボタン（startUpdateMock）を押した時点で、現在何件目を表示していても選択全件を
+        # 確定して完了ポップアップに一覧表示する（「次へ」ボタンは原本に存在しない）。本実装は
+        # ModelChoiceFieldをセッションに載せられないため各移動で表示中の1件を都度保存する
+        # save-as-you-go方式だが、「どのページで更新を押しても即全件確定」という原本の挙動自体は
+        # 踏襲する（2026-08-27、原本フィデリティ監査での指摘を受けて修正。documents側と同一）。
         total = len(state["pks"])
         index = state["index"]
-        if request.POST.get("bulk_nav") == "prev" and index > 0:
-            bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index - 1)
+        nav = request.POST.get("bulk_nav")
+        if nav == "prev":
+            if index > 0:
+                bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index - 1)
             return redirect("contracts:bulk_edit")
-        if index < total - 1:
-            bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index + 1)
+        if nav == "next":
+            if index < total - 1:
+                bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index + 1)
             return redirect("contracts:bulk_edit")
 
+        # 「更新」ボタン（bulk_navなし）：現在ページの1件を保存済みの状態で選択全件を確定する。
         edited_contracts_by_pk = {c.pk: c for c in Contract.objects.filter(pk__in=state["pks"])}
         edited_contracts = [edited_contracts_by_pk[pk] for pk in state["pks"] if pk in edited_contracts_by_pk]
         bulk_edit_services.clear_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
@@ -533,6 +555,7 @@ class BulkEditView(RequiresContractEditMixin, View):
                 "complete": {"created": edited_contracts, "mode": "update"},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
+                **_edit_delete_context(self.object),
             },
         )
 
@@ -552,6 +575,7 @@ class BulkEditView(RequiresContractEditMixin, View):
                 "has_prev": index > 0,
                 "has_next": index < total - 1,
             },
+            **_edit_delete_context(self.object),
         }
 
     def _build_form(self, data=None):
@@ -706,6 +730,31 @@ class DeleteView(LoginRequiredMixin, record_views.BaseDeleteView):
         return None
 
 
+class EditDeleteView(DeleteView):
+    """保管画面２（編集・edit.html）の[4]メモ欄直下「削除」ボタン。documents.views.EditDeleteViewと
+    同じ設計（削除自体はDeleteView＝BaseDeleteViewと同一、監査ログのaction名と削除後の遷移先
+    だけが違う）。契約書側はDeleteView継承でextra_permission_check（can_edit_contract）を
+    引き継ぐ。2026-08-27ユーザー確定でメモ欄クリアからレコードの論理削除に変更
+    （HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節参照）。
+    """
+
+    audit_action = "保管画面２ 削除"
+    bulk_edit_session_key = BULK_EDIT_SESSION_KEY
+    bulk_edit_url_name = "contracts:bulk_edit"
+
+    def _post_delete_redirect(self, request, obj, success_message):
+        messages.success(request, success_message)
+        # from_bulkは一括編集ウィザード（BulkEditView）が描画したedit.htmlの削除フォームにのみ
+        # 埋まる（documents.views.EditDeleteViewと同じ理由）。
+        if request.POST.get("from_bulk"):
+            new_state = bulk_edit_services.remove_bulk_edit_pk(
+                request.session, self.bulk_edit_session_key, obj.pk
+            )
+            if new_state is not None:
+                return redirect(self.bulk_edit_url_name)
+        return redirect(self.search_url_name)
+
+
 def _strip_ext(filename):
     return filename.rsplit(".", 1)[0] if "." in filename else filename
 
@@ -714,6 +763,16 @@ def _pending_preview_context(request, pending):
     return upload_views.build_pending_preview_context(
         request, pending, kind="contract", preview_url_name="contracts:upload_step2_preview"
     )
+
+
+def _edit_delete_context(obj):
+    """edit.htmlの[4]メモ欄直下「削除」ボタン（EditDeleteView）用。documents.views._edit_delete_context
+    と同じ（can_delete=Falseならテンプレートでボタンごと非表示。xlsx 保管!B581「初回登録から
+    1週間以上経過・削除済みはボタンを非表示」）。"""
+    return {
+        "can_delete": deletion_services.can_delete(obj),
+        "delete_action_url": reverse("contracts:edit_delete", args=[obj.pk]),
+    }
 
 
 class PendingPreviewView(RequiresContractEditMixin, upload_views.BasePendingPreviewView):
@@ -726,3 +785,14 @@ class PendingPreviewView(RequiresContractEditMixin, upload_views.BasePendingPrev
 
     pending_session_key = PENDING_SESSION_KEY
     kind = "contract"
+
+
+class UploadStep2RemoveView(RequiresContractEditMixin, upload_views.BaseUploadStep2RemoveView):
+    """保管画面２（登録）の「削除」ボタン。表示中の1ファイルだけをアップロード取り消しする。
+    実体はcore.upload_views.BaseUploadStep2RemoveViewに集約（documents側と対称）。保管フローの
+    一部のためRequiresContractEditMixinを適用する。"""
+
+    pending_session_key = PENDING_SESSION_KEY
+    step1_url_name = "contracts:upload_step1"
+    step2_url_name = "contracts:upload_step2"
+    entity_label = "契約書"
