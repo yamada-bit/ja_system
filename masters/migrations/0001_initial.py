@@ -18,7 +18,6 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('session_idle_timeout_minutes', models.PositiveIntegerField(default=60, verbose_name='自動ログアウト時間(分)')),
-                ('retention_permanent_years', models.PositiveIntegerField(default=50, help_text='保存期間「永年」の有効期限を計算する際に使う実際の年数（xlsx 保存期間設定!B74）', verbose_name='「永年」の実年数')),
                 ('audit_log_retention_months', models.PositiveIntegerField(default=3, help_text='CSV出力の最大対象期間でもある（xlsx 操作履歴ログ!B48-49）', verbose_name='操作履歴ログ最大保存期間(ヵ月)')),
             ],
             options={

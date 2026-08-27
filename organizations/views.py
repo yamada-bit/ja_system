@@ -55,7 +55,10 @@ class DeptListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 # accounts.views.StaffListViewの検索パネルと同じ連動プルダウン
                 # （xlsx 部署管理!B38相当。本支所選択時に部課プルダウン内容を動的に更新する）。
                 # 一覧本体の"departments"（Departmentのqueryset）とキーが衝突しないよう別名にする。
-                "departments_pulldown": departments_list(),
+                # exclude_retired=True：検索パネルの部課プルダウンから退職(99)を除外する
+                # （xlsx 部署管理!B45）。section_choices()による初期表示分だけでなく、本支所選択時の
+                # JS再構築分にも適用する必要がある（organizations.services.departments_list参照）。
+                "departments_pulldown": departments_list(exclude_retired=True),
             },
         )
 

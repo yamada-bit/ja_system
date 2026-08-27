@@ -544,6 +544,29 @@ class DepartmentsListTests(TestCase):
         self.assertEqual(data[0]["branch_code"], "000")
         self.assertEqual(data[0]["section_name"], "総務部")
 
+    def test_exclude_retired_true_omits_section_code_99(self):
+        # フル監査で発見（2026-08-27）：本支所選択時のJS再構築（departments_pulldown）が
+        # section_choices()と異なり退職(99)を除外していなかった不具合の回帰テスト
+        # （xlsx 部署管理!B45・職員マスタ!B41）。
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="99", section_name="退職"
+        )
+        data = departments_list(exclude_retired=True)
+        section_codes = [d["section_code"] for d in data]
+        self.assertIn("01", section_codes)
+        self.assertNotIn("99", section_codes)
+
+    def test_exclude_retired_false_keeps_section_code_99(self):
+        # 職員マスタ登録/編集画面の部署欄は退職への変更を許容するため除外しない。
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="99", section_name="退職"
+        )
+        data = departments_list(exclude_retired=False)
+        self.assertIn("99", [d["section_code"] for d in data])
+
 
 class DeptListViewSearchTests(TestCase):
     """screen-dept-listの検索フィルタ・ソート（xlsx 部署管理!B53-56）。"""
@@ -576,6 +599,17 @@ class DeptListViewSearchTests(TestCase):
         response = self.client.get("/organizations/", {"sort": "branch_code", "dir": "desc"})
         departments = list(response.context["departments"])
         self.assertEqual(departments[0].branch_code, "999")
+
+    def test_departments_pulldown_excludes_retired_section(self):
+        # xlsx 部署管理!B45「(但し部課コード99の退職者は対象外)」がビュー経由でも
+        # 効いていることの確認（organizations.services.departments_listのユニットテストとは別に、
+        # DeptListView側の呼び出しでexclude_retired=Trueが実際に渡っていることを保証する）。
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="99", section_name="退職"
+        )
+        response = self.client.get("/organizations/")
+        section_codes = [d["section_code"] for d in response.context["departments_pulldown"]]
+        self.assertNotIn("99", section_codes)
 
     def test_filter_by_branch_code_and_section_code_combined(self):
         """xlsx 部署管理!B53-56の絞り込みは本支所コード・部課コードを同時指定した場合AND条件で

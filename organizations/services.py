@@ -94,7 +94,7 @@ def department_composite_order_by(qs, sort_dir, tiebreaker):
     return qs.order_by(f"{prefix}department__branch_code", f"{prefix}department__section_code", tiebreaker)
 
 
-def departments_list():
+def departments_list(exclude_retired=False):
     """本支所→部課の連動プルダウン用データ（テンプレートのJSでフィルタする）。
     accounts（職員マスタ登録・編集・一覧検索）とorganizations（部署管理一覧検索）の両方で
     同じ連動プルダウンJSを使うため、Department自体が属するこのモジュールに集約する。
@@ -103,7 +103,18 @@ def departments_list():
     エスケープはDjango側に一元化する。branch_name/section_nameはフリーテキストのため、
     ここで`json.dumps`して`|safe`で埋め込むと`</script>`インジェクションの格納型XSSになる
     ——過去に発見・修正した問題。詳細はCLAUDE.md原本フィデリティ運用方針参照）。
+
+    `exclude_retired=True`は検索パネル用途（xlsx 職員マスタ!B41・部署管理!B45「(但し部課コード99の
+    退職者は対象外)」）。section_choices()は初期表示（サーバー側レンダリング）の選択肢からは
+    既に退職を除外していたが、本支所プルダウン変更時にJS側がこの関数のデータで部課プルダウンを
+    総入れ替えする際には除外されておらず、本支所を選択し直すと「退職」が選択肢に復活していた
+    （フル監査で発見、2026-08-27修正）。職員マスタ登録/編集画面の部署欄（退職者への変更を含む
+    実際の所属設定用途、accounts.csv_import_servicesのis_retiring_now判定と同じ考え方）は
+    従来通り除外しない。
     """
+    qs = Department.objects.order_by("branch_code", "section_code")
+    if exclude_retired:
+        qs = qs.exclude(section_code=RETIRED_SECTION_CODE)
     return [
         {
             "id": d.pk,
@@ -112,5 +123,5 @@ def departments_list():
             "section_code": d.section_code,
             "section_name": d.section_name,
         }
-        for d in Department.objects.order_by("branch_code", "section_code")
+        for d in qs
     ]

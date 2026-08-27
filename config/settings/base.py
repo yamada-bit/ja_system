@@ -170,6 +170,13 @@ NOTICE_DELETED_THRESHOLD_MONTHS = env.int("NOTICE_DELETED_THRESHOLD_MONTHS", def
 # xlsx要件を実質満たせていなかったため.env経由の設定値に移行した（2026-08-13ユーザー指示）。
 CONTRACT_RETENTION_YEARS = env.int("CONTRACT_RETENTION_YEARS", default=10)
 
+# 保存期間設定マスタで「永年」を選択した場合の実年数（xlsx 保存期間設定!B74「「永年」設定値は
+# 初期値を50年とし、設定ファイル等で定義し、先方より変更依頼を受けた際に容易に変更できること」）。
+# 既定50年。CONTRACT_RETENTION_YEARSと同じ理由（masters.SystemSettingにDB編集用の管理画面・
+# Django管理サイトが無く、変更経路が実質DB直接操作しかなかった）で.env経由の設定値に移行した
+# （2026-08-27フィデリティ監査で発見・修正）。
+RETENTION_PERMANENT_YEARS = env.int("RETENTION_PERMANENT_YEARS", default=50)
+
 # スキャンPDF（画像PDF）のOCR（Google Cloud Vision）を有効化するかどうか。ja_pj_oldでは
 # コンプライアンス部門の未承認事項として既定Falseだったが、新ja_pjでは承認済みの前提のため
 # 既定True（2026-08-10ユーザー指示）。Falseにすると、テキスト層の無いPDFはextracted_textが

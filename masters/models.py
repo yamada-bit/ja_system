@@ -167,16 +167,12 @@ class SystemSetting(models.Model):
     """
 
     session_idle_timeout_minutes = models.PositiveIntegerField("自動ログアウト時間(分)", default=60)
-    # 「お知らせ」しきい値(notice_threshold_months)・契約書保存期限(contract_retention_years)は
-    # 2026-08-13、settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/NOTICE_DELETED_THRESHOLD_MONTHS/
-    # CONTRACT_RETENTION_YEARS（.env経由）へ移行し、このモデルから削除した。DB編集用の管理画面・
-    # Django管理サイトが無く、値を変更する経路が実質DB直接操作しか無かったため
-    # （config/settings/base.py参照）。
-    retention_permanent_years = models.PositiveIntegerField(
-        "「永年」の実年数",
-        default=50,
-        help_text="保存期間「永年」の有効期限を計算する際に使う実際の年数（xlsx 保存期間設定!B74）",
-    )
+    # 「お知らせ」しきい値(notice_threshold_months)・契約書保存期限(contract_retention_years)・
+    # 「永年」の実年数(retention_permanent_years)は、settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/
+    # NOTICE_DELETED_THRESHOLD_MONTHS/CONTRACT_RETENTION_YEARS/RETENTION_PERMANENT_YEARS
+    # （.env経由）へ順次移行し、このモデルから削除した（2026-08-13、retention_permanent_years
+    # のみ2026-08-27フィデリティ監査で発見・追随)。DB編集用の管理画面・Django管理サイトが無く、
+    # 値を変更する経路が実質DB直接操作しか無かったため（config/settings/base.py参照）。
     audit_log_retention_months = models.PositiveIntegerField(
         "操作履歴ログ最大保存期間(ヵ月)",
         default=3,

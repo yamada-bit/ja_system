@@ -1,10 +1,11 @@
 import datetime
 
+from django.conf import settings
 from django.db.models import Case, F, IntegerField, Value, When
 from django.utils import timezone
 
 from core import deletion_services, scoping_services, zip_services
-from masters.models import RetentionPeriod, RetentionPeriodUnit, SystemSetting
+from masters.models import RetentionPeriod, RetentionPeriodUnit
 from organizations.services import visible_department_ids
 from permissions.services import can_select_department
 
@@ -145,13 +146,11 @@ def expiry_date_previews(retention_periods) -> dict[str, str]:
 
 def calculate_expiry_date(save_date: datetime.date, retention_period) -> datetime.date:
     """保存日+保存期間から保存満了日を計算する（HTML確定版の`calculateExpiryDate()`に相当）。
-    「永年」は`masters.SystemSetting.retention_permanent_years`（既定50年、xlsx 保存期間設定!B74）
-    を実年数として使う。
+    「永年」は`settings.RETENTION_PERMANENT_YEARS`（既定50年、xlsx 保存期間設定!B74）を実年数として
+    使う（config/settings/base.py参照。CONTRACT_RETENTION_YEARSと同じ理由で.env経由に統一）。
     """
     if retention_period.period_unit == RetentionPeriodUnit.PERMANENT:
-        setting = SystemSetting.objects.first()
-        years = setting.retention_permanent_years if setting else 50
-        return _add_years(save_date, years)
+        return _add_years(save_date, settings.RETENTION_PERMANENT_YEARS)
     if retention_period.period_unit == RetentionPeriodUnit.YEAR:
         return _add_years(save_date, retention_period.period_value)
     # MONTH
