@@ -6,7 +6,6 @@ from django import forms
 from django.urls import reverse_lazy
 
 from core.forms import (
-    MATCH_AND,
     MATCH_CHOICES,
     MATCH_OR,
     apply_radio_defaults,

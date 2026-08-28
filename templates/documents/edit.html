@@ -171,6 +171,9 @@
     {% include "documents/_complete_modal.html" %}
   </div>
   {{ expiry_previews|json_script:"expiry-previews" }}
+  <span id="expiry-edit-config"
+        data-original-retention="{{ document.retention_period_id }}"
+        data-current-expiry="{{ document.expiry_date|date:'Y-m-d' }}"></span>
 {% endblock %}
 
 {% block extra_script %}
@@ -178,11 +181,18 @@
   // 原本index.html:832-850 calculateExpiryDate()の移植（documents/storage2.htmlと同一ロジック。
   // 2026-08-20ユーザー確認：保存満了日＝保存した日+保存期間であり「年」欄は計算に関与しない。
   // documents/storage2.html extra_scriptのコメント参照）。
+  //
+  // ただし編集画面では、保存満了日は「保存期間を変更した時だけ」今日基準で引き直す
+  // （2026-08-28ユーザー確定、レビュー指摘C-1。documents.services.apply_document_edit参照）。
+  // そのため保存期間が現在値のままの場合は、今日+保存期間ではなく既に保存済みの満了日を表示し、
+  // 保存後の実際の値と表示が食い違わないようにする。
   window.calculateExpiryDate = function () {
     const periodSelect = document.getElementById('storage-period');
     const span = document.getElementById('expiry-date-calc');
     const previews = JSON.parse(document.getElementById('expiry-previews').textContent);
-    const iso = previews[periodSelect.value];
+    const cfg = document.getElementById('expiry-edit-config');
+    const unchanged = cfg && String(periodSelect.value) === cfg.dataset.originalRetention;
+    const iso = unchanged ? cfg.dataset.currentExpiry : previews[periodSelect.value];
     if (!iso) {
       span.textContent = '';
       return;

@@ -2,9 +2,9 @@ import logging
 
 from django.utils import timezone
 
-from contracts.forms import MATCH_AND
 from contracts.models import Contract
 from core import search_services
+from core.forms import MATCH_AND
 from permissions.services import contract_searchable_department_ids
 
 logger = logging.getLogger(__name__)

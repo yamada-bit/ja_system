@@ -1,0 +1,366 @@
+documents / contracts アプリ コードレビュー（/code-review high）
+=================================================================
+対象      : documents/（models,views,api,services,search_services,forms,storage_paths,urls）
+            contracts/（同上 ＋ RelatedFile）
+            および両アプリが委譲している core 側の共通実装
+            （core/record_views.py, core/zip_services.py, core/bulk_edit_services.py,
+             core/upload_views.py, core/upload_services.py, core/scoping_services.py,
+             core/deletion_services.py, core/models.py, core/forms.py）
+実施日    : 2026-08-28
+方針      : 修正は行わず、指摘一覧と優先度（高/中/低）のみ。
+            documents/contracts は並行構成のため、同種の指摘は1件にまとめて両者の該当箇所を併記。
+            CLAUDE.md コーディング規約（CBVのみ・例外処理・ログ整備・共通処理のcore集約等）との
+            整合性も確認対象に含めた。
+
+総評
+----
+- 認証・認可バイパスや即時のデータ損失に直結する「高」は検出されなかった。
+- 「中」は3件。いずれも「編集経路」に集中している（新規登録・検索・単体ダウンロードは堅い）：
+  保存満了日の再計算の非整合(C-1)、契約書編集失敗時の孤児ファイル(C-2)、一括ダウンロードの
+  例外捕捉漏れ(C-3)。
+- 一括編集のステージング型改修（commit 9358b6d）自体はテストカバレッジ良好。ただし確定パス
+  (_commit) の対象再取得にスコープ条件が無い等の細かな穴が残る(C-6)。
+
+
+==================================================================
+A. 正しさのバグ
+==================================================================
+
+────────────────────────────────────────────────────────────────
+【C-1】優先度: 中   保存満了日(expiry_date)の編集時再計算が「単体編集 / 一括編集の未変更ページ /
+                     契約書」で三者三様
+────────────────────────────────────────────────────────────────
+該当:
+  - documents/services.py:130  apply_document_edit
+      doc.expiry_date = calculate_expiry_date(timezone.localdate(), cleaned_data["retention_period"])
+  - documents/services.py:141-156  document_edit_is_dirty（コメント「保存期間が変わらない限り
+    実質不変」）
+  - contracts/services.py:59-95  apply_contract_edit … expiry_date を一切更新しない
+  - documents/views.py:472-546  BulkEditView._commit（dirtyページのみ apply_document_edit を通る）
+
+内容:
+  文書の単体編集(DocumentEditView)は、どの項目を変えても毎回
+  expiry_date = 今日 + 保存期間 で上書きする。calculate_expiry_date は「今日」基準なので、
+  登録から時間が経った文書をタイトル修正しただけでも保存満了日が経過日数ぶん先送りされる。
+  一方、一括編集の確定は dirty 判定を通ったページだけ apply_document_edit を呼ぶため、
+  「無関係な項目に触れた文書」は満了日が更新され、「一切触れていない文書」は据え置きになる。
+  契約書側(apply_contract_edit)は編集時に expiry_date を触らない。
+  → 同じ保存期間の2文書が、無関係な項目に触れたか否かだけで保存満了日が変わる。
+
+  加えて document_edit_is_dirty のコメント「保存期間が変わらない限り実質不変」は誤り
+  （今日基準の派生値なので毎日変わる）。CLAUDE.md「コメントは『なぜ』を詳しく書く」に対して
+  誤った根拠が書かれている状態。
+
+想定シナリオ:
+  - 2024-01 登録・保存期間5年（満了 2029-01）の文書のタイトル誤字を 2026-08 に修正
+    → 満了日が 2031-08 へ。メイン画面お知らせ「有効期限切れ」抽出・自動物理削除バッチの
+      対象判定がズレる。
+  - doc_retention_edit（権限管理!B172-175「保存満了日変更」）が OFF の職員でも、
+    保存期間欄は disabled で触れないが、他項目を編集するだけで満了日を先送りできてしまう。
+
+対応方針（要ユーザー確認）:
+  「編集＝再保存として満了日を今日基準で引き直す」が仕様なら、contracts と単体/一括で挙動を
+  統一し、document_edit_is_dirty の比較対象にも expiry_date（または retention_period ＋
+  基準日）を含める。仕様でないなら apply_document_edit の当該行を削除し、保存期間変更時のみ
+  引き直す。
+
+
+────────────────────────────────────────────────────────────────
+【C-2】優先度: 中   契約書編集で関連書類(RelatedFile)保存が途中失敗すると物理ファイルが孤児化
+────────────────────────────────────────────────────────────────
+該当:
+  - contracts/services.py:87-95  apply_contract_edit の with transaction.atomic():
+        RelatedFile.objects.create(contract=contract, file=related, ...)
+  - 呼び出し元: contracts/views.py:347 ContractEditView.post / contracts/views.py:618
+    BulkEditView._commit
+
+内容:
+  RelatedFile.objects.create() は生成時点でストレージへファイルを書き込む。複数追加の
+  2件目以降や本体 save() で DBError 等が発生すると、inner transaction.atomic() は
+  RelatedFile 行・Contract 行をロールバックするが、既に書き込まれた物理ファイルは残る。
+  これは documents/views.py:164-182・contracts/views.py:226-243 の「登録」経路が
+  明示的にコメント付きで対処している孤児ファイル問題と全く同型だが、編集経路（単体・一括とも）
+  では未対処。tmp_uploads と違い MEDIA_ROOT 配下の孤児は定期クリーンアップの仕組みが無い
+  （core/upload_services.py clear_pending_files docstring 参照）。
+
+想定シナリオ:
+  ContractEditView で関連書類を2件追加 → 2件目の create でストレージ書き込みエラー
+  → 例外は views 側で捕捉されリダイレクトされるが、1件目のファイル実体は MEDIA_ROOT に残存。
+  失敗のたびに蓄積。
+
+対応方針:
+  apply_contract_edit 内で新規作成した RelatedFile.file を except 節で file.delete(save=False)、
+  または作成済みファイル参照を呼び出し側へ返し「登録」経路と同じ後始末に寄せる。
+
+
+────────────────────────────────────────────────────────────────
+【C-3】優先度: 中   一括ダウンロードのZIP構築が FileNotFoundError しか捕捉せず、他の OSError で全滅
+────────────────────────────────────────────────────────────────
+該当:
+  - core/zip_services.py:24-31
+        try:
+            with obj.file.open("rb") as fh: ...
+        except FileNotFoundError:
+            ...
+  - 呼び出し元: core/record_views.py:137 BaseBulkDownloadView.post
+    （documents/contracts の BulkDownloadView 両方）
+
+内容:
+  obj.file.open("rb") では PermissionError・IsADirectoryError・その他 OSError も起こり得る。
+  これらは未捕捉のまま伝播し、一括ダウンロード全体が 500 になる。
+  単体ダウンロード側 core/record_views.py:54-60（BaseFileServeView）は OSError 全般を
+  Http404 に変換しており、明確に非整合。CLAUDE.md「ファイルI/O・外部境界は try/except で
+  具体的な例外型を捕捉」に対し、捕捉範囲が狭すぎて本処理を巻き込んでいる。
+
+想定シナリオ:
+  選択100件のうち1件がストレージ権限不整合／ディレクトリ化していると、正常な99件も
+  ダウンロードできず画面がエラー。
+
+対応方針:
+  except を FileNotFoundError → OSError に拡大（missing_count に計上、logger.exception 継続）。
+  documents/contracts 両方の一括ダウンロードに効く。
+
+
+────────────────────────────────────────────────────────────────
+【C-4】優先度: 低〜中   一括ダウンロードZIP内のファイル名がUUIDプレフィックス付き内部名
+────────────────────────────────────────────────────────────────
+該当:
+  - core/zip_services.py:26  zf.writestr(obj.file.name.rsplit("/", 1)[-1], fh.read())
+
+内容:
+  単体ダウンロードは core/record_views.py:53 で filename=obj.display_name（重複防止UUIDを
+  除いた元名）を使うのに、ZIPエントリ名は storage_paths が付けた "3f2a…c1_契約書.pdf" のまま。
+  documents/contracts 共通。
+
+想定シナリオ:
+  一括ダウンロードしたZIPを展開すると全ファイルに無意味な32桁hexが付く。
+
+対応方針:
+  zf.writestr(obj.display_name, …)。ただし display_name は文書間で重複し得るため、
+  同名衝突時に連番付与などの重複回避を併せて実装する（現状はUUID付きで偶然一意になっている
+  だけ）。
+
+
+────────────────────────────────────────────────────────────────
+【C-5】優先度: 低   契約金額0円が詳細ポップアップで空欄になる（falsy-zero）
+────────────────────────────────────────────────────────────────
+該当:
+  - contracts/api.py:79  "contract_amount": str(contract.contract_amount) if contract.contract_amount else ""
+
+内容:
+  Decimal('0') は falsy のため、契約金額0円の契約書は詳細ポップアップで金額欄が空表示になる
+  （未入力=None と区別できない）。同メソッドの contract_date 等は None 判定なので問題なし。
+
+対応方針:
+  `if contract.contract_amount is not None`。
+
+
+────────────────────────────────────────────────────────────────
+【C-6】優先度: 低   一括編集の確定パスが対象を is_deleted / 部署スコープ無しで再取得（TOCTOU）
+────────────────────────────────────────────────────────────────
+該当:
+  - documents/views.py:477  objs_by_pk = {d.pk: d for d in Document.objects.filter(pk__in=pks)}
+  - contracts/views.py:557-559  同様（prefetch_related のみ、フィルタ無し）
+
+内容:
+  ウィザードのページ移動時 _current_object は scoped_get_object_or_404 でスコープ検証するが、
+  _commit は state["pks"] を直接回して編集・論理削除する。開始～更新確定の間に対象が
+  他者に削除された／別部署へ移動された場合、_commit がそのまま再保存・再削除してしまう。
+  実害は小さいが、スコープ検証の一貫性が崩れている。
+
+対応方針:
+  objs_by_pk のクエリに is_deleted=False と許可部署ID（dept_ids_resolver の結果）を追加。
+
+
+────────────────────────────────────────────────────────────────
+【C-7】優先度: 低   対象が全件同時に物理削除されると _render_complete が IndexError（500）
+────────────────────────────────────────────────────────────────
+該当:
+  - documents/views.py:561 / contracts/views.py:660  self.object = rows[0]["obj"]
+
+内容:
+  更新確定の直前～直後に対象が全件 purge された場合 rows が空になり rows[0] で例外。
+  発生条件は極めて限定的（日次 purge バッチと更新確定の競合）。
+
+対応方針:
+  rows が空なら検索画面へ messages 付きリダイレクト。
+
+
+────────────────────────────────────────────────────────────────
+【C-8】優先度: 低   チャンク結合APIの total_chunks が無制限
+────────────────────────────────────────────────────────────────
+該当:
+  - core/upload_views.py:49  total_chunks = int(request.POST["total_chunks"])
+  - core/upload_services.py:257  chunk_paths = [chunk_dir / … for i in range(total_chunks)]
+
+内容:
+  chunk_index には UPLOAD_ID のような形式チェックが無く、total_chunks も上限が無い。
+  認証済み利用者が total_chunks に巨大値を送ると range() のリスト内包でメモリを消費し得る
+  （combine_upload_chunks 到達には全チャンク存在チェックを通る必要があるため実効性は低いが、
+  リスト生成自体は存在チェック前）。documents/contracts の upload/chunk/ 両方。
+
+対応方針:
+  total_chunks の上限を settings.CHUNK_UPLOAD_MAX_SIZE_BYTES / 1チャンクサイズ から算出して
+  検証。
+
+
+────────────────────────────────────────────────────────────────
+【C-9】優先度: 低   複数ファイル一括登録で「DB挿入に失敗したファイル」だけ孤児化
+────────────────────────────────────────────────────────────────
+該当:
+  - documents/views.py:147-163（temp_file→file.save→document.save→created.append の順）
+  - contracts/views.py:203-225（同様）
+
+内容:
+  document.file.save(name, temp_file, save=False) はストレージへ即書き込むが、
+  created.append(document) は document.save()（DB INSERT）成功後。N件目の save() が DBError の
+  場合、その file 実体は created に無いため except 節の後始末ループ（created の file.delete）の
+  対象から漏れ、孤児化する。C-2 と同じ「DBロールバックはファイル実体を戻さない」クラス。
+
+対応方針:
+  file.save 実行後・document.save 前に後始末候補リストへ積む。
+
+
+==================================================================
+B. 再利用性・単純化・効率性
+==================================================================
+
+────────────────────────────────────────────────────────────────
+【R-1】優先度: 低   DocumentEditView / ContractEditView が UpdateView を継承しているが機能を使っていない
+────────────────────────────────────────────────────────────────
+該当:
+  - documents/views.py:224  class DocumentEditView(LoginRequiredMixin, UpdateView)
+  - contracts/views.py:278  class ContractEditView(RequiresContractEditMixin, UpdateView)
+
+内容:
+  get / post / get_object を完全にオーバーライドし、get_form・form_valid・success_url・
+  ModelFormMixin 系は一切使っていない。django.views.View を継承すれば十分で、
+  UpdateView 継承は「標準のModelFormベース編集ビュー」という誤った読み手の期待を生む。
+  CLAUDE.md「ビューはCBVのみ」には反しない（View も CBV）。
+
+対応方針:
+  基底を View に変更（context_object_name も未使用なので削除）。
+
+
+────────────────────────────────────────────────────────────────
+【R-2】優先度: 低   combine_upload_chunks がセッション内部リストをコピーせず in-place 変更
+────────────────────────────────────────────────────────────────
+該当:
+  - core/upload_services.py:286-289
+        pending = session.get(session_key, [])
+        pending.append({...})
+        session[session_key] = pending
+
+内容:
+  同モジュールの save_pending_files:47-52 と remove_pending_file:124 は
+  「session.get は SessionBase 内部の同一 list を返すので list() でコピーせよ」と
+  コメント付きで実践しているのに、ここだけコピーしていない。現状は直後に再代入＋
+  session.modified=True で実害は出ないが、モジュール内で確立したパターンから逸脱しており
+  将来のロールバック追加時に同じバグを踏む。
+
+対応方針:
+  pending = list(session.get(session_key, [])) に統一。
+
+
+────────────────────────────────────────────────────────────────
+【R-3】優先度: 低   documents/contracts DetailAPIView が部署スコープ判定をインライン重複
+────────────────────────────────────────────────────────────────
+該当:
+  - documents/api.py:45-52
+  - contracts/api.py:55-62
+
+内容:
+  「allowed_department_ids を取得 → department_id が含まれなければ logger.warning ＋
+  PermissionDenied」というほぼ同一ブロックが両 api.py に直書き。
+  core.scoping_services.scoped_get_object_or_404 は base_qs を引数に取れるので、
+  is_deleted を残したまま（未フィルタ base_qs を渡して）共通化できる。
+  CLAUDE.md「共通処理は core 相当の共通基底クラス・サービス関数に集約」。
+  ※ 他の詳細操作ビュー（Download/Preview/Edit/Delete）は既に scoped_get_object_or_404 経由。
+
+対応方針:
+  DetailAPIView も scoped_get_object_or_404（entity_name / dept_ids_resolver を渡す）に寄せ、
+  404 か PermissionDenied かの差異のみサブクラス側で吸収。
+
+
+────────────────────────────────────────────────────────────────
+【R-4】優先度: 低   一括ダウンロードが queryset を2回評価 ＋ ZIP全量をメモリ保持
+────────────────────────────────────────────────────────────────
+該当:
+  - core/record_views.py:133  total_count = objects.count()
+  - core/record_views.py:137  zip_bytes, missing_count = self.zip_builder(objects)
+  - core/record_views.py:157  response = HttpResponse(zip_bytes, ...)
+
+内容:
+  count() で1回 SELECT、zip_builder(objects) のイテレートで再度 SELECT（同一 queryset の
+  再評価）。さらに ZIP を bytes 化して HttpResponse に丸ごと載せる（ストリーミング無し、
+  選択件数・合計サイズの上限無し）。pks 改ざんで大量選択された場合のメモリ影響もある。
+
+対応方針:
+  objects = list(objects) にして total_count = len(objects) の1回に集約。
+  規模が読めないなら StreamingHttpResponse ＋ 一時ファイルへの ZIP 書き出しを検討。
+
+
+────────────────────────────────────────────────────────────────
+【R-5】優先度: 低   BaseDeleteView._post_delete_redirect の docstring が実態と乖離
+────────────────────────────────────────────────────────────────
+該当:
+  - core/record_views.py:254-258（docstring）
+
+内容:
+  「単独編集なら検索画面・一括編集なら次のレコードへ、と遷移先を変えたいサブクラスは
+  ここをオーバーライドする（documents/contracts.views.EditDeleteView）」とあるが、
+  EditDeleteView（documents/views.py:796, contracts/views.py:866）は audit_action を
+  変えるだけで _post_delete_redirect をオーバーライドしていない。一括編集はこのビューを
+  通らない（ステージ型で BulkEditView._commit が処理）。CLAUDE.md「コメントは『なぜ』」に対し
+  古い設計想定が残っている。
+
+対応方針:
+  docstring を実態（EditDeleteView は監査 action 名のみ差し替え）に合わせて修正。
+
+
+────────────────────────────────────────────────────────────────
+【R-6】優先度: 低   documents/services.py にモジュール logger が無い（contracts/services.py にはある）
+────────────────────────────────────────────────────────────────
+該当:
+  - documents/services.py（import logging すら無し）
+  - 対称: contracts/services.py:10  logger = logging.getLogger(__name__)
+
+内容:
+  CLAUDE.md「新しいモジュールでは logger = logging.getLogger(__name__) を用意し」。
+  並行構成なのに documents 側だけ未整備。現状 documents/services.py に警告すべき分岐は
+  無い（scoped_get_object_or_404 は core 側で warning 済み）が、規約準拠と左右対称性のため
+  用意しておくのが望ましい。
+
+対応方針:
+  documents/services.py 冒頭に import logging ＋ logger 定義。
+
+
+────────────────────────────────────────────────────────────────
+【R-7】優先度: 低   論理削除のたびに正規化カラムを無駄に再計算
+────────────────────────────────────────────────────────────────
+該当:
+  - core/models.py:37-53  NormalizedTextFieldsMixin.save
+  - 呼び出し: core/record_views.py:230 / documents/views.py:515 / contracts/views.py:598
+    いずれも obj.save(update_fields=["is_deleted", "deleted_at"])
+
+内容:
+  save() の冒頭で常に title_normalized / memo_normalized / extracted_text_normalized を
+  normalize_for_search() で再計算する。update_fields に該当元カラムが無い削除・移動時は
+  DB へ書かれないだけで、NFKC 正規化の計算自体は毎回走る。extracted_text は OCR 全文で
+  数十KB になり得るため、論理削除・一括削除で件数ぶん無駄な CPU を使う。
+
+対応方針:
+  update_fields 指定時は、その中に title/memo/extracted_text が含まれる場合のみ対応する
+  正規化を計算する（現状の「update_fields へ追加する」ロジックの直前で早期判定）。
+
+
+==================================================================
+補足（今回は指摘に含めなかった確認済み事項）
+==================================================================
+- RequiresContractEditMixin による AnonymousUser 時の 500 回避、scoped_get_object_or_404 に
+  よる他部署 IDOR 対策、pks 生値の int 変換とログ、二重送信トークン、apply_radio_defaults、
+  year_choices_with_existing による「触れていない年が書き換わる」対策は、いずれも妥当に
+  実装されている。
+- CBVのみ / Paginator / verbose_name等の日本語化 / bare except 不使用 は遵守。
+- 一括編集ステージング型（commit 9358b6d）は staging / commit / delete / cancel /
+  validation-error / DB失敗 / 削除済みpk / 他部署pk の各経路がテスト済み。

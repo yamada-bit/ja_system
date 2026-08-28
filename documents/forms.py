@@ -5,7 +5,6 @@ from django import forms
 from django.urls import reverse_lazy
 
 from core.forms import (
-    MATCH_AND,
     MATCH_CHOICES,
     MATCH_OR,
     apply_radio_defaults,
@@ -15,7 +14,7 @@ from core.forms import (
 )
 from core.widgets import InlineRadioSelect, PopupSelectWidget
 from documents.services import used_retention_periods
-from masters.models import Category, DocKbn, Group, RetentionPeriod
+from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod
 from organizations.models import Department
 from organizations.services import visible_department_ids
 from permissions.services import can_edit_retention, can_select_department
@@ -85,7 +84,9 @@ class UploadStep2Form(forms.Form):
     )
     retention_period = forms.ModelChoiceField(
         label="保存期間",
-        queryset=RetentionPeriod.objects.filter(kbn="document", is_deleted=False).order_by("display_order"),
+        queryset=RetentionPeriod.objects.filter(kbn=RetentionKbn.DOCUMENT, is_deleted=False).order_by(
+            "display_order"
+        ),
         required=True,
         empty_label=None,
         # 原本index.html:242 <select id="storage-period" onchange="calculateExpiryDate()" class="size-short">

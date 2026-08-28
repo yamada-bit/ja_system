@@ -11,8 +11,10 @@ from django.urls import reverse
 from django.views import View
 
 from core import upload_services
+from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from core.file_type_services import get_preview_kind
 from core.upload_services import ChunkUploadError, PendingFileStorageError, combine_upload_chunks, save_upload_chunk
+from core.upload_validation import blocked_upload_message
 from permissions.services import can_download
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,17 @@ class BaseChunkUploadAPIView(LoginRequiredMixin, View):
                 "チャンクアップロードAPIへの不正なリクエスト: employee_no=%s", request.user.employee_no
             )
             return JsonResponse({"status": "error", "message": "不正なリクエストです。"}, status=400)
+
+        # セキュリティレビュー H-3: 能動的コンテンツ（HTML/SVG/スクリプト）は保管対象外。
+        # 通常アップロード（BaseUploadStep1View.post）と同じ拒否判定を分割アップロードにも適用する。
+        blocked = blocked_upload_message([file_name])
+        if blocked is not None:
+            logger.warning(
+                "チャンクアップロードで拒否対象の形式が送られました: employee_no=%s file=%r",
+                request.user.employee_no,
+                file_name,
+            )
+            return JsonResponse({"status": "error", "message": blocked}, status=400)
 
         if not UPLOAD_ID_PATTERN.match(upload_id):
             logger.warning(
@@ -117,6 +130,15 @@ class BaseUploadStep1View(View):
         existing_pending = upload_services.get_pending_files(request.session, self.pending_session_key)
         if not files and not existing_pending:
             messages.error(request, "ファイルが選択されていません。")
+            return render(request, self.template_name, self._context())
+        # セキュリティレビュー H-3: HTML/SVG/スクリプト等の能動的コンテンツはアップロード時点で拒否する
+        # （配信側の core.file_serving と二重の防御。core.upload_validation のモジュール docstring 参照）。
+        blocked = blocked_upload_message([f.name for f in files])
+        if blocked is not None:
+            logger.warning(
+                "保管画面１で拒否対象の形式がアップロードされました: employee_no=%s", request.user.employee_no
+            )
+            messages.error(request, blocked)
             return render(request, self.template_name, self._context())
         if files:
             try:
@@ -260,4 +282,10 @@ class BasePendingPreviewView(View):
                 index,
             )
             raise Http404("プレビュー対象のファイルが見つかりません。")
-        return FileResponse(temp_file, as_attachment=False, filename=item["original_name"])
+        # セキュリティレビュー H-3: PreviewView と同じく、PDF・ラスター画像以外はインライン
+        # 配信させず、どの形式でも nosniff と実行禁止 CSP を付与する（core.file_serving 参照）。
+        as_attachment = resolve_as_attachment(wants_inline=True, filename=item["original_name"])
+        response = FileResponse(
+            temp_file, as_attachment=as_attachment, filename=item["original_name"]
+        )
+        return apply_file_response_security_headers(response)

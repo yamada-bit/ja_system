@@ -56,8 +56,13 @@ def branch_choices():
     accounts.forms.StaffSearchForm・organizations.forms.DeptSearchFormで共有する
     （以前は両ファイルに同一ロジックが重複実装されていた。コード監査で発見、2026-08-24集約）。
     """
-    branches = Department.objects.order_by("branch_code").values_list("branch_code", "branch_name").distinct()
-    return [("", "(全て)")] + [(code, name) for code, name in dict(branches).items()]
+    # dict()でbranch_code単位に集約する（同一branch_codeは必ず同一branch_name）。
+    # order_by("branch_code")で選択肢の並び順を固定。DB側.distinct()はdict()と役割が
+    # 重複するため不要（コードレビューで発見、2026-08-28修正）。
+    branches = dict(
+        Department.objects.order_by("branch_code").values_list("branch_code", "branch_name")
+    )
+    return [("", "(全て)")] + list(branches.items())
 
 
 def section_choices():
@@ -65,14 +70,13 @@ def section_choices():
     （xlsx 職員マスタ!B41・部署管理!B45「(但し部課コード99の退職者は対象外)」）。
     accounts.forms.StaffSearchForm・organizations.forms.DeptSearchFormで共有する。
     """
-    sections = (
+    sections = dict(
         Department.objects.exclude(section_code="")
         .exclude(section_code=RETIRED_SECTION_CODE)
         .order_by("section_code")
         .values_list("section_code", "section_name")
-        .distinct()
     )
-    return [("", "(全て)")] + [(code, name) for code, name in dict(sections).items()]
+    return [("", "(全て)")] + list(sections.items())
 
 
 def department_composite_order_by(qs, sort_dir, tiebreaker):

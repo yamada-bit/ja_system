@@ -1,4 +1,5 @@
 import datetime
+import logging
 
 from django.conf import settings
 from django.db.models import Case, F, IntegerField, Value, When
@@ -8,6 +9,10 @@ from core import deletion_services, scoping_services, zip_services
 from masters.models import RetentionPeriod, RetentionPeriodUnit
 from organizations.services import visible_department_ids
 from permissions.services import can_select_department
+
+# CLAUDE.md「新しいモジュールでは logger を用意」。contracts/services.py と対称。
+# 現状このモジュールに警告すべき分岐は無い（scoped_get_object_or_404 は core 側で warning 済み）。
+logger = logging.getLogger(__name__)
 
 
 def can_delete(document) -> bool:
@@ -114,10 +119,18 @@ def apply_document_edit(doc, cleaned_data, employee):
     共通処理（部署解決・各フィールドコピー・expiry_date再計算・save）。監査ログの記録は
     呼び出し側の責務として残す（既存の各ビューの慣習に合わせ、audit_services.logの呼び出しは
     ここでは行わない）。
+
+    `expiry_date`（保存満了日）は「保存期間(retention_period)を変更した時だけ」今日基準で
+    引き直す（2026-08-28ユーザー確定、レビュー指摘C-1）。以前はどの項目を編集しても毎回
+    `今日 + 保存期間`で上書きしていたため、登録から日が経った文書のタイトル誤字を直しただけでも
+    満了日が経過日数ぶん先送りされ、契約書(`apply_contract_edit`、そもそも満了日を触らない)や
+    一括編集の未変更ページ(据え置き)と挙動が食い違っていた。保存期間が変わらなければ満了日も不変。
     """
     department = cleaned_data["department"]
     if not can_select_department(employee):
         department = employee.department
+
+    retention_changed = doc.retention_period_id != cleaned_data["retention_period"].pk
 
     doc.title = cleaned_data["title_0"]
     doc.department = department
@@ -127,7 +140,8 @@ def apply_document_edit(doc, cleaned_data, employee):
     doc.retention_period = cleaned_data["retention_period"]
     doc.privacy_flag = cleaned_data["privacy_flag"]
     doc.memo = cleaned_data["memo"]
-    doc.expiry_date = calculate_expiry_date(timezone.localdate(), cleaned_data["retention_period"])
+    if retention_changed:
+        doc.expiry_date = calculate_expiry_date(timezone.localdate(), cleaned_data["retention_period"])
     doc.save()
     return doc
 
@@ -138,8 +152,10 @@ def document_edit_is_dirty(doc, cleaned_data, employee) -> bool:
     「更新なし」として保存も監査ログ記録もしない）。`apply_document_edit`と同じ
     `department`正規化を行った上でコピー対象フィールドを1つずつ比較する。
 
-    `expiry_date`は`apply_document_edit`が保存時に今日基準で再計算する派生値のため比較対象に
-    含めない（保存期間が変わらない限り実質不変で、変わればここで差が出る）。
+    `expiry_date`は`apply_document_edit`が「保存期間を変更した時だけ」今日基準で引き直す派生値
+    （2026-08-28ユーザー確定、レビュー指摘C-1）。保存期間が変われば下の`retention_period_id`の
+    差として検出され、変わらなければ満了日も不変なので、`expiry_date`自体を比較対象に含める
+    必要はない。
     """
     department = cleaned_data["department"]
     if not can_select_department(employee):

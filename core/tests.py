@@ -19,7 +19,9 @@ from pypdf import PdfReader, PdfWriter
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from core import ocr_layout_services, pdf_text_embed_services
+from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from core.file_type_services import is_image_filename
+from core.upload_validation import blocked_upload_message
 from core.csv_services import sanitize_csv_cell, sanitize_csv_row
 from core.forms import search_year_choices
 from core.middleware import SESSION_LAST_ACTIVITY_KEY
@@ -2002,6 +2004,52 @@ class IsImageFilenameTests(TestCase):
         """SVGはインラインscriptを含められるため、ブラウザに直接読み込ませるプレビュー用途では
         あえて画像として扱わない（core.file_type_services.is_image_filename docstring参照）。"""
         self.assertFalse(is_image_filename("a.svg"))
+
+
+class SafeInlineFileServingTests(TestCase):
+    """セキュリティレビュー H-3: `core.file_serving`。インライン配信は PDF・ラスター画像に
+    限定し、それ以外は添付ダウンロードへ倒す。"""
+
+    def test_pdf_and_images_stay_inline(self):
+        for name in ["a.pdf", "a.PDF", "b.png", "c.jpg", "d.jpeg", "e.gif", "f.bmp", "g.webp"]:
+            self.assertFalse(
+                resolve_as_attachment(wants_inline=True, filename=name), name
+            )
+
+    def test_active_content_falls_back_to_attachment_even_when_inline_requested(self):
+        for name in ["x.html", "x.htm", "x.svg", "x.xml", "x.js", "x.docx", "x.xlsx", "noext"]:
+            self.assertTrue(
+                resolve_as_attachment(wants_inline=True, filename=name), name
+            )
+
+    def test_download_intent_is_always_attachment(self):
+        self.assertTrue(resolve_as_attachment(wants_inline=False, filename="a.pdf"))
+
+    def test_security_headers_applied(self):
+        from django.http import HttpResponse
+
+        resp = apply_file_response_security_headers(HttpResponse(b"x"))
+        self.assertEqual(resp.headers["X-Content-Type-Options"], "nosniff")
+        self.assertIn("script-src 'none'", resp.headers["Content-Security-Policy"])
+        self.assertIn("object-src 'none'", resp.headers["Content-Security-Policy"])
+
+
+class BlockedUploadValidationTests(TestCase):
+    """セキュリティレビュー H-3: `core.upload_validation`。能動的コンテンツはアップロード時点で拒否。"""
+
+    def test_active_content_extensions_are_blocked(self):
+        for name in ["poc.html", "POC.HTM", "a.xhtml", "a.svg", "a.svgz", "a.js", "a.hta", "a.swf"]:
+            self.assertIsNotNone(blocked_upload_message([name]), name)
+
+    def test_ordinary_business_formats_are_allowed(self):
+        for name in ["a.pdf", "a.docx", "a.xlsx", "a.pptx", "a.png", "a.txt", "a.zip", "a.csv", "noext"]:
+            self.assertIsNone(blocked_upload_message([name]), name)
+
+    def test_message_lists_only_the_blocked_names(self):
+        msg = blocked_upload_message(["ok.pdf", "bad.html", "also.svg"])
+        self.assertIn("bad.html", msg)
+        self.assertIn("also.svg", msg)
+        self.assertNotIn("ok.pdf", msg)
 
 
 class HealthCheckViewTests(TestCase):

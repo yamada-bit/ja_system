@@ -12,7 +12,12 @@ from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from documents.forms import SearchForm
 from documents.search_services import build_queryset
-from documents.services import calculate_expiry_date, can_delete, used_retention_periods
+from documents.services import (
+    calculate_expiry_date,
+    can_delete,
+    document_edit_is_dirty,
+    used_retention_periods,
+)
 from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
@@ -1004,7 +1009,62 @@ class BulkDownloadViewTests(TestCase):
         self.assertEqual(len(names), 1)
         self.assertTrue(any("present" in n for n in names))
         warnings = [str(m) for m in get_messages(response.wsgi_request)]
-        self.assertTrue(any("1件のファイルが見つからなかった" in m for m in warnings))
+        self.assertTrue(any("1件のファイルを取得できなかった" in m for m in warnings))
+
+    def test_non_filenotfound_oserror_is_skipped_not_500(self):
+        """レビュー指摘C-3：FileNotFoundError以外のOSError（PermissionError等）でも
+        ZIP全体を500にせず、当該1件だけスキップして残りは正常に返す。"""
+        import zipfile
+        from io import BytesIO
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        doc1 = self._create_document("present")
+        doc2 = self._create_document("locked")
+
+        real_open = type(doc2.file).open
+
+        def flaky_open(self, *args, **kwargs):
+            if "locked" in self.name:
+                raise PermissionError("permission denied")
+            return real_open(self, *args, **kwargs)
+
+        with mock.patch.object(type(doc2.file), "open", flaky_open):
+            response = self.client.post("/documents/bulk-download/", {"pks": [doc1.pk, doc2.pk]})
+
+        self.assertEqual(response.status_code, 200)
+        zf = zipfile.ZipFile(BytesIO(response.content))
+        names = zf.namelist()
+        self.assertEqual(len(names), 1)
+        self.assertTrue(any("present" in n for n in names))
+
+    def test_zip_entry_names_use_display_name_and_dedupe_collisions(self):
+        """レビュー指摘C-4：ZIPエントリ名はUUID接頭辞付き内部名ではなくdisplay_name（元名）を使い、
+        元名が衝突する場合は" (2)"等で一意化する。"""
+        import zipfile
+        from io import BytesIO
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        from documents.models import Document
+
+        pks = []
+        for i in range(2):
+            doc = Document(
+                title=f"dup{i}", department=self.department, group=self.group,
+                category=self.category, year=2026, retention_period=self.retention_period,
+                uploader=self.employee, expiry_date=datetime.date(2030, 1, 1),
+            )
+            doc.file.save("dup.txt", ContentFile(b"hello"), save=False)
+            doc.save()
+            pks.append(doc.pk)
+
+        response = self.client.post("/documents/bulk-download/", {"pks": pks})
+        self.assertEqual(response.status_code, 200)
+        names = sorted(zipfile.ZipFile(BytesIO(response.content)).namelist())
+        self.assertEqual(names, ["dup (2).txt", "dup.txt"])
 
 
 class BulkEditViewTests(TestCase):
@@ -1099,6 +1159,22 @@ class BulkEditViewTests(TestCase):
     def test_direct_access_without_session_state_redirects(self):
         response = self.client.get("/documents/bulk-edit/")
         self.assertRedirects(response, "/documents/search/")
+
+    def test_render_complete_redirects_to_search_when_all_targets_purged(self):
+        """コードレビューC-7：更新確定の直後に対象が全件物理削除された場合（日次purgeバッチとの
+        競合）、_render_complete の rows が空になり rows[0] で IndexError（500）になっていた。"""
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        from documents.views import BulkEditView
+
+        request = RequestFactory().post("/documents/bulk-edit/")
+        request.user = self.employee
+        request.session = self.client.session
+        request._messages = FallbackStorage(request)
+
+        response = BulkEditView()._render_complete(request, [10**9], {})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/documents/search/")
 
     def test_edits_are_staged_and_persist_across_navigation_without_touching_db(self):
         doc1 = self._create_document("doc1")
@@ -1198,6 +1274,50 @@ class BulkEditViewTests(TestCase):
             AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="d1").exists()
         )
 
+    def _age_document(self, doc, *, days):
+        from documents.models import Document
+
+        Document.objects.filter(pk=doc.pk).update(
+            save_date=timezone.now() - datetime.timedelta(days=days)
+        )
+
+    def test_toggle_delete_mark_rejected_for_document_past_delete_window(self):
+        """セキュリティレビュー M-1: 登録から1週間以上経過した文書は一括編集からも削除マークを
+        付けられない（サーバー側 can_delete 検証）。"""
+        from django.contrib.messages import get_messages
+
+        doc = self._create_document("aged")
+        self._age_document(doc, days=8)
+        self.client.post("/documents/bulk-edit/start/", {"pks": [doc.pk]})
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(doc, action="toggle_delete"))
+        self.assertRedirects(resp, "/documents/bulk-edit/")
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("1週間以上経過" in t for t in texts))
+        self.assertEqual(self.client.session["documents_bulk_edit"]["to_delete"], [])
+
+    def test_commit_rejects_smuggled_delete_mark_for_document_past_delete_window(self):
+        """セキュリティレビュー M-1: セッション改ざん等で削除マークが積まれていても、確定前の
+        サーバー側検証でコミット全体を止め、論理削除しない。"""
+        from django.contrib.messages import get_messages
+
+        docs = [self._create_document(f"d{i}") for i in range(2)]
+        self._age_document(docs[1], days=10)
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        # to_delete をセッションに直接注入（toggle_delete ハンドラの直叩き / 改ざんを模す）。
+        session = self.client.session
+        session["documents_bulk_edit"]["to_delete"] = [docs[1].pk]
+        session.save()
+
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[0]))  # 更新
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("complete", resp.context)
+        self.assertEqual(resp.context["document"].pk, docs[1].pk)
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("1週間以上経過" in t for t in texts))
+        docs[1].refresh_from_db()
+        self.assertFalse(docs[1].is_deleted)
+        self.assertIsNone(docs[1].deleted_at)
+
     def test_cancel_discards_all_staged_changes(self):
         docs = [self._create_document(f"d{i}") for i in range(2)]
         self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
@@ -1229,6 +1349,20 @@ class BulkEditViewTests(TestCase):
         for d in docs:
             d.refresh_from_db()
         self.assertEqual([d.title for d in docs], ["d0", "d1", "d2"])  # DB無変更
+
+    def test_update_does_not_recalculate_expiry_date_when_retention_unchanged(self):
+        """テストカバレッジ棚卸し（指摘 H-1）／memory expiry_date_edit_recalc_spec：
+        一括編集で保存期間を変えずに他項目だけ変更したページの expiry_date は据え置き。
+        documents.services.document_edit_is_dirty は expiry_date を比較対象に含めず、
+        apply_document_edit も retention 未変更時は expiry_date を触らない。"""
+        doc = self._create_document("d0")
+        original_expiry = doc.expiry_date
+        self.client.post("/documents/bulk-edit/start/", {"pks": [doc.pk]})
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(doc, title="d0-new"))
+        self.assertEqual(resp.context["complete"]["counts"], {"updated": 1, "unchanged": 0, "deleted": 0})
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "d0-new")
+        self.assertEqual(doc.expiry_date, original_expiry)
 
     def test_commit_db_failure_shows_error_and_keeps_state(self):
         from django.contrib.messages import get_messages
@@ -1369,6 +1503,30 @@ class PreviewViewTests(TestCase):
         self.document.save(update_fields=["is_deleted"])
         response = self.client.get(f"/documents/{self.document.pk}/preview/")
         self.assertEqual(response.status_code, 404)
+
+    def test_preview_adds_security_headers(self):
+        """セキュリティレビュー H-3: どの形式でも nosniff と実行禁止 CSP を付与する。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        response = self.client.get(f"/documents/{self.document.pk}/preview/")
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+        self.assertIn("script-src 'none'", response["Content-Security-Policy"])
+
+    def test_html_file_is_never_served_inline_via_preview(self):
+        """セキュリティレビュー H-3: アップロードされた .html は PreviewView（inline 意図）でも
+        Content-Disposition: attachment へフォールバックし、同一オリジンで実行されない。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        self.document.file.save(
+            "poc.html", ContentFile(b"<script>alert(document.cookie)</script>"), save=True
+        )
+        response = self.client.get(f"/documents/{self.document.pk}/preview/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("attachment", response["Content-Disposition"])
+        self.assertNotIn("inline", response["Content-Disposition"])
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
 
 
 class ImagePreviewTests(TestCase):
@@ -1728,6 +1886,171 @@ class EditScreenRetentionPermissionTests(TestCase):
         self._post_edit(self.retention_3y)
         self.document.refresh_from_db()
         self.assertEqual(self.document.retention_period, self.retention_3y)
+
+
+class DocumentEditExpiryDateRecalcTests(TestCase):
+    """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 H-1）で発見：
+    memory expiry_date_edit_recalc_spec（2026-08-28ユーザー確定）の業務ルール
+    「編集時に expiry_date を今日基準で引き直すのは保存期間(retention_period)を
+    変更した時だけ」が単体編集経路で1件も検証されていなかった。従来はどの項目を
+    編集しても毎回「今日+保存期間」で上書きしていたため、共通ヘルパー
+    documents.services.apply_document_edit の retention_changed 分岐が将来戻っても
+    誰も気付けない状態だった。"""
+
+    def setUp(self):
+        from documents.models import Document
+
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        # 保存期間の変更可否（doc_retention_edit）は H-1 の対象外なので管理者で固定する。
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_1y = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.retention_3y = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=3, period_unit=RetentionPeriodUnit.YEAR, display_order=2
+        )
+        self.client.login(username="1", password="pass1234")
+        # 登録から日が経った文書を模して、満了日を「今日+保存期間」から大きくずらしておく。
+        self.original_expiry = datetime.date(2099, 1, 1)
+        self.document = Document(
+            title="満了日確認用", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_1y, uploader=self.employee,
+            expiry_date=self.original_expiry,
+        )
+        self.document.file.save("doc.pdf", ContentFile(b"%PDF-1.4"), save=False)
+        self.document.save()
+
+    def _post_edit(self, *, title=None, retention_period=None):
+        get_response = self.client.get(f"/documents/{self.document.pk}/edit/")
+        token = get_response.context["token"]
+        return self.client.post(
+            f"/documents/{self.document.pk}/edit/",
+            {
+                "token": token,
+                "department": self.department.pk,
+                "group": self.group.pk,
+                "category": self.category.pk,
+                "year": self.document.year,
+                "title_0": title if title is not None else self.document.title,
+                "retention_period": (retention_period or self.document.retention_period).pk,
+                "privacy_flag": "True",
+                "memo": "",
+            },
+        )
+
+    def test_editing_other_fields_without_retention_change_keeps_expiry_date(self):
+        self._post_edit(title="タイトルだけ変更")
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.title, "タイトルだけ変更")
+        self.assertEqual(self.document.expiry_date, self.original_expiry)
+
+    def test_changing_retention_period_recalculates_expiry_from_today(self):
+        self._post_edit(retention_period=self.retention_3y)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.retention_period, self.retention_3y)
+        self.assertEqual(
+            self.document.expiry_date,
+            calculate_expiry_date(timezone.localdate(), self.retention_3y),
+        )
+
+
+class DocumentEditIsDirtyServiceTests(TestCase):
+    """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 M-2）で発見：
+    一括編集の「更新なし」判定を左右する documents.services.document_edit_is_dirty が
+    BulkEditViewTests の HTTP 経由でしか間接検証されておらず、None↔""・bool正規化・
+    非管理者の部署読み替え・expiry_date を比較対象に含めない設計といった非自明な境界が
+    個別に固定されていなかった。"""
+
+    def setUp(self):
+        from documents.models import Document
+
+        self.dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept2 = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="営業部"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="9", name="管理者", password="pass1234",
+            department=self.dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.staff = Employee.objects.create_user(
+            employee_no="1", name="一般", password="pass1234",
+            department=self.dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.rp = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.rp3 = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=3, period_unit=RetentionPeriodUnit.YEAR, display_order=2
+        )
+        self.doc = Document(
+            title="元タイトル", department=self.dept, group=self.group, category=self.category,
+            year=2026, retention_period=self.rp, uploader=self.admin,
+            expiry_date=datetime.date(2030, 1, 1), privacy_flag=False, memo="",
+        )
+        self.doc.file.save("d.pdf", ContentFile(b"x"), save=False)
+        self.doc.save()
+
+    def _cleaned(self, **overrides):
+        data = {
+            "title_0": "元タイトル", "department": self.dept, "group": self.group,
+            "category": self.category, "year": 2026, "retention_period": self.rp,
+            "privacy_flag": False, "memo": "",
+        }
+        data.update(overrides)
+        return data
+
+    def test_identical_values_are_not_dirty(self):
+        self.assertFalse(document_edit_is_dirty(self.doc, self._cleaned(), self.admin))
+
+    def test_memo_none_and_empty_string_are_treated_as_equal(self):
+        self.assertFalse(document_edit_is_dirty(self.doc, self._cleaned(memo=None), self.admin))
+
+    def test_privacy_flag_bool_change_is_dirty(self):
+        self.assertTrue(document_edit_is_dirty(self.doc, self._cleaned(privacy_flag=True), self.admin))
+
+    def test_title_change_is_dirty(self):
+        self.assertTrue(document_edit_is_dirty(self.doc, self._cleaned(title_0="新タイトル"), self.admin))
+
+    def test_year_change_is_dirty(self):
+        self.assertTrue(document_edit_is_dirty(self.doc, self._cleaned(year=2025), self.admin))
+
+    def test_retention_period_change_is_dirty(self):
+        self.assertTrue(document_edit_is_dirty(self.doc, self._cleaned(retention_period=self.rp3), self.admin))
+
+    def test_expiry_date_is_not_part_of_comparison(self):
+        """H-1 と対：保存期間が同じなら expiry_date がどれだけずれていても dirty ではない。"""
+        self.doc.expiry_date = datetime.date(1999, 1, 1)
+        self.assertFalse(document_edit_is_dirty(self.doc, self._cleaned(), self.admin))
+
+    def test_non_admin_cross_department_post_is_not_detected_as_dirty(self):
+        """非管理者は cleaned_data["department"] を employee.department に読み替えてから
+        比較するため、別部署 pk を POST してきても department 差分にはならない。"""
+        self.assertFalse(
+            document_edit_is_dirty(self.doc, self._cleaned(department=self.dept2), self.staff)
+        )
+
+    def test_admin_department_change_is_dirty(self):
+        self.assertTrue(
+            document_edit_is_dirty(self.doc, self._cleaned(department=self.dept2), self.admin)
+        )
 
 
 class UploadStep2FormDepartmentInitialTests(TestCase):
@@ -2348,6 +2671,43 @@ class UploadStep2ViewValidationTests(TestCase):
         self.assertFalse(Document.objects.exists())
 
 
+class UploadBlockedFileTypeTests(TestCase):
+    """セキュリティレビュー H-3: HTML/SVG/スクリプト等の能動的コンテンツは保管画面１の
+    アップロード時点で拒否する（配信側 core.file_serving と二重の防御）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_html_upload_is_rejected(self):
+        from django.contrib.messages import get_messages
+
+        response = self.client.post(
+            "/documents/upload/step1/",
+            {"files": [SimpleUploadedFile("poc.html", b"<script>1</script>", content_type="text/html")]},
+        )
+        self.assertEqual(response.status_code, 200)
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("保管できません" in t for t in texts))
+        self.client.get("/documents/upload/step2/")
+        # 一時プールへ入っていないこと。
+        step2 = self.client.get("/documents/upload/step1/")
+        self.assertEqual(step2.status_code, 200)
+
+    def test_pdf_upload_still_works(self):
+        response = self.client.post(
+            "/documents/upload/step1/",
+            {"files": [SimpleUploadedFile("ok.pdf", b"%PDF-1.4", content_type="application/pdf")]},
+        )
+        self.assertRedirects(response, "/documents/upload/step2/")
+
+
 class UploadStep2ImmediateExtractionTests(TestCase):
     """保管画面２登録後、core.text_extraction_services.try_immediate_text_layer_extractionが
     呼ばれ、テキスト層のあるPDFはその場でextracted_textが埋まることを確認する
@@ -2619,6 +2979,16 @@ class DocumentSaveNormalizationTests(TestCase):
         reloaded = Document.objects.get(pk=self.document.pk)
         self.assertEqual(reloaded.extracted_text, "本文サンプルＸＹＺ")
         self.assertEqual(reloaded.extracted_text_normalized, normalize_for_search("本文サンプルＸＹＺ"))
+
+    def test_logical_delete_save_does_not_recompute_normalization(self):
+        """コードレビューR-7：update_fieldsに元カラム（title/memo/extracted_text）が無いsave
+        （論理削除等）では正規化を一切走らせない。extracted_textはOCR全文で数十KBになり得るため、
+        一括削除で件数ぶん無駄なNFKC正規化を避ける。"""
+        with mock.patch("core.text_normalization.normalize_for_search") as normalize:
+            self.document.is_deleted = True
+            self.document.deleted_at = timezone.now()
+            self.document.save(update_fields=["is_deleted", "deleted_at"])
+        normalize.assert_not_called()
 
 
 class StoragePathTests(TestCase):

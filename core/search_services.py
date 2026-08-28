@@ -67,8 +67,7 @@ def apply_word_filter(qs, field, raw_value, match_mode, *, match_and):
 
     半角全角を問わず検索できるようにするため、正規化済みシャドウカラム（`{field}_normalized`、
     models.save()参照）に対して、キーワード側も同じ正規化をした上でicontainsする
-    （簡易設計指示書の検索要件）。`match_and`は呼び出し側のMATCH_AND定数（documents.forms/
-    contracts.forms、値は"and"で共通）を渡す。
+    （簡易設計指示書の検索要件）。`match_and`は呼び出し側が渡す`core.forms.MATCH_AND`（値は"and"）。
     """
     words = raw_value.split()
     if not words:

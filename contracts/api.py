@@ -76,7 +76,10 @@ class DetailAPIView(LoginRequiredMixin, View):
                 "contract_period_start": str(contract.contract_period_start) if contract.contract_period_start else "",
                 "contract_period_end": str(contract.contract_period_end) if contract.contract_period_end else "",
                 "renewal_date": str(contract.renewal_date) if contract.renewal_date else "",
-                "contract_amount": str(contract.contract_amount) if contract.contract_amount else "",
+                # 契約金額0円は有効な入力。`if contract.contract_amount`だとDecimal('0')がfalsyで
+                # 未入力(None)と区別できず金額欄が空表示になるため`is not None`で判定する
+                # （コードレビューC-5、2026-08-28修正）。
+                "contract_amount": str(contract.contract_amount) if contract.contract_amount is not None else "",
                 "contract_partner": contract.contract_partner,
                 "expiry_date": str(contract.expiry_date),
                 "memo": contract.memo,

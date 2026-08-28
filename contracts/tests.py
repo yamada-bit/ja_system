@@ -12,7 +12,7 @@ from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from contracts.forms import CommaNumberInput, SearchForm
 from contracts.search_services import build_queryset
-from contracts.services import calculate_expiry_date
+from contracts.services import calculate_expiry_date, contract_edit_is_dirty
 from masters.models import Category, DocKbn, Group
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
@@ -696,6 +696,68 @@ class DeleteViewRequiresContractEditPermissionTests(TestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class ContractWriteViewsRequireContractEditPermissionTests(TestCase):
+    """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 M-4）で発見：
+    RequiresContractEditMixin を通す write 系5画面（UploadStep1View / UploadStep2View /
+    ContractEditView / BulkEditStartView / BulkEditView）について、「ログイン済みだが
+    contract_edit=False（または PermissionProfile 未作成）の職員 → 403」が個別に
+    assert されていなかった。DispatchOrderingAnonymousAccessTests は未認証時の redirect
+    だけ、DeleteViewRequiresContractEditPermissionTests は DeleteView だけを見ている。
+    CLAUDE.md「同一注記が複数箇所に繰り返し付いている場合は1つずつ個別に確認する」に
+    照らし、URL 直打ちで保存・編集に至る中核 write 画面を個別に固定する。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.profile = PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=False
+        )
+        group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=group, doc_kbn=DocKbn.CONTRACT
+        )
+        from contracts.models import Contract
+
+        self.contract = Contract(
+            title="編集対象", department=self.department, group=group, category=category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+        )
+        self.contract.file.save("c.pdf", ContentFile(b"x"), save=False)
+        self.contract.save()
+        self.client.login(username="1", password="pass1234")
+
+    def _cases(self):
+        return [
+            ("get", "/contracts/upload/step1/"),
+            ("post", "/contracts/upload/step1/"),
+            ("get", "/contracts/upload/step2/"),
+            ("post", "/contracts/upload/step2/"),
+            ("get", f"/contracts/{self.contract.pk}/edit/"),
+            ("post", f"/contracts/{self.contract.pk}/edit/"),
+            ("post", "/contracts/bulk-edit/start/"),
+            ("get", "/contracts/bulk-edit/"),
+            ("post", "/contracts/bulk-edit/"),
+        ]
+
+    def test_contract_edit_false_is_rejected_with_403_on_every_write_view(self):
+        for method, url in self._cases():
+            with self.subTest(method=method, url=url):
+                response = getattr(self.client, method)(url)
+                self.assertEqual(response.status_code, 403, f"{method.upper()} {url}")
+
+    def test_missing_permission_profile_is_also_rejected(self):
+        self.profile.delete()
+        for method, url in self._cases():
+            with self.subTest(method=method, url=url):
+                response = getattr(self.client, method)(url)
+                self.assertEqual(response.status_code, 403, f"{method.upper()} {url}")
+
+
 class RelatedFilesMultiUploadTests(TestCase):
     """契約書の複数件一括登録時、原本index.html:1567-1589のsetupStorageFormForActiveDoc()通り
     文書ごとに独立した関連書類を添付できる（原本フィデリティ監査で発見：以前は1件登録時のみ
@@ -954,7 +1016,7 @@ class BulkDownloadViewTests(TestCase):
         self.assertEqual(len(names), 1)
         self.assertTrue(any("present" in n for n in names))
         warnings = [str(m) for m in get_messages(response.wsgi_request)]
-        self.assertTrue(any("1件のファイルが見つからなかった" in m for m in warnings))
+        self.assertTrue(any("1件のファイルを取得できなかった" in m for m in warnings))
 
 
 class BulkEditViewTests(TestCase):
@@ -1034,6 +1096,23 @@ class BulkEditViewTests(TestCase):
         response = self.client.get("/contracts/bulk-edit/")
         self.assertRedirects(response, "/contracts/search/")
 
+    def test_render_complete_redirects_to_search_when_all_targets_purged(self):
+        """コードレビューC-7：更新確定の直後に対象が全件物理削除された場合（日次purgeバッチとの
+        競合）、_render_complete の rows が空になり rows[0] で IndexError（500）になっていた。"""
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        from contracts.views import BulkEditView
+
+        request = RequestFactory().post("/contracts/bulk-edit/")
+        request.user = self.employee
+        request.session = self.client.session
+        request._messages = FallbackStorage(request)
+
+        response = BulkEditView()._render_complete(request, [10**9], {})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/contracts/search/")
+
     def test_start_with_all_pks_invalid_or_deleted_redirects_to_search(self):
         contract = self._create_contract("deleted")
         contract.is_deleted = True
@@ -1076,6 +1155,66 @@ class BulkEditViewTests(TestCase):
         self.assertEqual(resp.context["complete"]["counts"]["deleted"], 1)
         self.assertTrue(AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="c0").exists())
 
+    def test_delete_mark_locks_all_contract_fields(self):
+        """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 M-3）で発見：
+        documents 側の test_delete_mark_locks_fields_and_toggles_label に相当する検証が
+        contracts 側に無く、_build_form の `for field in form.fields.values(): field.disabled
+        = True` が契約書固有フィールド（契約日・契約金額・契約先名等）まで効いているかが
+        未検証だった。"""
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        marked = self.client.post("/contracts/bulk-edit/", self._page_data(cs[0], action="toggle_delete"))
+        self.assertRedirects(marked, "/contracts/bulk-edit/")
+        page = self.client.get("/contracts/bulk-edit/")
+        self.assertTrue(page.context["marked_delete"])
+        self.assertContains(page, "削除取消")
+        fields = page.context["form"].fields
+        for name in ["title_0", "contract_date", "contract_amount", "contract_partner", "memo"]:
+            self.assertTrue(fields[name].disabled, f"{name} が disabled になっていない")
+
+    def _age_contract(self, contract, *, days):
+        from contracts.models import Contract
+
+        Contract.objects.filter(pk=contract.pk).update(
+            save_date=timezone.now() - datetime.timedelta(days=days)
+        )
+
+    def test_toggle_delete_mark_rejected_for_contract_past_delete_window(self):
+        """セキュリティレビュー M-1: 登録から1週間以上経過した契約書は一括編集からも削除マークを
+        付けられない（documents 側と同じ扱い）。"""
+        from django.contrib.messages import get_messages
+
+        c = self._create_contract("aged")
+        self._age_contract(c, days=8)
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk]})
+        resp = self.client.post("/contracts/bulk-edit/", self._page_data(c, action="toggle_delete"))
+        self.assertRedirects(resp, "/contracts/bulk-edit/")
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("1週間以上経過" in t for t in texts))
+        self.assertEqual(self.client.session["contracts_bulk_edit"]["to_delete"], [])
+
+    def test_commit_rejects_smuggled_delete_mark_for_contract_past_delete_window(self):
+        """セキュリティレビュー M-1: セッション改ざん等で削除マークが積まれていても、確定前の
+        サーバー側検証でコミット全体を止め、論理削除しない。"""
+        from django.contrib.messages import get_messages
+
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self._age_contract(cs[1], days=10)
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        session = self.client.session
+        session["contracts_bulk_edit"]["to_delete"] = [cs[1].pk]
+        session.save()
+
+        resp = self.client.post("/contracts/bulk-edit/", self._page_data(cs[0]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("complete", resp.context)
+        self.assertEqual(resp.context["contract"].pk, cs[1].pk)
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("1週間以上経過" in t for t in texts))
+        cs[1].refresh_from_db()
+        self.assertFalse(cs[1].is_deleted)
+        self.assertIsNone(cs[1].deleted_at)
+
     def test_cancel_discards_staged_changes(self):
         cs = [self._create_contract(f"c{i}") for i in range(2)]
         self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
@@ -1100,6 +1239,68 @@ class BulkEditViewTests(TestCase):
         self.assertTrue(any("1件目に入力エラー" in t for t in texts))
         cs[0].refresh_from_db()
         self.assertEqual(cs[0].title, "c0")
+
+    def test_commit_db_failure_shows_error_and_keeps_state(self):
+        """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 M-1）で発見：
+        documents 側には test_commit_db_failure_shows_error_and_keeps_state があるが、
+        contracts.views.BulkEditView._commit の except (OSError, PendingFileStorageError,
+        DBError) → messages.error + redirect ＋ finally での opened_files クローズは
+        （commit 経路が改修で別物になったため）確定失敗のテストが1件も無かった。
+        contracts 側は関連書類を開いて apply_contract_edit に渡す都合で except 節が
+        documents 側より広く、documents 側テストで代替が効かない。"""
+        from django.contrib.messages import get_messages
+
+        from contracts.models import Contract
+
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        with mock.patch.object(Contract, "save", side_effect=DBError("db down")):
+            resp = self.client.post(
+                "/contracts/bulk-edit/", self._page_data(cs[0], title="c0-new")
+            )
+        self.assertRedirects(resp, "/contracts/bulk-edit/")
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("更新に失敗しました" in t for t in texts))
+        cs[0].refresh_from_db()
+        self.assertEqual(cs[0].title, "c0")
+        self.assertIsNotNone(self.client.session.get("contracts_bulk_edit"))
+
+    def test_related_file_stash_failure_shows_error_and_redirects(self):
+        """指摘 M-1（後半）：post() 内で related_files をアップロードしたページの
+        stash_files_to_tmp() が PendingFileStorageError → messages.error + redirect の
+        フォールバックが未検証だった。"""
+        from django.contrib.messages import get_messages
+
+        from core.upload_services import PendingFileStorageError
+
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        data = self._page_data(cs[0], action=None, bulk_nav="next")
+        with mock.patch(
+            "core.upload_services.stash_files_to_tmp",
+            side_effect=PendingFileStorageError("disk full"),
+        ):
+            resp = self.client.post(
+                "/contracts/bulk-edit/",
+                {**data, "related_files": SimpleUploadedFile("c0-rel.pdf", b"AAAA")},
+            )
+        self.assertRedirects(resp, "/contracts/bulk-edit/")
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("ファイルの保存に失敗しました" in t for t in texts))
+
+    def test_update_does_not_touch_expiry_date(self):
+        """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 H-1）／memory
+        expiry_date_edit_recalc_spec：契約書は保存期間が固定で編集で変えられる要素が
+        無いため、一括編集で確定しても expiry_date は登録時の値のまま不変
+        （contracts.services.apply_contract_edit は expiry_date を一切触らない）。"""
+        c = self._create_contract("c0")
+        original_expiry = c.expiry_date
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk]})
+        resp = self.client.post("/contracts/bulk-edit/", self._page_data(c, title="c0-new"))
+        self.assertEqual(resp.context["complete"]["counts"]["updated"], 1)
+        c.refresh_from_db()
+        self.assertEqual(c.title, "c0-new")
+        self.assertEqual(c.expiry_date, original_expiry)
 
     def test_related_files_add_is_staged_and_cancellable(self):
         from pathlib import Path
@@ -1484,6 +1685,164 @@ class EditScreenYearFieldTests(TestCase):
         self.assertEqual(self.contract.year, self.old_year)
 
 
+class ContractEditIsDirtyServiceTests(TestCase):
+    """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 M-2）で発見：
+    contracts.services.contract_edit_is_dirty（related_changed 引数を含む）が
+    BulkEditViewTests の HTTP 経由でしか間接検証されていなかった。None↔""正規化・
+    非管理者の部署読み替え・Decimal/日付の同値判定・関連書類増減単独での dirty 化を
+    個別に固定する。"""
+
+    def setUp(self):
+        import decimal
+
+        from contracts.models import Contract
+
+        self.decimal = decimal
+        self.dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept2 = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="営業部"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="9", name="管理者", password="pass1234",
+            department=self.dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.staff = Employee.objects.create_user(
+            employee_no="1", name="一般", password="pass1234",
+            department=self.dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        self.contract = Contract(
+            title="元タイトル", department=self.dept, group=self.group, category=self.category,
+            year=2026, uploader=self.admin, expiry_date=datetime.date(2036, 1, 1),
+            contract_date=datetime.date(2026, 4, 1), contract_amount=decimal.Decimal("1000"),
+            contract_partner="", memo="",
+        )
+        self.contract.file.save("c.pdf", ContentFile(b"x"), save=False)
+        self.contract.save()
+
+    def _cleaned(self, **overrides):
+        data = {
+            "title_0": "元タイトル", "department": self.dept, "group": self.group,
+            "category": self.category, "year": 2026,
+            "contract_date": datetime.date(2026, 4, 1),
+            "contract_period_start": None, "contract_period_end": None,
+            "renewal_date": None, "contract_amount": self.decimal.Decimal("1000"),
+            "contract_partner": "", "memo": "",
+        }
+        data.update(overrides)
+        return data
+
+    def test_identical_values_are_not_dirty(self):
+        self.assertFalse(contract_edit_is_dirty(self.contract, self._cleaned(), self.admin))
+
+    def test_contract_partner_none_and_empty_string_are_treated_as_equal(self):
+        self.assertFalse(
+            contract_edit_is_dirty(self.contract, self._cleaned(contract_partner=None), self.admin)
+        )
+
+    def test_same_decimal_amount_is_not_dirty(self):
+        self.assertFalse(
+            contract_edit_is_dirty(
+                self.contract, self._cleaned(contract_amount=self.decimal.Decimal("1000")), self.admin
+            )
+        )
+
+    def test_decimal_amount_change_is_dirty(self):
+        self.assertTrue(
+            contract_edit_is_dirty(
+                self.contract, self._cleaned(contract_amount=self.decimal.Decimal("2000")), self.admin
+            )
+        )
+
+    def test_contract_date_change_is_dirty(self):
+        self.assertTrue(
+            contract_edit_is_dirty(
+                self.contract, self._cleaned(contract_date=datetime.date(2026, 5, 1)), self.admin
+            )
+        )
+
+    def test_related_changed_alone_makes_it_dirty(self):
+        self.assertTrue(
+            contract_edit_is_dirty(self.contract, self._cleaned(), self.admin, related_changed=True)
+        )
+
+    def test_expiry_date_is_not_part_of_comparison(self):
+        self.contract.expiry_date = datetime.date(1999, 1, 1)
+        self.assertFalse(contract_edit_is_dirty(self.contract, self._cleaned(), self.admin))
+
+    def test_non_admin_cross_department_post_is_not_detected_as_dirty(self):
+        self.assertFalse(
+            contract_edit_is_dirty(self.contract, self._cleaned(department=self.dept2), self.staff)
+        )
+
+    def test_admin_department_change_is_dirty(self):
+        self.assertTrue(
+            contract_edit_is_dirty(self.contract, self._cleaned(department=self.dept2), self.admin)
+        )
+
+
+class ContractEditExpiryDateUnchangedTests(TestCase):
+    """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 H-1）で発見：
+    memory expiry_date_edit_recalc_spec（2026-08-28ユーザー確定）の
+    「契約書は編集時に expiry_date を一切触らない」を確認するテストが皆無だった。
+    契約書は保存期間が選択式ではなく settings.CONTRACT_RETENTION_YEARS 固定のため、
+    contracts.services.apply_contract_edit は文書側の retention_changed 分岐すら持たず
+    expiry_date を引き直さない。"""
+
+    def setUp(self):
+        from contracts.models import Contract
+
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        self.client.login(username="1", password="pass1234")
+        self.original_expiry = datetime.date(2099, 1, 1)
+        self.contract = Contract(
+            title="満了日確認用", department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.employee, expiry_date=self.original_expiry,
+        )
+        self.contract.file.save("doc.pdf", ContentFile(b"%PDF-1.4"), save=False)
+        self.contract.save()
+
+    def test_editing_contract_does_not_touch_expiry_date(self):
+        get_response = self.client.get(f"/contracts/{self.contract.pk}/edit/")
+        token = get_response.context["token"]
+        resp = self.client.post(
+            f"/contracts/{self.contract.pk}/edit/",
+            {
+                "token": token,
+                "department": self.department.pk,
+                "group": self.group.pk,
+                "category": self.category.pk,
+                "year": self.contract.year,
+                "title_0": "タイトル変更",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context["form"].errors)
+        self.contract.refresh_from_db()
+        self.assertEqual(self.contract.title, "タイトル変更")
+        self.assertEqual(self.contract.expiry_date, self.original_expiry)
+
+
 class UploadStep2FormDepartmentInitialTests(TestCase):
     """documents.tests.UploadStep2FormDepartmentInitialTestsと同じ理由（contracts.forms.
     UploadStep2Form、xlsx 保管!B412-416「※保管画面(文書)と同じ」）。新規登録画面
@@ -1670,6 +2029,18 @@ class DetailAPIViewTests(TestCase):
         data = response.json()
         self.assertEqual(data["related_files"], ["付属資料.pdf"])
         self.assertNotIn(related.file.name, data["related_files"])
+
+    def test_contract_amount_zero_is_returned_as_string_not_blank(self):
+        """コードレビューC-5：契約金額0円はDecimal('0')でfalsyのため、以前は`if amount`判定で
+        未入力(None)と同じく空文字になり金額欄が空表示になっていた。0円と未入力を区別する。"""
+        self.contract.contract_amount = 0
+        self.contract.save(update_fields=["contract_amount"])
+        response = self.client.get(f"/contracts/api/{self.contract.pk}/")
+        self.assertEqual(response.json()["contract_amount"], "0")
+
+    def test_contract_amount_none_is_returned_as_blank(self):
+        response = self.client.get(f"/contracts/api/{self.contract.pk}/")
+        self.assertEqual(response.json()["contract_amount"], "")
 
     def test_deleted_contract_yields_null_edit_and_delete_urls(self):
         """documents.tests.DetailAPIViewTests.test_deleted_document_yields_null_edit_and_delete_urls
@@ -2141,6 +2512,48 @@ class ContractEditViewFileHandlingTests(TestCase):
         # transaction.atomic()により本体タイトルの更新もロールバックされていること
         self.assertEqual(contract.title, "元のタイトル")
         self.assertFalse(RelatedFile.objects.filter(contract=contract).exists())
+
+    def test_related_file_partial_failure_cleans_up_orphan_files(self):
+        """レビュー指摘C-2：関連書類を複数追加し2件目以降で失敗した場合、transaction.atomic()が
+        DB行をロールバックするだけでなく、既にストレージへ書き込まれた1件目のファイル実体も
+        apply_contract_edit側で削除され孤児化しないこと（「登録」経路と同じ後始末）。"""
+        from django.core.files.storage import default_storage
+
+        from contracts.models import RelatedFile
+
+        contract = self._create_contract()
+        data = self._edit_form_data(contract)
+        data["token"] = self._get_token(contract)
+
+        real_create = RelatedFile.objects.create
+        created_names = []
+
+        def flaky_create(*args, **kwargs):
+            if created_names:
+                raise OSError("disk full")
+            rf = real_create(*args, **kwargs)
+            created_names.append(rf.file.name)
+            return rf
+
+        with mock.patch("contracts.models.RelatedFile.objects.create", side_effect=flaky_create):
+            response = self.client.post(
+                f"/contracts/{contract.pk}/edit/",
+                {
+                    **data,
+                    "related_files": [
+                        ContentFile(b"C1", name="a.pdf"),
+                        ContentFile(b"C2", name="b.pdf"),
+                    ],
+                },
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, 302)
+        contract.refresh_from_db()
+        self.assertEqual(contract.title, "元のタイトル")
+        self.assertFalse(RelatedFile.objects.filter(contract=contract).exists())
+        self.assertEqual(len(created_names), 1)
+        self.assertFalse(default_storage.exists(created_names[0]))
 
     def test_edit_view_db_failure_shows_error_and_does_not_update_contract(self):
         """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘1）で発見：

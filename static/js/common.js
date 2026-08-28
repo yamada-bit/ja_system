@@ -13,6 +13,24 @@ function getCsrfToken() {
 }
 
 /*
+ * innerHTML へユーザー由来のフリーテキスト（マスタ名・タイトル・メモ・アップロード
+ * ファイル名等）を埋め込む箇所の格納型XSS対策。renderPopupPopupItems()（popup-select）は
+ * DOM API で組み立てているが、renderDetailPopup()（検索結果詳細ポップアップ）の
+ * プロパティ表・関連書類一覧だけは <table> 文字列を組み立てて innerHTML に代入しているため、
+ * 値側をここでエスケープしてから挿入する（ラベル側は静的なので対象外）。
+ * documents/contracts.api.DetailAPIView は JsonResponse で < > をエスケープしないため、
+ * API 応答の各値は生テキストのまま届く点に注意。
+ */
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/*
  * 検索・閲覧画面の「一括選択」ボタン。原本index.htmlのtoggleAllCheckboxes()と同じロジック
  * （バックエンド不要な純クライアント処理のため、一括ダウンロード/一括編集と違いdisabledにしない）。
  */
@@ -97,13 +115,37 @@ function showSearchPreview(title, previewUrl, kind, previewKind, isDeleted) {
     frame.removeAttribute("src");
     placeholder.style.display = "";
     if (isDeleted) {
-      titleEl.innerHTML = `<strong>${title}</strong><br><br>本${label}は削除されているため、プレビューを表示できません。`;
+      setSearchPreviewMessage(titleEl, title, `本${label}は削除されているため、プレビューを表示できません。`);
     } else if (!previewUrl) {
-      titleEl.innerHTML = `<strong>${title}</strong><br><br>プレビューを表示するには「${label}-ダウンロード」権限が必要です。権限管理画面でご確認ください。`;
+      setSearchPreviewMessage(
+        titleEl,
+        title,
+        `プレビューを表示するには「${label}-ダウンロード」権限が必要です。権限管理画面でご確認ください。`
+      );
     } else {
-      titleEl.innerHTML = `<strong>${title}</strong><br><br>この形式のファイルはプレビュー表示に対応していません。ダウンロードしてご確認ください。`;
+      setSearchPreviewMessage(
+        titleEl,
+        title,
+        "この形式のファイルはプレビュー表示に対応していません。ダウンロードしてご確認ください。"
+      );
     }
   }
+}
+
+/*
+ * 「文書イメージ」欄のプレビュー不可メッセージを組み立てる。title は検索結果テンプレートの
+ * onclick から `|escapejs` 済みで渡ってくるが、それは「JS文字列リテラルとして安全」なだけで
+ * innerHTML に流すと `<img onerror=...>` 等が復元されて実行される（格納型XSS）。タイトルは
+ * <strong> の textContent として設定し、説明文は静的テキストノードで足す。
+ */
+function setSearchPreviewMessage(titleEl, title, message) {
+  titleEl.textContent = "";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  titleEl.appendChild(strong);
+  titleEl.appendChild(document.createElement("br"));
+  titleEl.appendChild(document.createElement("br"));
+  titleEl.appendChild(document.createTextNode(message));
 }
 
 /*
@@ -643,7 +685,9 @@ function renderDetailPopup(data, kind) {
       ["契約先名", data.contract_partner],
       ["保存者", data.uploader],
       ["保存日時", data.save_date],
-      ["関連書類", data.related_files && data.related_files.length ? data.related_files.map((f) => `📎 ${f}`).join("<br>") : "なし"],
+      ["関連書類", data.related_files && data.related_files.length
+        ? { html: data.related_files.map((f) => `\u{1F4CE} ${escapeHtml(f)}`).join("<br>") }
+        : "なし"],
       ["メモ欄", data.memo],
     ];
   }
@@ -651,7 +695,15 @@ function renderDetailPopup(data, kind) {
   const view = document.getElementById("detail-properties-view");
   view.innerHTML =
     '<table class="search-condition-table" style="width:100%;">' +
-    rows.map(([label, value]) => `<tr><td class="label">${label}</td><td>${value != null ? value : ""}</td></tr>`).join("") +
+    rows
+      .map(([label, value]) => {
+        // 関連書類の行だけは複数ファイル名を <br> で連結した整形済みHTML（各ファイル名は
+        // 生成時に escapeHtml 済み）。それ以外の値は生テキストなのでここでエスケープする。
+        const cell =
+          value && typeof value === "object" && "html" in value ? value.html : escapeHtml(value);
+        return `<tr><td class="label">${label}</td><td>${cell}</td></tr>`;
+      })
+      .join("") +
     "</table>";
 
   // ダウンロードボタン（xlsx 検索・閲覧・変更!B329-330「権限が無いログインユーザはボタンを

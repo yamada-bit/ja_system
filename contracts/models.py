@@ -153,7 +153,9 @@ class RelatedFile(UuidPrefixedFilenameMixin, models.Model):
         ordering = ["display_order", "id"]
 
     def __str__(self):
-        return self.file.name
+        # 生のストレージパス（"{uuid}_元名"）ではなくUUIDプレフィックスを除いた元名を返す。
+        # admin一覧・監査ログでの可読性のため（コードレビューで発見、2026-08-28修正）。
+        return self.display_name
 
     # display_nameプロパティの実体はcore.models.UuidPrefixedFilenameMixinに集約済み
     # （Document/Contractとの重複をコード監査で発見、2026-08-25修正）。

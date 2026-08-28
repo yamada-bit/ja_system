@@ -2,6 +2,14 @@ from .base import *  # noqa: F401,F403
 
 DEBUG = False
 
+# セキュリティレビュー M-2: base.py の SECRET_KEY は開発用の安全でないフォールバック値
+# （"django-insecure-..."）を持つため、本番では .env に SECRET_KEY を設定し忘れると既知の
+# リポジトリ公開値でそのまま起動してしまい、セッションクッキー・signing.dumps 系トークンの
+# 署名偽造が可能になる。CONTRACT_RETENTION_YEARS 等の他の設定値と違い、鍵は「未設定なら
+# 起動失敗」でなければならないため、ここでデフォルト無しの env() で読み直し、未設定なら
+# django-environ が ImproperlyConfigured を送出してデプロイを止める。
+SECRET_KEY = env("SECRET_KEY")
+
 SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True

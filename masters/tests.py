@@ -205,6 +205,30 @@ class CategorySearchFormTests(TestCase):
         self.assertIn(group, form.fields["group"].queryset)
 
 
+class RetentionPeriodModelTests(TestCase):
+    """RetentionPeriod.__str__ の永年/通常の2分岐（従来は audit_services.log 経由で
+    間接的に文字列化されるのみで、直接検証するテストが無かった）。"""
+
+    def test_str_permanent_ignores_period_value(self):
+        rp = RetentionPeriod(
+            kbn=RetentionKbn.DOCUMENT, period_value=None,
+            period_unit=RetentionPeriodUnit.PERMANENT, display_order=1,
+        )
+        self.assertEqual(str(rp), "永年")
+
+    def test_str_year_and_month_use_unit_display(self):
+        year = RetentionPeriod(
+            kbn=RetentionKbn.DOCUMENT, period_value=5,
+            period_unit=RetentionPeriodUnit.YEAR, display_order=1,
+        )
+        month = RetentionPeriod(
+            kbn=RetentionKbn.DOCUMENT, period_value=6,
+            period_unit=RetentionPeriodUnit.MONTH, display_order=2,
+        )
+        self.assertEqual(str(year), "5年")
+        self.assertEqual(str(month), "6ヵ月")
+
+
 class RetentionPeriodFormTests(TestCase):
     def setUp(self):
         self.existing = RetentionPeriod.objects.create(

@@ -1,7 +1,7 @@
 import logging
 
 from core import search_services
-from documents.forms import MATCH_AND
+from core.forms import MATCH_AND
 from documents.models import Document
 from organizations.services import visible_department_ids
 from permissions.services import can_select_department

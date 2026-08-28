@@ -62,6 +62,22 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   「更新なし」を除外、エラー時は最初のエラーページへジャンプ、完了モーダルに全件を状態付きで表示）。
   削除は「削除予定」マーク＋「削除取消」トグル、「キャンセル」で全破棄。詳細はアーカイブ
   「一括編集を「更新ボタンで全ページ一括確定」モデルへ改修」節参照。
+- documents/contractsコードレビュー（`review_code_documents_contracts.txt`、`/code-review high`）の
+  反映（2026-08-28）：高＝0件。中3件（C-1 保存満了日の編集時再計算を「保存期間変更時のみ」に
+  3経路で統一／C-2 契約書編集の関連書類保存途中失敗時の孤児ファイル後始末／C-3 一括DLのZIP構築を
+  OSError全般捕捉に拡大）＋C-4（ZIPエントリ名をdisplay_name化＋同名連番）を修正、`manage.py test
+  documents contracts`290件PASS。低優先度12件（C-5〜C-9・R-1〜R-7）は`review_pending.txt`項番
+  45〜56に理由付きで記録。詳細はアーカイブ「documents/contractsコードレビューの反映」節参照。
+- セキュリティレビュー（`review_security.txt`、リポジトリ全体精査）優先度「高」「中」の反映
+  （2026-08-28）：高3件（H-1/H-2 検索結果詳細・行クリックプレビューの格納型XSS＝common.jsを
+  escapeHtml／DOM API化／H-3 アップロードファイルのMIME未検証＋inline配信＝`core/file_serving.py`・
+  `core/upload_validation.py`新設で「PDF・画像以外はinline配信させずnosniff/CSP付与」＋
+  「HTML/SVG/スクリプトのアップロード拒否」）、中2件（M-1 一括編集ステージング型削除の
+  can_delete()サーバー側未検証をtoggle_delete・_commit両方で補完／M-2 prod.pyの
+  SECRET_KEYデフォルト廃止）を1件ずつ修正。`manage.py test`全752件PASS（新規テスト14件純増）。
+  低優先度L-1〜L-3・情報I-1は修正せず`review_security.txt`「対応結果」節に理由付きで記録。
+  アプリ全体CSP・MEDIA別オリジン配信は中期対応として見送り。詳細はアーカイブ
+  「セキュリティレビュー（review_security.txt）優先度「高」「中」の反映」節参照。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

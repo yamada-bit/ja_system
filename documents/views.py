@@ -1,9 +1,7 @@
 import logging
 
-from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db import Error as DBError, transaction
 from django.shortcuts import redirect, render
@@ -455,6 +453,19 @@ class BulkEditView(LoginRequiredMixin, View):
         nav = request.POST.get("bulk_nav")
 
         if action == "toggle_delete":
+            # セキュリティレビュー M-1: 削除マークを「付ける」操作は can_delete() をサーバー側で
+            # 検証する（マーク解除は常に許可）。_commit 側にも同じ検証があるが、そもそも不正な
+            # マークを積ませない。
+            if not marked_delete and not deletion_services.can_delete(self.object):
+                logger.warning(
+                    "一括編集で削除できない文書への削除マークを拒否しました: employee_no=%s pk=%s",
+                    request.user.employee_no,
+                    self.object.pk,
+                )
+                messages.error(
+                    request, deletion_services.deletion_denial_message(self.object, entity_name="文書")
+                )
+                return redirect("documents:bulk_edit")
             bulk_edit_services.toggle_delete_mark(request.session, BULK_EDIT_SESSION_KEY, self.object.pk)
             return redirect("documents:bulk_edit")
         if nav == "prev":
@@ -499,6 +510,41 @@ class BulkEditView(LoginRequiredMixin, View):
                 request,
                 self.template_name,
                 self._context(request, first_form, token, state, marked_delete=False),
+            )
+
+        # --- 削除予定pkの can_delete() 検証パス（セキュリティレビュー M-1） ---
+        # UI は edit.html の {% if can_delete %} で「削除」ボタンを隠すが、セッション改ざんや
+        # toggle_delete ハンドラの直叩きで削除マークが付く余地があるため、確定前にサーバー側でも
+        # 「削除済み／登録から1週間以上経過」を再検証する（BaseDeleteView.post 等、他の全削除経路と
+        # 同じ扱い。1件でもNGならコミット全体を止めて該当ページへ誘導する）。
+        undeletable = [
+            i
+            for i, pk in enumerate(pks)
+            if pk in to_delete and pk in objs_by_pk and not deletion_services.can_delete(objs_by_pk[pk])
+        ]
+        if undeletable:
+            first_index = undeletable[0]
+            self.object = objs_by_pk[pks[first_index]]
+            bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, first_index)
+            logger.warning(
+                "一括編集で削除できない文書への削除確定を拒否しました: employee_no=%s pk=%s is_deleted=%s",
+                request.user.employee_no,
+                self.object.pk,
+                self.object.is_deleted,
+            )
+            messages.error(
+                request,
+                f"{first_index + 1}件目: "
+                + deletion_services.deletion_denial_message(self.object, entity_name="文書"),
+            )
+            token = issue_token(request.session, self.form_id)
+            state = bulk_edit_services.get_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
+            return render(
+                request,
+                self.template_name,
+                self._context(
+                    request, self._build_form(self.object, marked_delete=True), token, state, marked_delete=True
+                ),
             )
 
         # --- 確定パス ---
@@ -557,6 +603,11 @@ class BulkEditView(LoginRequiredMixin, View):
             "unchanged": sum(1 for r in rows if r["status"] == "更新なし"),
             "deleted": sum(1 for r in rows if r["status"] == "削除"),
         }
+        if not rows:
+            # 更新確定の直後に対象が全件物理削除された場合（日次purgeバッチとの競合）。完了モーダルの
+            # 背後に敷くフォームを描画できないため検索画面へ戻す（コードレビューC-7、2026-08-28修正）。
+            messages.error(request, "編集対象が見つかりませんでした。検索結果一覧からやり直してください。")
+            return redirect("documents:search")
         # 完了モーダルの背後に敷くedit.htmlは1件目のフォームで描画する（モーダルが全面を覆う）。
         self.object = rows[0]["obj"]
         form = self._build_form(self.object)

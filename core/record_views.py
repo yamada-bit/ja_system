@@ -10,6 +10,7 @@ from django.views import View
 
 from audit import services as audit_services
 from core import deletion_services
+from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from permissions.services import can_download
 
 logger = logging.getLogger(__name__)
@@ -49,9 +50,17 @@ class BaseFileServeView(View):
             )
             raise PermissionDenied(f"{action_label}権限がありません。")
         try:
-            response = FileResponse(
-                obj.file.open("rb"), as_attachment=self.as_attachment, filename=obj.display_name
+            # セキュリティレビュー H-3: プレビュー（as_attachment=False）でも、PDF・ラスター画像
+            # 以外はインライン配信させず添付ダウンロードへ倒す。加えてどの形式でも nosniff と
+            # 実行禁止 CSP を付与し、アップロードされた .html/.svg 等が同一オリジンで実行される
+            # 経路を塞ぐ（core.file_serving のモジュール docstring 参照）。
+            as_attachment = resolve_as_attachment(
+                wants_inline=not self.as_attachment, filename=obj.display_name
             )
+            response = FileResponse(
+                obj.file.open("rb"), as_attachment=as_attachment, filename=obj.display_name
+            )
+            apply_file_response_security_headers(response)
         except OSError:
             # FileNotFoundError（実体欠損）だけでなくPermissionError（ロック・権限エラー等）も
             # OSErrorのサブクラスのため、ストレージI/O境界で起こりうるOSError全般をここで
@@ -130,7 +139,10 @@ class BaseBulkDownloadView(View):
         objects = self.model.objects.filter(pk__in=valid_pks, is_deleted=False)
         if allowed_department_ids is not None:
             objects = objects.filter(department_id__in=allowed_department_ids)
-        total_count = objects.count()
+        # クエリセットを一度だけ評価する。以前は count()・zip_builder の反復・audit_extra_kwargs
+        # 内の privacy_flag 集計でそれぞれ再SELECTしていた（コードレビューR-4、2026-08-28修正）。
+        objects = list(objects)
+        total_count = len(objects)
         # ZIP構築自体はcore.zip_services.build_zip_archiveへ分離済み（規約準拠監査で発見：
         # ファイルI/Oを伴うビジネスロジックがビューに直書きされていた。件数の不一致は下の
         # messages.warningで利用者にも案内する）。
@@ -149,9 +161,11 @@ class BaseBulkDownloadView(View):
             **self.audit_extra_kwargs(objects),
         )
         if missing_count:
+            # 「見つからなかった」だけでなく権限不整合・I/Oエラー等も含む（zip_servicesの捕捉範囲を
+            # OSError全般に広げたため。レビュー指摘C-3）。
             messages.warning(
                 request,
-                f"選択した{total_count}件中{missing_count}件のファイルが見つからなかったため、"
+                f"選択した{total_count}件中{missing_count}件のファイルを取得できなかったため、"
                 "ダウンロードされたZIPに含まれていません。",
             )
         response = HttpResponse(zip_bytes, content_type="application/zip")
@@ -252,9 +266,10 @@ class BaseDeleteView(View):
         return self._post_delete_redirect(request, obj, success_message)
 
     def _post_delete_redirect(self, request, obj, success_message):
-        """非AJAX削除（画面フォームからのPOST）後の遷移。既定は完了メッセージを出して検索画面へ
-        戻る。保管画面２（edit.html）の削除ボタンのように、単独編集なら検索画面・一括編集なら
-        次のレコードへ、と遷移先を変えたいサブクラスはここをオーバーライドする
-        （documents/contracts.views.EditDeleteView）。"""
+        """非AJAX削除（画面フォームからのPOST）後の遷移。完了メッセージを出して検索画面へ戻る。
+        単独編集画面（edit.html）の削除ボタンもこの経路で、EditDeleteViewは監査ログのaction名を
+        差し替えるだけで遷移先はこの既定のまま（検索画面）。一括編集（BulkEditView）の削除は
+        「更新」ボタンでまとめて確定するステージ型のため、このビューは通らない。
+        遷移先を変えたいサブクラスがあればここをオーバーライドできる（現状は該当なし）。"""
         messages.success(request, success_message)
         return redirect(self.search_url_name)

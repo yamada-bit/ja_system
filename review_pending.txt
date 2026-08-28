@@ -6,13 +6,39 @@ review_code_permissions_accounts.txt・review_rule_permissions_accounts.txt・
 review_test_permissions_accounts.txt・review_code_organizations_masters.txt・
 review_rule_organizations_masters.txt・review_test_organizations_masters.txt・
 review_code_audit_core.txt・review_rule_audit_core.txt・review_test_audit_core.txt・
-review_security.txt の13ファイルに記録された[低]優先度指摘のうち、「見送り」と判断した項目の
-一覧。高・中優先度の指摘、および[低]のうち「直す」と判断して対応済みの項目（未使用import
-SEARCH_RADIO_DEFAULTS、core/views.py OtherSettingsView._render_mainのN+1、.env.example記載
-漏れ3件、core/notice_services.pyのimport非対称性の4件）はここには含まない。
+review_security.txt・review_code_documents_contracts.txt の14ファイルに記録された[低]優先度
+指摘のうち、「見送り」と判断した項目の一覧。
+
+高・中優先度の指摘、および[低]のうち「直す」と判断した項目はここには含まない。
 
 各項目末尾の「(出典: ...)」は元のreview_*.txtファイル名。将来これらの経路を直接使う変更が
 入る場合は、その時点で出典ファイルの詳細説明を再確認してテスト追加・修正を検討すること。
+
+
+================================================================================
+■ 2026-08-28 判断セッションの記録
+================================================================================
+review_pending.txt を「全61項目を一律見送り」の2026-08-26スナップショットから、1項目ずつ
+「今回は見送り / 直す」をユーザーと確認して更新した（2026-08-28）。
+
+このセッションで [低] のまま「直す」に振り分け、2026-08-28に対応完了した15件（本ファイルからは除外）:
+
+  - RelatedFile.__str__ が生ストレージパスを返す（旧#7）
+  - contracts SearchView にクラス docstring 無し（旧#8）
+  - documents/forms.py がマジックストリング "document" をハードコード（旧#10）
+  - organizations/services.py branch_choices/section_choices の二重重複排除（旧#27）
+  - masters RetentionPeriod.__str__ の直接テスト無し（旧#31）
+  - core/record_views.py BaseBulkDownloadView の queryset 2回評価（旧#37。list()化で
+    評価1回に集約する部分のみ。StreamingHttpResponse 化は旧#53として引き続き見送り）
+  - contracts/api.py C-5 契約金額0円が詳細ポップアップで空欄（falsy-zero）（旧#45）
+  - documents/contracts views.py C-7 _render_complete の rows[0] 無条件参照（旧#47）
+  - core/upload_services.py R-2 combine_upload_chunks のセッションリスト in-place 変更（旧#51）
+  - core/record_views.py R-5 BaseDeleteView._post_delete_redirect の docstring 乖離（旧#54）
+  - documents/services.py R-6 モジュール logger 未整備（規約違反）（旧#55）
+  - core/models.py R-7 論理削除時の正規化カラム無駄な再計算（旧#56）
+  - documents/contracts views.py・admin.py の未使用 import（旧#57。MATCH_AND 分を含む）
+  - documents/contracts forms.py の MATCH_AND 2段再エクスポート参照（旧#58。旧#57と同時解消）
+  - templates/documents/edit.html data-current-expiry のゼロ埋め不一致（旧#62）
 
 
 ================================================================================
@@ -38,55 +64,44 @@ SEARCH_RADIO_DEFAULTS、core/views.py OtherSettingsView._render_mainのN+1、.en
    (出典: review_code_doc_contract_full.txt)
 
 5. contracts/services.py:137-140（calculate_expiry_date）がdocuments側の_add_yearsを再利用せず、
-   うるう年補正を自前で再実装。両者とも動作は正しく実害は無い。
+   うるう年補正を自前で再実装。両者とも動作は正しく実害は無い。→ review_rule_doc_contract.txt
+   指摘3（本ファイル「documents / contracts（追補：rule再監査）」の指摘3）と同一。
    (出典: review_code_doc_contract_full.txt)
 
 6. documents/models.py:9, contracts/models.py:13, documents/forms.py:19, contracts/forms.py:18の
    logger宣言4箇所が未使用（宣言のみで発火箇所無し）。実害は無く、将来ログが必要になった時点で
    使うか判断すればよい。
+   ※ documents/services.py への logger 追加（旧#55）は「直す」に振り分け済みだが、こちらは
+     models.py/forms.py 側の宣言済み未使用であり別件。
    (出典: review_code_doc_contract_full.txt)
 
-7. contracts/models.py:174（RelatedFile.__str__）が自身のdisplay_nameプロパティを使わず
-   self.file.name（生のストレージパス）を返す。Django admin/ログでの表示可読性の問題のみ。
-   (出典: review_code_doc_contract_full.txt)
-
-8. contracts/views.py:609-611（SearchView）にクラスdocstringが無い（documents側には有り）。
-   実害無し、文書化漏れのみ。
-   (出典: review_code_doc_contract_full.txt)
-
-9. documents/views.py:238-336（DocumentEditView）, contracts/views.py:282-410
+7. documents/views.py:238-336（DocumentEditView）, contracts/views.py:282-410
    （ContractEditView）がUpdateViewを継承しているが実質使っていない（get()/post()を完全に
-   上書き）。動作上のバグではなく設計上の指摘のみ。
-   (出典: review_code_doc_contract_full.txt)
+   上書き）。動作上のバグではなく設計上の指摘のみ。→ review_code_documents_contracts.txt R-1
+   （本ファイル追補のR-1）と同一。基底をViewへ変更＋context_object_name削除で解消するが、
+   ModelForm系機能の再設計を伴うため見送り。
+   (出典: review_code_doc_contract_full.txt, review_code_documents_contracts.txt R-1)
 
-10. documents/forms.py:84がRetentionKbn定数を使わずマジックストリング"document"をハードコード。
-    値は正しく実害は無い。
-    (出典: review_code_doc_contract_full.txt)
+8. contracts.tests.BulkDownloadViewTestsにpks未選択時のリダイレクト確認が無い（documents側には
+   有り）。core.record_views.BaseBulkDownloadViewは完全共有コードでdocuments側テストで実質
+   カバー済み。
+   (出典: review_test_doc_contract.txt 指摘5)
 
-11. contracts.tests.BulkDownloadViewTestsにpks未選択時のリダイレクト確認が無い（documents側には
-    有り）。core.record_views.BaseBulkDownloadViewは完全共有コードでdocuments側テストで実質
-    カバー済み。
-    (出典: review_test_doc_contract.txt 指摘5)
+9. contracts.tests.DeleteViewAjaxTestsに「削除済み契約書への非AJAX削除」確認が無い。
+   期限超過ケース（DeleteViewWindowTests）で別条件から既にコードパスは実行済み。文言差分のみ
+   未検証。
+   (出典: review_test_doc_contract.txt 指摘6)
 
-12. contracts.tests.DeleteViewAjaxTestsに「削除済み契約書への非AJAX削除」確認が無い。
-    期限超過ケース（DeleteViewWindowTests）で別条件から既にコードパスは実行済み。文言差分のみ
-    未検証。
-    (出典: review_test_doc_contract.txt 指摘6)
-
-13. contracts.tests.ChunkUploadAPITestsに不正リクエスト（400）確認が無い。
+10. contracts.tests.ChunkUploadAPITestsに不正リクエスト（400）確認が無い。
     core.upload_views.BaseChunkUploadAPIViewは完全共有コードでdocuments側テストで実質カバー済み。
     (出典: review_test_doc_contract.txt 指摘9)
-
-14. documents/rule監査で発見の未使用import SEARCH_RADIO_DEFAULTS は対応済み（本ファイルの対象外。
-    2026-08-26に削除済み）。
-    ※このメモのみ、他の見送り項目とは扱いが異なるため注記として残す。
 
 
 ================================================================================
 ■ permissions / accounts
 ================================================================================
 
-15. permissions/api.py:13-30 OptionListAPIViewがSettingsMenuAccessMixin等のロール制御を持たず、
+11. permissions/api.py:13-30 OptionListAPIViewがSettingsMenuAccessMixin等のロール制御を持たず、
     権限管理画面へのアクセス権が無いSTAFFロールでも部署一覧・分類一覧を直接取得できる。
     影響は部署名・分類/カテゴリー名という業務メタデータの開示にとどまりPII・認証情報の漏洩は
     伴わないため、ユーザー指示により見送り確定（review_security.txt対応状況2026-08-26で最終決定）。
@@ -95,30 +110,30 @@ SEARCH_RADIO_DEFAULTS、core/views.py OtherSettingsView._render_mainのN+1、.en
     (出典: review_code_permissions_accounts.txt, review_rule_permissions_accounts.txt,
     review_security.txt)
 
-16. accounts/csv_import_services.py:118のCSV職員番号NFKC正規化（全角→半角変換、2026-08-25修正）に
+12. accounts/csv_import_services.py:118のCSV職員番号NFKC正規化（全角→半角変換、2026-08-25修正）に
     対応する単体テストが無い。コード側コメントで既知・見送りと明記済み。
     (出典: review_rule_permissions_accounts.txt, review_test_permissions_accounts.txt 低12)
 
-17. accounts/models.py create_superuser / has_perm / has_module_perms が未テスト。Django管理
+13. accounts/models.py create_superuser / has_perm / has_module_perms が未テスト。Django管理
     サイト用の経路でUI上の利用箇所は無い。
     (出典: review_test_permissions_accounts.txt 低11)
 
-18. accounts/csv_import_services.py _apply_manager_flagの「既にMANAGERロールの職員に
+14. accounts/csv_import_services.py _apply_manager_flagの「既にMANAGERロールの職員に
     manager_flag=1」で重複更新・重複監査ログを発生させないことの直接テストが無い。
     (出典: review_test_permissions_accounts.txt 低12)
 
-19. permissions/services.py visible_settings_menu_items・can_access_settings_menu_indexの
+15. permissions/services.py visible_settings_menu_items・can_access_settings_menu_indexの
     SETTINGS_MENU_VISIBLE_ROLES全キーを機械的に検証する単体テストが無い。
     (出典: review_test_permissions_accounts.txt 低13)
 
-20. permissions/forms.py AuthoritySearchForm、accounts/forms.py StaffSearchFormの単体テストが
+16. permissions/forms.py AuthoritySearchForm、accounts/forms.py StaffSearchFormの単体テストが
     無い（View経由で暗黙にカバー）。
     (出典: review_test_permissions_accounts.txt 低14)
 
-21. accounts/views.py LogoutViewの未ログイン状態アクセス（監査ログ非記録分岐）が未テスト。
+17. accounts/views.py LogoutViewの未ログイン状態アクセス（監査ログ非記録分岐）が未テスト。
     (出典: review_test_permissions_accounts.txt 低15)
 
-22. permissions/services.py department_ids_for_group_scopeのkind="contract"分岐、
+18. permissions/services.py department_ids_for_group_scopeのkind="contract"分岐、
     visible_employeesのprefetch_related効果（クエリ数）が未テスト。
     (出典: review_test_permissions_accounts.txt 低16)
 
@@ -127,72 +142,63 @@ SEARCH_RADIO_DEFAULTS、core/views.py OtherSettingsView._render_mainのN+1、.en
 ■ organizations / masters
 ================================================================================
 
-23. masters/services.py:25-38（scope_queryset_by_department）が非管理者に対して「自部署のみ」を
+19. masters/services.py:25-38（scope_queryset_by_department）が非管理者に対して「自部署のみ」を
     意図しつつ、department未設定（NULL、Rev1.2移行前レガシー行）の全件を部署を問わず全非管理者に
     見せる。docstringに「移行前データの退行防止のための意図的な暫定措置」と明記済み。既存データの
-    部署バックフィルが完了しているか確認の上、完了後はこの分岐を外す想定。
+    部署バックフィルが完了しているか確認の上、完了後はこの分岐を外す想定。（★要追跡）
     (出典: review_code_organizations_masters.txt)
 
-24. masters/services.py:9-22（department_scope_ids）がemployee.department_id未設定（None）時に
-    {None}を返し、上記23と組み合わさると「department未設定行のみ見える」状態になり得る
+20. masters/services.py:9-22（department_scope_ids）がemployee.department_id未設定（None）時に
+    {None}を返し、上記19と組み合わさると「department未設定行のみ見える」状態になり得る
     （エラー・警告なく静かに発生）。accounts.Employee側のdepartment必須制約が保証されているか
-    確認できれば実害は無い。
+    確認できれば実害は無い。（★要追跡）
     (出典: review_code_organizations_masters.txt)
 
-25. masters/views.py:33-47,303-312（_group_queryset_with_counts / _category_queryset_with_counts）
+21. masters/views.py:33-47,303-312（_group_queryset_with_counts / _category_queryset_with_counts）
     がdoc_count/contract_countを全行で毎回両方集計し、doc_kbnに応じて片方だけ採用（もう片方は
     破棄）。1ページ100件表示のため毎回不要なJOIN付き集計が2倍発生するが実害は軽微。
     (出典: review_code_organizations_masters.txt)
 
-26. organizations/api.py:38-47（OptionListAPIView.dispatch）がpermissions.mixins.
+22. organizations/api.py:38-47（OptionListAPIView.dispatch）がpermissions.mixins.
     SettingsMenuAccessMixinの認可チェックを、MRO制約（core.api.BaseOptionListAPIViewとの
     継承順の都合）を理由に手書きで再実装。現状はこの1箇所のみで実害は無い。
     (出典: review_code_organizations_masters.txt)
 
-27. organizations/services.py:55-76（branch_choices / section_choices）がvalues_list().distinct()
-    でDB側重複排除した上でさらにPython側dict().items()でも重複排除しており無駄な変換が重複。
-    部署マスタは件数小さく実害は軽微。
-    (出典: review_code_organizations_masters.txt)
-
-28. masters/admin.py・organizations/admin.pyともDjango管理サイトへのモデル未登録。CLAUDE.md自体は
+23. masters/admin.py・organizations/admin.pyともDjango管理サイトへのモデル未登録。CLAUDE.md自体は
     明文規約では無いが、masters.SystemSettingのようにDB直接操作しか変更手段が無いモデルが存在する
     という運用上の不便さがすでに認識されている。将来的な運用改善候補。
     (出典: review_rule_organizations_masters.txt)
 
-29. masters.RetentionPeriodにupdated_atフィールドが無く、Group/Category（両方created_at/
+24. masters.RetentionPeriodにupdated_atフィールドが無く、Group/Category（両方created_at/
     updated_atあり）と非対称。削除時にGroup/Categoryはupdated_atも更新するがRetentionPeriodは
     フィールド自体が無いため更新されない。フィールド追加にはmigrationを伴うため見送り。
     (出典: review_rule_organizations_masters.txt)
 
-30. organizations/services.py department_composite_order_byの単体テストが無く、唯一の実利用箇所
+25. organizations/services.py department_composite_order_byの単体テストが無く、唯一の実利用箇所
     （masters側の管理者sort=department）も「非管理者に効かないこと」のみ検証され、「管理者が
     指定した場合の実際の並び順」自体は未検証。default_order_by検証と重複が大きく実益が薄い。
     (出典: review_test_organizations_masters.txt 低13)
 
-31. masters/models.py RetentionPeriod.__str__（永年/通常の2分岐）の内容を直接検証するテストが
-    無い（audit_services.log経由で間接的に文字列化されるのみ）。
-    (出典: review_test_organizations_masters.txt 低14)
-
-32. organizations/models.py DepartmentViewScope.__str__、および(viewer,visible)組の
+26. organizations/models.py DepartmentViewScope.__str__、および(viewer,visible)組の
     UniqueConstraint自体のDBレベル直接テストが無い。apply_dept_action idempotencyテストで
     間接カバー済み。
     (出典: review_test_organizations_masters.txt 低15)
 
-33. masters/views.py のGroup系（Regist/Edit/Delete）・Retention系（Regist/Edit/Delete）について、
+27. masters/views.py のGroup系（Regist/Edit/Delete）・Retention系（Regist/Edit/Delete）について、
     設定メニューのロール別アクセス制御がList画面のみ個別検証されており、Category系のような
     全View個別の回帰テストが無い。共通のSettingsMenuAccessMixinをCategory系で既に個別検証済みで
     実装が完全共通のため重複テストになる。
     (出典: review_test_organizations_masters.txt 低16)
 
-34. organizations/services.py branch_choicesの重複排除（同一branch_codeが複数部課にまたがる
+28. organizations/services.py branch_choicesの重複排除（同一branch_codeが複数部課にまたがる
     場合に1件のみ列挙されること）が、複数本支所が存在するデータセットでは未検証。
     (出典: review_test_organizations_masters.txt 低17)
 
-35. masters/views.py CategoryListView.apply_special_sortの"group"列ソートがasc方向のみ検証されて
+29. masters/views.py CategoryListView.apply_special_sortの"group"列ソートがasc方向のみ検証されて
     おりdesc方向は未確認。desc方向は単純な文字列prefix("-")の付与のみのため回帰リスクは低い。
     (出典: review_test_organizations_masters.txt 低18)
 
-36. masters/services.py scoped_get_object_or_404のCategory側で、部署スコープ外アクセス時の
+30. masters/services.py scoped_get_object_or_404のCategory側で、部署スコープ外アクセス時の
     logger.warning文言（entity_name="カテゴリー"）がGroup側のように直接アサーションされていない
     （404ステータスのみ確認）。Group側で同一実装パターンとして既に検証済み。
     (出典: review_test_organizations_masters.txt 低19)
@@ -202,53 +208,129 @@ SEARCH_RADIO_DEFAULTS、core/views.py OtherSettingsView._render_mainのN+1、.en
 ■ audit / core
 ================================================================================
 
-37. core/record_views.py BaseBulkDownloadView.post()がクエリセットを2回評価している
-    （count()とzip_builder内の反復）。一括ダウンロードの対象件数は検索結果一覧の表示件数程度に
-    収まり実害は小さい。
-    (出典: review_code_audit_core.txt)
-
-38. core/form_services.py save_or_none()がIntegrityErrorのみ捕捉し、DatabaseError（DB接続断等）は
+31. core/form_services.py save_or_none()がIntegrityErrorのみ捕捉し、DatabaseError（DB接続断等）は
     捕捉しない。挙動変更（利用者向けエラー文言の追加等）を伴うため単独では見送り。
     BaseScopedMasterDeleteViewの対応と合わせて次回まとめて検討する。
     (出典: review_code_audit_core.txt)
 
-39. audit/models.py AuditLog.__str__やGinIndex定義自体を直接検証するテストが無い。単純な
+32. audit/models.py AuditLog.__str__やGinIndex定義自体を直接検証するテストが無い。単純な
     文字列化・DBインデックス定義で実害は乏しい。
     (出典: review_test_audit_core.txt 低12)
 
-40. audit/forms.py AuditLogSearchFormのdate_start/date_end widget自体の単体テストが無い。
+33. audit/forms.py AuditLogSearchFormのdate_start/date_end widget自体の単体テストが無い。
     背後にある「date_start/date_end検索自体がどのテストからも検証されていない」というより優先度の
     高い未対応事項（review_test_audit_core.txt 優先度高3）の対応が先。
     (出典: review_test_audit_core.txt 低13)
 
-41. core/double_submit.py issue_token/consume_token/reject_if_resubmitted自体の直接単体テストが
+34. core/double_submit.py issue_token/consume_token/reject_if_resubmitted自体の直接単体テストが
     無い。organizations/masters/permissions/accounts各アプリのtests.pyが二重送信分岐を個別検証
     しており広く間接カバー済み。
     (出典: review_test_audit_core.txt 低14)
 
-42. core/text_normalization.py normalize_for_search（NFKC正規化）の直接単体テストが無い。
+35. core/text_normalization.py normalize_for_search（NFKC正規化）の直接単体テストが無い。
     documents.tests.SearchQuerysetTests等で実質的に動作検証済み。
     (出典: review_test_audit_core.txt 低15)
 
-43. core/bulk_edit_services.py resolve_ordered_pksの「部署スコープ外pkの静かな除外」を狙った
+36. core/bulk_edit_services.py resolve_ordered_pksの「部署スコープ外pkの静かな除外」を狙った
     専用テストが無い。実装はBaseBulkDownloadViewの同種フィルタと共通の考え方で、そちらは間接
     検証済み。
     (出典: review_test_audit_core.txt 低16)
 
-44. core/upload_views.py BaseChunkUploadAPIView・core/record_views.py BaseBulkDownloadViewの
-    一部分岐がcontracts側テストのみ欠けている（上記11・13と同一指摘、完全共有コードのため見送り
+37. core/upload_views.py BaseChunkUploadAPIView・core/record_views.py BaseBulkDownloadViewの
+    一部分岐がcontracts側テストのみ欠けている（上記8・10と同一指摘、完全共有コードのため見送り
     済み）。
     (出典: review_test_audit_core.txt 低17)
 
 
 ================================================================================
+■ documents / contracts（追補：review_code_documents_contracts.txt、2026-08-28）
+================================================================================
+このレビューの高＝0件、中＝C-1/C-2/C-3の3件＋C-4（低〜中、ユーザー判断で「修正する」）は
+2026-08-28に対応済み（詳細はHTML_REIMPL_CHECKLIST_ARCHIVE.md該当セクション参照）。
+以下は同レビューの[低]優先度指摘のうち、2026-08-28の判断セッションで「見送り」に振り分けたもの
+（C-5/C-7/R-2/R-5/R-6/R-7 は同セッションで「直す」へ移動済み。本ファイル冒頭の記録参照）。
+
+38. 【C-6】documents/views.py:477 / contracts/views.py:557-559 一括編集の確定パス(_commit)が
+    対象を`filter(pk__in=pks)`だけで再取得しており、is_deleted / 部署スコープの条件が無い（TOCTOU）。
+    ウィザード開始～更新確定の間に対象が他者に削除された／別部署へ移動された場合に、そのまま
+    再保存・再削除し得る。発生には同一レコードへの並行操作という競合が必要で実害は限定的。
+    本ファイル既出の#1（BulkEditView完了サマリのis_deletedフィルタ無し）と同種で、対応するなら
+    objs_by_pkのクエリにis_deleted=Falseと許可部署IDを併せて追加する。
+    (出典: review_code_documents_contracts.txt C-6)
+
+39. 【C-8】core/upload_views.py:49 / core/upload_services.py:257 チャンク結合APIのtotal_chunksに
+    上限が無く、巨大値を送るとrange()のリスト内包でメモリを消費し得る。ただしcombine_upload_chunks
+    到達には全チャンク存在チェックの通過が必要で、認証済み利用者限定のため実効性は低い。
+    対応はsettings.CHUNK_UPLOAD_MAX_SIZE_BYTES / 1チャンクサイズから上限を算出して検証。
+    (出典: review_code_documents_contracts.txt C-8)
+
+40. 【C-9】documents/views.py:147-163 / contracts/views.py:203-225 複数ファイル一括登録で、
+    file.save（ストレージ書き込み）成功後・model.save（DB INSERT）失敗時に、その1件のファイル実体が
+    created（後始末ループの対象）に積まれる前のため孤児化する。C-2と同じ「DBロールバックはファイル
+    実体を戻さない」クラスだが、登録経路には編集経路のような明快な既存対処が無く、後始末候補への
+    積み方（file.save実行直後へ移動）はUploadStep2View全体の見直しとして扱いたい。発生は
+    N件目のDB INSERT失敗という稀なケースに限られる。
+    (出典: review_code_documents_contracts.txt C-9)
+
+41. 【R-1】documents/views.py:224 / contracts/views.py:278 DocumentEditView/ContractEditViewが
+    UpdateViewを継承しているがget/post/get_objectを完全オーバーライドしModelForm系機能を未使用。
+    本ファイル既出の#7と同一指摘。基底をViewへ変更＋context_object_name削除で解消するが動作バグ
+    ではなく設計上の指摘のみ。
+    (出典: review_code_documents_contracts.txt R-1)
+
+42. 【R-3】documents/api.py:45-52 / contracts/api.py:55-62 DetailAPIViewの部署スコープ判定
+    （allowed_department_ids取得→含まれなければlogger.warning＋PermissionDenied）がほぼ同一
+    ブロックで両api.pyに直書き。他の詳細操作ビューは既にscoped_get_object_or_404経由。
+    共通化するにはbase_qs未フィルタ渡し＋404/PermissionDeniedの差異をサブクラスで吸収する設計が要る。
+    (出典: review_code_documents_contracts.txt R-3)
+
+43. 【R-4】core/record_views.py:133-157 一括ダウンロードがquerysetをcount()とzip_builder反復で
+    2回評価し、さらにZIP全量をbytes化してHttpResponseに載せる（ストリーミング無し・件数/サイズ
+    上限無し）。このうち「2回評価を list() で1回に集約」する部分は2026-08-28に「直す」へ移動済み
+    （旧#37）。ここに残すのは StreamingHttpResponse＋一時ファイルZIP化（件数・合計サイズ上限）
+    の検討で、規模見積りが要るため見送り。
+    (出典: review_code_documents_contracts.txt R-4)
+
+
+================================================================================
+■ documents / contracts（追補：review_rule_doc_contract.txt 再監査、2026-08-28）
+================================================================================
+CLAUDE.md「コーディング規約」「原本フィデリティ運用方針」準拠監査を現状に合わせて再実施した
+結果、重大な規約違反は無し。指摘は5件すべて[低]（「違反」ではなく「改善余地」）。
+指摘1（未使用import）・指摘2（MATCH_AND再エクスポート）・指摘3（閏年コピー、本ファイル#5と同一の
+一部）は2026-08-28に「直す」へ移動済み。以下は残りの見送り分。
+
+44. 【指摘4】api.py → views.py への逆import方向: documents/api.py:17
+    `from documents.views import PENDING_SESSION_KEY`、contracts/api.py:13
+    `from contracts.views import PENDING_SESSION_KEY, RequiresContractEditMixin`。通常の依存方向
+    （api → views）とは逆。循環importにはならず（views.pyはapi.pyをimportしない、urls.pyが両方を
+    import）動作上の問題は無い。セッションキー定数・ミックスインを中立な場所（services.py等）に
+    置く方が構成として素直。CLAUDE.mdはこの逆依存を禁じていないため[低]。
+    (出典: review_rule_doc_contract.txt 指摘4)
+
+45. 【指摘5】BulkEditView._commit のオーケストレーションがview側に集中:
+    documents/views.py:472-546 / contracts/views.py:552-646。ステージ済み全ページの検証ループ→
+    transaction.atomic()内で削除マーク適用/dirty判定/apply_*_edit/監査ログ/status集計、という
+    フロー本体が _commit（view内）に残る（フィールドコピー・dirty判定自体はservices.pyに分離済み）。
+    単体編集経路もtransaction制御をview側に置いており既存の慣習とは一貫、「規約違反」とまでは
+    言えない。services側に bulk_commit(...) 相当を切り出すとテスト容易性・責務分離が改善する。
+    本ファイル既出#38（C-6: 確定パスの対象再取得にスコープ条件が無い）と重なる領域。
+    (出典: review_rule_doc_contract.txt 指摘5)
+
+
+================================================================================
 ■ 集計
 ================================================================================
-documents/contracts: 13件（うち1件は他ファイルの対応済み事項への注記）
+documents/contracts: 10件
 permissions/accounts: 8件
-organizations/masters: 14件
-audit/core: 8件
-合計: 43件（重複を除く実質42件の見送り指摘 + 1件の注記）
+organizations/masters: 12件
+audit/core: 7件
+documents/contracts（2026-08-28追補 / review_code_documents_contracts.txt）: 6件
+documents/contracts（2026-08-28追補 / review_rule_doc_contract.txt 再監査）: 2件
+合計: 45件の見送り指摘。
 
-本ファイルは2026-08-26時点のスナップショット。将来これらの経路を直接使う変更が入る場合は、
-その時点で出典のreview_*.txtを再確認し、テスト追加・修正の要否を再検討すること。
+★要追跡: #19・#20（部署バックフィル完了後に分岐を外す想定）
+
+本ファイルは2026-08-28の判断セッション反映版（元は2026-08-26スナップショット）。将来これらの
+経路を直接使う変更が入る場合は、その時点で出典のreview_*.txtを再確認し、テスト追加・修正の
+要否を再検討すること。

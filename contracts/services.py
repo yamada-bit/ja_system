@@ -2,6 +2,7 @@ import datetime
 import logging
 
 from django.conf import settings
+from django.db import Error as DBError
 from django.db import transaction
 
 from core import deletion_services, scoping_services, zip_services
@@ -64,6 +65,11 @@ def apply_contract_edit(contract, cleaned_data, employee, remove_ids, new_relate
     ファイルI/O・DB境界の例外（OSError/DBError）は握りつぶさずそのまま呼び出し元に伝播させる。
     単体編集とBulkEditViewとでは失敗時に取るべき応答（リダイレクトvs同じステップの再描画）が
     異なるため、対応は呼び出し側の責務とする。
+
+    `expiry_date`（保存満了日）は編集時に一切触らない。契約書は保存期間が選択式ではなく
+    `settings.CONTRACT_RETENTION_YEARS`固定で、編集で変えられる要素が無いため引き直す理由が
+    無い（文書側`apply_document_edit`が「保存期間変更時のみ引き直す」に整理されたのと同じ考え方。
+    2026-08-28ユーザー確定、レビュー指摘C-1）。
     """
     from contracts.models import RelatedFile
 
@@ -84,14 +90,31 @@ def apply_contract_edit(contract, cleaned_data, employee, remove_ids, new_relate
     contract.contract_partner = cleaned_data["contract_partner"]
     contract.memo = cleaned_data["memo"]
 
+    created_related = []
     with transaction.atomic():
         contract.save()
         if remove_ids:
             RelatedFile.objects.filter(contract=contract, pk__in=remove_ids).delete()
         if new_related_files:
             next_order = RelatedFile.objects.filter(contract=contract).count()
-            for i, related in enumerate(new_related_files):
-                RelatedFile.objects.create(contract=contract, file=related, display_order=next_order + i)
+            try:
+                for i, related in enumerate(new_related_files):
+                    created_related.append(
+                        RelatedFile.objects.create(
+                            contract=contract, file=related, display_order=next_order + i
+                        )
+                    )
+            except (OSError, DBError):
+                # RelatedFile.objects.create()は生成時点でストレージへファイル実体を書き込む。
+                # 2件目以降のcreate()やこの先の処理でDBError等が発生すると、transaction.atomic()は
+                # RelatedFile行・Contract行をロールバックするが、既に書き込まれた物理ファイルは
+                # DBトランザクションの対象外で残り、孤児化する（MEDIA_ROOT配下の孤児は
+                # core.upload_services.clear_pending_filesのような定期クリーンアップが無く蓄積する）。
+                # contracts.views.UploadStep2Viewの「登録」経路が明示的に対処している孤児ファイル
+                # 問題と同型のため、編集経路（単体・一括とも）でも同じ後始末をする（レビュー指摘C-2）。
+                for related_file in created_related:
+                    related_file.file.delete(save=False)
+                raise
     return contract
 
 

@@ -2393,7 +2393,9 @@ save-as-you-go は複数点で食い違っていた（訪問しただけのペ�
   `rows=[{obj,status}]`, `counts`）。
 - **dirty判定**: `documents.services.document_edit_is_dirty` / `contracts.services.contract_edit_is_dirty`
   （`apply_*_edit` と同じ department 正規化後に全コピー対象フィールドを比較。契約書は
-  `related_changed` も条件。`expiry_date` は派生値のため比較対象外＝dirty時のみ従来通り再計算）。
+  `related_changed` も条件。`expiry_date` は派生値のため比較対象外
+  ※2026-08-28のレビュー指摘C-1対応で「保存期間変更時のみ引き直す」に整理。下記
+  「documents/contractsコードレビューの反映」節参照）。
 - **関連書類のステージ退避**: `core.upload_services.stash_files_to_tmp`（`save_pending_files` の
   書き込みロジック流用、セッション非依存で `[{temp_name, original_name}]` を返す）。確定時は
   `open_pending_file()` で開き直し `.name` を元ファイル名に戻して `apply_contract_edit` の
@@ -2420,3 +2422,169 @@ save-as-you-go は複数点で食い違っていた（訪問しただけのペ�
   更新なし×3）、DBも編集2件のみ変更・監査ログ2件／削除マーク→「削除取消」で復帰→再マーク→
   「更新」で論理削除／編集して「キャンセル」→検索一覧が元のまま／必須項目を空にして「更新」→
   該当ページへジャンプしエラー表示／契約書：関連書類を追加→「キャンセル」で未反映。
+
+## documents/contractsコードレビューの反映（2026-08-28）
+
+`review_code_documents_contracts.txt`（`/code-review high`、対象：documents/・contracts/の
+models/views/api/services/forms/storage_paths/urls＋両アプリが委譲しているcore側共通実装）の
+指摘のうち、ユーザー指示（「優先度『高』『中』の指摘を1件ずつ順番に修正。`python manage.py
+test documents contracts`で確認してから次へ。低優先度は修正せず理由付きで記録だけ残す」）に
+基づき対応した。高＝0件。中＝C-1/C-2/C-3の3件、加えてC-4（低〜中、ユーザー判断で「修正する」）。
+
+### C-1（中）保存満了日(expiry_date)の編集時再計算が三者三様
+- **確定した仕様（ユーザー選択）**：「保存期間(retention_period)を変更した時だけ」今日基準で
+  引き直す。文書の単体編集・一括編集・契約書の3経路で挙動を統一。
+- `documents/services.py apply_document_edit`：無条件だった
+  `doc.expiry_date = calculate_expiry_date(今日, retention_period)` を
+  `retention_changed`（代入前の`doc.retention_period_id`と`cleaned_data`のpk比較）が真のときのみに
+  変更。`doc_retention_edit`権限が無い職員はフォーム側で保存期間欄が実質固定されるため、
+  他項目だけ編集しても満了日は動かなくなった。
+- `document_edit_is_dirty` のdocstring修正：旧「保存期間が変わらない限り実質不変」は今日基準の
+  派生値としては誤りだったが、新挙動では実際に「retention_period変更時のみ変化」する値になり、
+  既存の`retention_period_id`比較でカバーされるため`expiry_date`自体を比較対象に含める必要が
+  無い旨に書き換え。
+- `contracts/services.py apply_contract_edit`：もともと`expiry_date`を触らない（契約書は保存期間が
+  `settings.CONTRACT_RETENTION_YEARS`固定で編集要素が無い）。これがC-1の統一方針と一致することを
+  docstringに明記。
+- `templates/documents/edit.html`：保存期間欄の横に出る「（有効期限：…）」プレビューJSが常に
+  今日+保存期間を表示していたため、保存期間が現在値のままなら保存済みの`expiry_date`をそのまま
+  表示するよう変更（`#expiry-edit-config`のdata属性で現在の`retention_period_id`・`expiry_date`を
+  渡す）。保存後の実値と表示が食い違わない。
+- **見送り**：`document_edit_is_dirty`への`expiry_date`直接比較の追加は、上記のとおり
+  `retention_period_id`比較で等価にカバーされるため不要と判断。
+
+### C-2（中）契約書編集で関連書類(RelatedFile)保存が途中失敗すると物理ファイルが孤児化
+- `contracts/services.py apply_contract_edit`：`RelatedFile.objects.create()`ループを
+  `try/except (OSError, DBError)`で囲み、例外時は`created_related`に積んだ（＝save成功済みの）
+  ファイル実体を`file.delete(save=False)`してから再raise。`transaction.atomic()`はDB行を
+  ロールバックするがストレージ実体は戻さないため。`contracts/views.py`の「登録」経路
+  （`UploadStep2View`）が既に持つ後始末と同型に揃えた。単体編集(`ContractEditView`)・
+  一括編集(`BulkEditView._commit`)の両方に効く。
+- `contracts/services.py`冒頭に`from django.db import Error as DBError`を追加。
+- テスト追加：`contracts/tests.py ContractEditViewFileHandlingTests.
+  test_related_file_partial_failure_cleans_up_orphan_files`（関連書類2件中2件目のcreateが
+  OSErrorで失敗→1件目のファイル実体が`default_storage`から消えていること・本体タイトルも
+  ロールバックされること）。
+
+### C-3（中）一括ダウンロードのZIP構築がFileNotFoundErrorしか捕捉せず他のOSErrorで全滅
+- `core/zip_services.py build_zip_archive`：`except FileNotFoundError` を `except OSError` に拡大
+  （`PermissionError`・`IsADirectoryError`・ストレージI/Oエラー等も1件ずつ`missing_count`計上して
+  継続）。単体ダウンロード`core/record_views.py BaseFileServeView`が既にOSError全般をHttp404へ
+  変換しているのと整合。
+- `core/record_views.py`：利用者向けmessages.warningの文言を「見つからなかった」→
+  「取得できなかった」に微修正（欠損以外も含むため）。既存テストの文言アサーション2件
+  （documents/contracts）も追随修正。
+- テスト追加：`documents/tests.py BulkDownloadViewTests.
+  test_non_filenotfound_oserror_is_skipped_not_500`（PermissionErrorでも500にならず該当1件のみ
+  スキップ）。
+
+### C-4（低〜中、ユーザー判断で修正）ZIP内ファイル名がUUID接頭辞付き内部名
+- `core/zip_services.py`：ZIPエントリ名を`obj.file.name`の末尾（UUID付き）→`obj.display_name`
+  （元名）に変更。単体ダウンロードのContent-Dispositionと揃えた。
+- `display_name`は文書間で重複し得るため`_dedupe_entry_name()`ヘルパーを追加し、衝突時は
+  拡張子の手前に" (2)", " (3)"…を付与（OSのファイルマネージャ慣習）。
+- テスト追加：`documents/tests.py BulkDownloadViewTests.
+  test_zip_entry_names_use_display_name_and_dedupe_collisions`（同名`dup.txt`2件→
+  `["dup (2).txt", "dup.txt"]`）。
+
+### 見送った低優先度（C-5〜C-9・R-1〜R-7の12件）
+`review_pending.txt`「■ documents / contracts（追補：review_code_documents_contracts.txt、
+2026-08-28）」に項番45〜56として理由付きで記録。要点：C-5（契約金額0円のfalsy-zero空表示）、
+C-6（一括編集_commitの対象再取得にis_deleted/部署スコープ条件無し・TOCTOU）、
+C-7（`_render_complete`の`rows[0]`無条件参照）、C-8（チャンク結合APIのtotal_chunks上限無し）、
+C-9（複数ファイル一括登録でDB INSERT失敗ファイルの孤児化）、R-1（EditViewのUpdateView不使用）、
+R-2（`combine_upload_chunks`のセッションリストin-place変更）、R-3（DetailAPIViewの部署スコープ
+判定インライン重複）、R-4（一括DLのqueryset2回評価＋ZIP全量メモリ保持）、
+R-5（`_post_delete_redirect` docstring乖離）、R-6（documents/services.pyにモジュールlogger無し）、
+R-7（論理削除のたびに正規化カラム再計算）。
+
+### 検証
+中優先度3件＋C-4を1件ずつ修正し、都度 `manage.py test documents contracts` を実行
+（287→288→290件、いずれも全件PASS）。最終 `manage.py test documents contracts` は
+**290件PASS**（開始時287件から新規テスト3件純増）。
+
+
+## セキュリティレビュー（review_security.txt）優先度「高」「中」の反映（2026-08-28）
+
+`review_security.txt`（リポジトリ全体のセキュリティ精査）の指摘のうち、ユーザー指示で
+優先度「高」3件・「中」2件を1件ずつ順番に修正した。低優先度（L-1〜L-3）は修正せず
+`review_security.txt`冒頭「対応結果」節に理由付きで記録。詳細な指摘内容は同ファイル参照。
+
+### H-1（高）格納型XSS：検索結果詳細ポップアップ renderDetailPopup の innerHTML 直組み立て
+- `static/js/common.js`：`escapeHtml()` ヘルパーを新設（getCsrfToken の直後）。
+  `renderDetailPopup()` のプロパティ表（`rows.map(...)`）は各値を `escapeHtml(value)` してから
+  `<td>` に埋め込むよう変更。関連書類一覧（複数ファイル名を `<br>` 連結する行）は
+  `{html: ...}` 形式で「整形済みHTML（各ファイル名は生成時に escapeHtml 済み）」であることを
+  マークし、その行だけ二重エスケープしないようにした。
+- 検証：ブラウザ実機（dev サーバー＋ログイン）で `renderDetailPopup()` に
+  `<img src=x onerror=...>` を含む API 応答を流し、`window.__xss` が立たず `&lt;img` として
+  エスケープ表示されること、関連書類行では `<br>` 区切りが維持されることを確認。JS 単体
+  テストハーネスはリポジトリに無いため（package.json 不在）、検証はブラウザ実機で実施。
+
+### H-2（高）格納型XSS：検索結果行クリックプレビュー showSearchPreview の innerHTML
+- `static/js/common.js`：`showSearchPreview()` の3か所の `titleEl.innerHTML = \`<strong>${title}\`...`
+  代入を廃止。`setSearchPreviewMessage(titleEl, title, message)` を新設し、タイトルを
+  `<strong>` の `textContent` として、説明文を静的テキストノードとして DOM API で組み立てる。
+  `|escapejs` は「JS文字列リテラルとして安全」なだけで innerHTML では `<` が復元される点への対応。
+- 検証：ブラウザ実機で `showSearchPreview('<img src=x onerror=...>', '', ...)` を呼び、
+  ペイロードが発火せず `<strong>` の textContent としてエスケープ表示されることを確認。
+
+### H-3（高）アップロードファイルのMIME/拡張子未検証＋プレビューの同一オリジン inline 配信
+2層で対応:
+- **配信側**（`core/file_serving.py` 新設）：`SAFE_INLINE_EXTENSIONS`（PDF＋ラスター画像）以外は
+  `PreviewView`/`PendingPreviewView`（本来 inline 意図）でも `as_attachment=True` へフォール
+  バックする `resolve_as_attachment()`、および全配信レスポンスに
+  `X-Content-Type-Options: nosniff` と `Content-Security-Policy: script-src 'none'; object-src 'none'`
+  を付与する `apply_file_response_security_headers()` を用意。`core/record_views.py
+  BaseFileServeView.get`・`core/upload_views.py BasePendingPreviewView.get` に適用。
+  検索プレビュー機能は元々 `get_preview_kind` が image/pdf しか返さないため、フォールバックに
+  よる画面上の機能低下は無い。`Content-Security-Policy: sandbox` や `default-src 'none'` は
+  ブラウザ内蔵 PDF ビューアの表示に影響しうるため、あえて `script-src`/`object-src` のみに絞った。
+- **アップロード側**（`core/upload_validation.py` 新設）：`BLOCKED_UPLOAD_EXTENSIONS`
+  （html/htm/xhtml/shtml/mht/svg/svgz/js/mjs/htc/hta/swf）を拒否リスト方式で判定する
+  `blocked_upload_message()`。`core/upload_views.py BaseUploadStep1View.post`（通常アップロード、
+  documents/contracts 共通）と `BaseChunkUploadAPIView.post`（分割アップロード、`file_name` を検証）で
+  拒否。Office 文書・PDF・画像・テキスト・圧縮ファイル等の通常業務形式には一切影響しない。
+- **原本フィデリティ**：原本 HTML/xlsx はファイル種別を制限していないが、ユーザー依頼の
+  セキュリティ修正に伴う意図的逸脱。`accounts/forms.py StaffCsvImportForm.clean_csv_file` が
+  既に .csv を検証しているのと同じ考え方。
+- **見送り**（H-3 推奨対応のうち中期対応）：アプリ全体への CSP 導入（テンプレートが原本由来の
+  `onclick` 等インラインハンドラに全面依存しており段階的移行が必要）、MEDIA の別オリジン配信。
+  `review_security.txt`「未対応」節に記録。
+- テスト追加：`core/tests.py SafeInlineFileServingTests`（5）・`BlockedUploadValidationTests`（3）、
+  `documents/tests.py PreviewViewTests.test_preview_adds_security_headers` /
+  `test_html_file_is_never_served_inline_via_preview`、`UploadBlockedFileTypeTests`（2）。
+  ブラウザ実機で PDF のインラインプレビュー（iframe）が CSP 付与後も維持されることを確認。
+
+### M-1（中）一括編集のステージング型削除が can_delete() をサーバー側で検証しない
+コミット 9358b6d の一括編集ステージング型改修で新規混入したリグレッション。
+`toggle_delete` ハンドラと `_commit` の確定前検証は `deletion_services.can_delete()` を
+呼んでおらず、`{% if can_delete %}` のクライアント側ゲートしか無かった。
+- `documents/views.py`/`contracts/views.py BulkEditView`：
+  - `toggle_delete` ハンドラ：削除マークを「付ける」操作のみ `can_delete()` を検証し、
+    NG なら `deletion_denial_message` を出して `redirect`（マーク解除は常に許可）。
+  - `_commit`：入力エラー検証パスの直後に「削除予定pkの `can_delete()` 検証パス」を追加。
+    1件でも NG なら `set_bulk_edit_index` で該当ページへ飛ばし、削除マーク済み（disabled）
+    フォームでエラー付き再描画してコミット全体を中断（既存の入力エラー時の扱いと同型）。
+  部署スコープは既存の `scoped_get_object_or_404` ＋ `resolve_ordered_pks` で強制済みのため、
+  欠落していた「削除済み／登録から7日以上経過」ルールのみを補った。
+- テスト追加：`documents/tests.py BulkEditViewTests` /
+  `contracts/tests.py BulkEditViewTests` に各2件
+  （`test_toggle_delete_mark_rejected_for_*_past_delete_window`、
+  `test_commit_rejects_smuggled_delete_mark_for_*_past_delete_window`。後者は
+  `to_delete` をセッションへ直接注入して改ざん・API直叩きを模す）。
+
+### M-2（中）SECRET_KEY に本番でも有効な安全でないハードコードデフォルト
+- `config/settings/prod.py`：`SECRET_KEY = env("SECRET_KEY")`（デフォルト無し）を追加。
+  `base.py` の `default="django-insecure-dev-key-change-me"` は dev 用に残し、prod では
+  未設定なら django-environ が `ImproperlyConfigured` を送出して起動失敗させる。
+- `.env.example`：`SECRET_KEY=change-me` → `<REQUIRED-generate-a-unique-50-char-random-key>` ＋
+  生成コマンド例のコメントに変更。
+- 検証：`.env` から SECRET_KEY を一時的に除いたサブプロセスで
+  `DJANGO_SETTINGS_MODULE=config.settings.prod` を setup し、
+  `ImproperlyConfigured: Set the SECRET_KEY environment variable` で停止することを確認
+  （設定時は正常ロード）。
+
+### 検証（全体）
+高3件・中2件を1件ずつ修正し、都度関連テストを実行。最終 `manage.py test`（全アプリ）は
+**752件PASS**（本修正で新規テスト14件純増）。

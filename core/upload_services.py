@@ -283,7 +283,11 @@ def combine_upload_chunks(session, session_key, upload_id, total_chunks, origina
 
     _delete_chunk_dir(chunk_dir)
 
-    pending = session.get(session_key, [])
+    # list()でコピーしてから追記する（save_pending_files:47-52と同じ理由。session.get()は
+    # SessionBase内部の同一listを返すため、コピーせずappendするとセッション内部dictを
+    # その場で書き換えてしまう）。現状は直後に再代入するため実害は出ないが、モジュール内で
+    # 確立したパターンに揃える（コードレビューR-2、2026-08-28修正）。
+    pending = list(session.get(session_key, []))
     pending.append({"temp_name": temp_name, "original_name": original_filename})
     session[session_key] = pending
     session.modified = True
