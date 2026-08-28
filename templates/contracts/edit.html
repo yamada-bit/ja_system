@@ -8,7 +8,11 @@
       <div class="system-title">
         <div class="system-sub">クラウド文書管理システム -契約書管理-</div>
         <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
-          <button type="button" onclick="window.location.href='{% url 'contracts:search' %}'">＜ 戻る</button>
+          {% if bulk %}
+            <button type="submit" form="meta-input-form" name="bulk_action" value="cancel">＜ 戻る</button>
+          {% else %}
+            <button type="button" onclick="window.location.href='{% url 'contracts:search' %}'">＜ 戻る</button>
+          {% endif %}
           <h1 style="margin: 0;">編集画面</h1>
         </div>
       </div>
@@ -55,7 +59,7 @@
       </div>
 
       <div class="meta-input-form-wrapper">
-        <form method="post" enctype="multipart/form-data" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
+        <form method="post" id="meta-input-form" enctype="multipart/form-data" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
           {% csrf_token %}
           <input type="hidden" name="token" value="{{ token }}">
           <input type="hidden" name="remove_related_ids" id="id_remove_related_ids" value="">
@@ -66,7 +70,15 @@
             <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
           </div>
           {% if bulk %}
-            <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">選択した契約書をまとめて編集中です。移動すると現在の内容が保存されます。</div>
+            <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">
+              選択した契約書をまとめて編集中です。ページを移動しても入力内容は保持され、「更新」を押すと
+              変更のあった契約書だけがまとめて更新されます。
+            </div>
+          {% endif %}
+          {% if marked_delete %}
+            <div style="font-size:12px; color:#c0392b; font-weight:bold; flex-shrink:0; margin-top:4px; background:#fdecea; border:1px solid #f5c6cb; border-radius:4px; padding:4px 8px;">
+              このページは削除予定です。「更新」を押すと削除が確定します。「削除取消」で元に戻せます。
+            </div>
           {% endif %}
 
           <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
@@ -97,15 +109,35 @@
               <div class="form-row" style="flex-direction:column; align-items:flex-start; gap:5px;">
                 <label style="width:100%;">関連書類</label>
                 <div id="storage-file-inputs-container" style="width:100%;">
-                  {% for rf in contract.related_files.all %}
+                  {% if bulk %}
+                    {# 一括編集では関連書類の増減も「更新」までステージ（追加ファイルは一時領域へ #}
+                    {# 退避、削除はマーク）。related_rows = 既存（削除マークを除外）＋追加予定。 #}
+                    {% for row in related_rows %}
+                      <div class="related-file-row">
+                        {% if row.kind == "staged_add" %}
+                          <span class="related-file-name">📎 {{ row.name }}（追加予定）</span>
+                        {% else %}
+                          <span class="related-file-name">📎 {{ row.name }}</span>
+                          {% if not marked_delete %}<button type="button" class="btn-delete-file" onclick="removeExistingRelatedFile(this, {{ row.id }})">×</button>{% endif %}
+                        {% endif %}
+                      </div>
+                    {% endfor %}
+                    {% if not marked_delete %}
+                      <div class="related-file-row">
+                        <input type="file" name="related_files" onchange="handleRelatedFileChange(this)">
+                      </div>
+                    {% endif %}
+                  {% else %}
+                    {% for rf in contract.related_files.all %}
+                      <div class="related-file-row">
+                        <span class="related-file-name">📎 {{ rf.display_name }}</span>
+                        <button type="button" class="btn-delete-file" onclick="removeExistingRelatedFile(this, {{ rf.pk }})">×</button>
+                      </div>
+                    {% endfor %}
                     <div class="related-file-row">
-                      <span class="related-file-name">📎 {{ rf.display_name }}</span>
-                      <button type="button" class="btn-delete-file" onclick="removeExistingRelatedFile(this, {{ rf.pk }})">×</button>
+                      <input type="file" name="related_files" onchange="handleRelatedFileChange(this)">
                     </div>
-                  {% endfor %}
-                  <div class="related-file-row">
-                    <input type="file" name="related_files" onchange="handleRelatedFileChange(this)">
-                  </div>
+                  {% endif %}
                 </div>
               </div>
             </div>
@@ -113,32 +145,39 @@
             <div class="form-section">
               <h4>[4] メモ欄</h4>
               {{ form.memo }}
-              {# documents/edit.htmlと同じ（xlsx 保管!B579-581に基づき2026-08-27ユーザー確定で #}
-              {# メモ欄クリアからレコードの論理削除〈contracts:edit_delete → EditDeleteView〉に変更）。 #}
-              {# can_delete が False（保存から1週間以上経過・削除済み）ならボタンごと非表示。 #}
+              {# xlsx 保管!B579-581。can_delete が False ならボタン非表示。単独編集は即時削除 #}
+              {# （EditDeleteView→検索画面へ）。一括編集は「削除予定」マーク＋「更新」で確定。 #}
               {% if can_delete %}
                 <div style="text-align: right; margin-top: 10px;">
-                  <button type="submit" form="record-delete-form"
-                          style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;"
-                          onclick="return confirm('この契約書を削除します。よろしいですか？')">削除</button>
+                  {% if bulk %}
+                    <button type="submit" name="bulk_action" value="toggle_delete"
+                            style="background-color:{% if marked_delete %}#7f8c8d{% else %}#e74c3c{% endif %}; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;">
+                      {% if marked_delete %}削除取消{% else %}削除{% endif %}
+                    </button>
+                  {% else %}
+                    <button type="submit" form="record-delete-form"
+                            style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;"
+                            onclick="return confirm('この契約書を削除します。よろしいですか？')">削除</button>
+                  {% endif %}
                 </div>
               {% endif %}
             </div>
           </div>
 
           <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
-            {# 原本html4の一括編集は「次へ」ボタンを持たず、常に「更新」（startUpdateMock）。 #}
-            {# レコード間の移動はページャー ＜ ＞ のみが担い、「更新」はどのページでも全件確定する。 #}
-            <button type="submit" class="btn-primary" style="padding:8px 30px;">更新</button>
-            <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'contracts:search' %}'">キャンセル</button>
+            {% if bulk %}
+              <button type="submit" name="bulk_action" value="update" class="btn-primary" style="padding:8px 30px;">更新</button>
+              <button type="submit" name="bulk_action" value="cancel" class="btn-cancel">キャンセル</button>
+            {% else %}
+              <button type="submit" class="btn-primary" style="padding:8px 30px;">更新</button>
+              <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'contracts:search' %}'">キャンセル</button>
+            {% endif %}
           </div>
         </form>
-        {% if can_delete %}
-          {# [4]メモ欄直下の「削除」ボタン専用フォーム（documents/edit.htmlと同じ理由でメイン #}
-          {# フォームの外に置き button[form=] で関連付ける）。一括編集からのみ from_bulk を送る。 #}
+        {% if can_delete and not bulk %}
+          {# 単独編集の[4]メモ欄直下「削除」ボタン専用フォーム（フォーム入れ子回避）。 #}
           <form method="post" action="{{ delete_action_url }}" id="record-delete-form">
             {% csrf_token %}
-            {% if bulk %}<input type="hidden" name="from_bulk" value="1">{% endif %}
           </form>
         {% endif %}
       </div>

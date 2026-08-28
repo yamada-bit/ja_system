@@ -2350,3 +2350,73 @@ Rev1.3で登録側B194-201は「不要文言削除」として整理されたが
   - E：権限管理編集の3表示欄すべて `<textarea rows="5">`。
   - B：`documents/contracts.tests.UploadStep2RemoveViewTests` で step2 GET 後のマークアップ順
     （[4]メモ欄見出し → `</div>`（form-section 閉じ）→ 削除ボタン）を検証。
+
+## 一括編集を「更新ボタンで全ページ一括確定」モデルへ改修（2026-08-28、ユーザー確定）
+
+### 背景
+前節（保管画面2の削除ボタン再定義）に続き、一括編集の挙動をユーザーが確定した。従来の一括編集は
+**save-as-you-go**（ページャー ＜ ＞ で移動する都度、表示中の1件を即DB保存＋監査ログ）だった。
+これは原本html4のモックJS（全件をブラウザ内配列に溜めて最後に一括保存）を、`ModelChoiceField`の
+セッションJSON直列化を避けるため簡略化した実装（2026-08-20〜27の経緯は「検索結果一覧 一括編集の
+実装」「〜原本html4との挙動差異の修正」各節）。ユーザーの想定は「更新で全ページ一括確定」で、
+save-as-you-go は複数点で食い違っていた（訪問しただけのページが無変更でもUPDATE＋監査ログ／
+保存満了日が素通りで再計算／削除が即時・取消不可）。
+
+### 確定した仕様
+- 一括編集の「更新」= **全ページ一括確定**。それまで一切DB未反映。
+- **変更が無いページは更新しない**（「更新なし」）。判定は**更新押下時点のDB現在値との比較**
+  （dirty check）。
+- 完了ポップアップは**全件**を「更新／更新なし／削除」の3状態＋件数サマリで表示。
+- 「削除」ボタンは**削除予定マーク**（即削除しない）。押すとボタンが「削除取消」に変わり、
+  マーク中のページは入力欄を**disabled（グレーアウト）＋バナー表示**。「更新」でまとめて論理削除。
+- 契約書の**関連書類の追加・削除も「更新」までステージ**（追加ファイルは`MEDIA_ROOT/tmp_uploads/`へ
+  退避）。「キャンセル」で入力・削除マーク・関連書類すべて破棄（一時ファイルも実体削除）。
+- 入力エラーが1ページでもあれば**全体を止め、最初のエラーページへジャンプ**して表示（未コミット）。
+- **単独編集画面**（`DocumentEditView`/`ContractEditView`の削除＝`EditDeleteView`、即時論理削除→
+  検索画面へ）と**登録画面**（`UploadStep2RemoveView`、表示中ファイルの即時アップロード取り消し）は
+  **前節のまま据え置き**。
+
+### 設計
+- **セッション構造**（`core/bulk_edit_services.py`）を
+  `{"pks", "index", "staged": {"<pk>": {生値dict}}, "to_delete": [pk], "staged_related": {"<pk>":
+  {"add": [{temp_name, original_name}], "remove": [id]}}}` に拡張（全てJSON直列化可能）。
+  新ヘルパー: `stage_page` / `staged_page_data` / `toggle_delete_mark` / `is_marked_for_delete` /
+  `stage_related` / `staged_related_for` / `discard_staged_related_files` / `discard_bulk_edit`。
+  前節で追加した `remove_bulk_edit_pk` は未使用化のため削除。
+- **`BulkEditView`**（documents/contracts）を作り替え。GETは `staged` があれば bound フォームで
+  ステージ値を表示、`marked_delete` なら全フィールド `disabled`。POSTは送信ボタンで分岐
+  （`bulk_nav=prev/next`＝現ページをステージして移動／`bulk_action=toggle_delete`／
+  `bulk_action=update`＝`_commit()`／`bulk_action=cancel`＝`discard_bulk_edit`）。
+  `_commit()` は 検証パス（NGなら最初のエラーページへ）→ `transaction.atomic()` で
+  to_delete は論理削除、staged は dirty のみ `apply_document_edit`/`apply_contract_edit`、
+  それ以外は「更新なし」→ 一時ファイル整理 → 完了モーダル（`complete.mode="bulk"`,
+  `rows=[{obj,status}]`, `counts`）。
+- **dirty判定**: `documents.services.document_edit_is_dirty` / `contracts.services.contract_edit_is_dirty`
+  （`apply_*_edit` と同じ department 正規化後に全コピー対象フィールドを比較。契約書は
+  `related_changed` も条件。`expiry_date` は派生値のため比較対象外＝dirty時のみ従来通り再計算）。
+- **関連書類のステージ退避**: `core.upload_services.stash_files_to_tmp`（`save_pending_files` の
+  書き込みロジック流用、セッション非依存で `[{temp_name, original_name}]` を返す）。確定時は
+  `open_pending_file()` で開き直し `.name` を元ファイル名に戻して `apply_contract_edit` の
+  `new_related_files` へ渡す。
+- **テンプレート**: 共有 `edit.html` を `{% if bulk %}` で拡張（削除ボタン＝`toggle_delete` submit、
+  「削除取消」トグル、`marked_delete` バナー、キャンセル/戻る＝`bulk_action=cancel` submit、
+  契約書の関連書類は view が渡す `related_rows` をループ〈既存−staged remove ＋ staged add
+  「追加予定」〉）。単独編集の外部 `record-delete-form` は `{% if can_delete and not bulk %}` に。
+  `_complete_modal.html` に `complete.mode == "bulk"` 分岐（状態列＋件数サマリ）を追加。
+
+### 変更ファイル
+- `core/bulk_edit_services.py`（構造拡張・ヘルパー群・`remove_bulk_edit_pk`削除）
+- `core/upload_services.py`（`stash_files_to_tmp`）
+- `documents/services.py`・`contracts/services.py`（`*_edit_is_dirty`）
+- `documents/views.py`・`contracts/views.py`（`BulkEditView` 作り替え、`EditDeleteView` を
+  単独編集専用に簡素化＝`from_bulk`分岐撤去、`*_BULK_FORM_FIELDS` 定数）
+- `templates/{documents,contracts}/edit.html`・`templates/{documents,contracts}/_complete_modal.html`
+- `documents/tests.py`・`contracts/tests.py`（`BulkEditViewTests` 作り替え、`EditDeleteViewTests` の
+  bulk 系テスト撤去）、`core/tests.py`（`RemoveBulkEditPkTests`→`BulkEditServicesStagingTests`）
+
+### 検証
+- `manage.py check` 問題なし。`manage.py test` **706件PASS**。
+- dev サーバーで手動確認：5件一括編集→2件だけ編集して「更新」→完了モーダルに5件（更新×2・
+  更新なし×3）、DBも編集2件のみ変更・監査ログ2件／削除マーク→「削除取消」で復帰→再マーク→
+  「更新」で論理削除／編集して「キャンセル」→検索一覧が元のまま／必須項目を空にして「更新」→
+  該当ページへジャンプしエラー表示／契約書：関連書類を追加→「キャンセル」で未反映。

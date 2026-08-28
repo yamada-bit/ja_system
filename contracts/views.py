@@ -20,6 +20,7 @@ from contracts.services import (
     apply_contract_edit,
     build_zip_archive,
     calculate_expiry_date,
+    contract_edit_is_dirty,
     parse_remove_related_ids,
     scoped_get_object_or_404,
 )
@@ -33,6 +34,7 @@ from core import (
 )
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
+from core.upload_services import PendingFileStorageError
 from core.text_extraction_services import try_immediate_text_layer_extraction
 from permissions.services import (
     can_download,
@@ -430,15 +432,27 @@ class BulkEditStartView(RequiresContractEditMixin, View):
             messages.error(request, "編集するデータが選択されていません。")
             return redirect("contracts:search")
 
+        # 開始のたび、前回の中断で残ったステージ内容（関連書類の一時ファイル含む）を掃除する。
+        bulk_edit_services.discard_bulk_edit(request.session, BULK_EDIT_SESSION_KEY)
         bulk_edit_services.start_bulk_edit(request.session, BULK_EDIT_SESSION_KEY, ordered_pks)
         return redirect("contracts:bulk_edit")
 
 
+# 一括編集で各ページの生POST値としてセッションへ退避するフォームフィールド名。
+CONTRACT_BULK_FORM_FIELDS = (
+    "department", "group", "category", "year",
+    "contract_date", "contract_period_start", "contract_period_end",
+    "renewal_date", "contract_amount", "contract_partner", "memo", "title_0",
+)
+
+
 class BulkEditView(RequiresContractEditMixin, View):
-    """一括編集ウィザード本体（契約書側）。documents.views.BulkEditViewと同じ設計・同じ
-    save-as-you-go方式（詳細はそちらのdocstring参照）。ContractEditViewと同じく関連書類の
-    追加・削除もステップの保存に含まれる。BulkEditStartViewと同じくRev1.2の
-    「契約書-契約書-契約書情報変更」がOFFの職員はアクセス不可（RequiresContractEditMixin参照）。
+    """一括編集ウィザード本体（契約書側・ステージング型。2026-08-28ユーザー確定）。
+    documents.views.BulkEditViewと同じ設計（入力値・削除マーク・関連書類の増減を「更新」まで
+    セッション〈＋一時ファイル領域〉にステージし、「更新」で全ページ検証→変更のあったものだけを
+    1トランザクションで確定）。関連書類の追加ファイルは MEDIA_ROOT/tmp_uploads/ に退避し、
+    「キャンセル」で実体ごと破棄する。BulkEditStartViewと同じくRev1.2の「契約書-契約書-
+    契約書情報変更」がOFFの職員はアクセス不可（RequiresContractEditMixin参照）。
     """
 
     template_name = "contracts/edit.html"
@@ -451,85 +465,79 @@ class BulkEditView(RequiresContractEditMixin, View):
             return None
         return state
 
+    def _current_object(self, request, state):
+        # セキュリティレビューで発見：部署スコープ外の契約書へのセッション改ざん・URL直打ちを防ぐ。
+        return scoped_get_object_or_404(
+            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
+            request.user,
+            state["pks"][state["index"]],
+        )
+
     def get(self, request):
         state = self._state(request)
         if state is None:
             return redirect("contracts:search")
-
-        # セキュリティレビューで発見：部署スコープ外の契約書へのセッション改ざん・URL直打ちを
-        # 防ぐ（contracts.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
-        self.object = scoped_get_object_or_404(
-            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
-            request.user,
-            state["pks"][state["index"]],
-        )
-        form = self._build_form()
+        self.object = self._current_object(request, state)
+        marked_delete = bulk_edit_services.is_marked_for_delete(state, self.object.pk)
+        staged = bulk_edit_services.staged_page_data(state, self.object.pk)
+        form = self._build_form(self.object, data=staged, marked_delete=marked_delete)
         token = issue_token(request.session, self.form_id)
-        return render(request, self.template_name, self._context(request, form, token, state))
+        return render(
+            request, self.template_name, self._context(request, form, token, state, marked_delete)
+        )
 
     def post(self, request):
+        if request.POST.get("bulk_action") == "cancel":
+            bulk_edit_services.discard_bulk_edit(request.session, BULK_EDIT_SESSION_KEY)
+            return redirect("contracts:search")
+
         state = self._state(request)
         if state is None:
             return redirect("contracts:search")
+        self.object = self._current_object(request, state)
 
-        # セキュリティレビューで発見：部署スコープ外の契約書へのセッション改ざん・URL直打ちを
-        # 防ぐ（contracts.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
-        self.object = scoped_get_object_or_404(
-            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
-            request.user,
-            state["pks"][state["index"]],
-        )
         submitted_token = request.POST.get("token", "")
         if not consume_token(request.session, self.form_id, submitted_token):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("contracts:bulk_edit")
 
-        form = self._build_form(data=request.POST)
-        if not form.is_valid():
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, self._context(request, form, token, state))
-
-        contract = self.object
-        remove_ids = parse_remove_related_ids(
-            request.POST.get("remove_related_ids", ""), employee_no=request.user.employee_no
-        )
-        new_related_files = request.FILES.getlist("related_files")
-        try:
-            apply_contract_edit(contract, form.cleaned_data, request.user, remove_ids, new_related_files)
-        except OSError:
-            logger.exception(
-                "契約書の一括編集処理中にファイルI/Oエラーが発生しました: contract_id=%s, employee_no=%s",
-                contract.pk,
-                request.user.employee_no,
+        marked_delete = bulk_edit_services.is_marked_for_delete(state, self.object.pk)
+        if not marked_delete:
+            bulk_edit_services.stage_page(
+                request.session,
+                BULK_EDIT_SESSION_KEY,
+                self.object.pk,
+                {k: request.POST.get(k, "") for k in CONTRACT_BULK_FORM_FIELDS},
             )
-            messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, self._context(request, form, token, state))
-        except DBError:
-            logger.exception(
-                "契約書の一括編集処理中にDBエラーが発生しました: contract_id=%s, employee_no=%s",
-                contract.pk,
-                request.user.employee_no,
+            # 関連書類の増減も同時にステージ（アップロード分は一時領域へ退避）。
+            new_files = request.FILES.getlist("related_files")
+            add_refs = []
+            if new_files:
+                try:
+                    add_refs = upload_services.stash_files_to_tmp(new_files)
+                except PendingFileStorageError:
+                    logger.exception(
+                        "一括編集：関連書類の一時退避に失敗しました: employee_no=%s", request.user.employee_no
+                    )
+                    messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
+                    return redirect("contracts:bulk_edit")
+            remove_ids = parse_remove_related_ids(
+                request.POST.get("remove_related_ids", ""), employee_no=request.user.employee_no
             )
-            messages.error(request, "更新に失敗しました。もう一度お試しください。")
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, self._context(request, form, token, state))
+            if add_refs or remove_ids:
+                bulk_edit_services.stage_related(
+                    request.session, BULK_EDIT_SESSION_KEY, self.object.pk,
+                    add_refs=add_refs, remove_ids=remove_ids,
+                )
 
-        audit_services.log(
-            employee=request.user,
-            action="保管画面２ 更新",
-            event_message=f"契約書「{contract.title}」を更新しました。",
-        )
-
-        # 原本html4の一括編集は、レコード間の移動をページャー ＜ ＞（changeActiveDoc）だけで行い、
-        # 「更新」ボタン（startUpdateMock）を押した時点で、現在何件目を表示していても選択全件を
-        # 確定して完了ポップアップに一覧表示する（「次へ」ボタンは原本に存在しない）。本実装は
-        # ModelChoiceFieldをセッションに載せられないため各移動で表示中の1件を都度保存する
-        # save-as-you-go方式だが、「どのページで更新を押しても即全件確定」という原本の挙動自体は
-        # 踏襲する（2026-08-27、原本フィデリティ監査での指摘を受けて修正。documents側と同一）。
         total = len(state["pks"])
         index = state["index"]
+        action = request.POST.get("bulk_action")
         nav = request.POST.get("bulk_nav")
+
+        if action == "toggle_delete":
+            bulk_edit_services.toggle_delete_mark(request.session, BULK_EDIT_SESSION_KEY, self.object.pk)
+            return redirect("contracts:bulk_edit")
         if nav == "prev":
             if index > 0:
                 bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index - 1)
@@ -539,10 +547,118 @@ class BulkEditView(RequiresContractEditMixin, View):
                 bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index + 1)
             return redirect("contracts:bulk_edit")
 
-        # 「更新」ボタン（bulk_navなし）：現在ページの1件を保存済みの状態で選択全件を確定する。
-        edited_contracts_by_pk = {c.pk: c for c in Contract.objects.filter(pk__in=state["pks"])}
-        edited_contracts = [edited_contracts_by_pk[pk] for pk in state["pks"] if pk in edited_contracts_by_pk]
+        return self._commit(request)
+
+    def _commit(self, request):
+        state = bulk_edit_services.get_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
+        pks = state["pks"]
+        to_delete = set(state.get("to_delete", []))
+        staged = state.get("staged", {})
+        objs_by_pk = {
+            c.pk: c for c in Contract.objects.prefetch_related("related_files").filter(pk__in=pks)
+        }
+
+        # --- 検証パス ---
+        forms_by_pk = {}
+        invalid = []  # [(index, form)]
+        for i, pk in enumerate(pks):
+            if pk in to_delete or str(pk) not in staged or pk not in objs_by_pk:
+                continue
+            f = self._build_form(objs_by_pk[pk], data=staged[str(pk)])
+            if f.is_valid():
+                forms_by_pk[pk] = f
+            else:
+                invalid.append((i, f))
+
+        if invalid:
+            first_index, first_form = invalid[0]
+            bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, first_index)
+            messages.error(request, f"{first_index + 1}件目に入力エラーがあります。修正してください。")
+            self.object = objs_by_pk[pks[first_index]]
+            token = issue_token(request.session, self.form_id)
+            state = bulk_edit_services.get_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
+            return render(
+                request,
+                self.template_name,
+                self._context(request, first_form, token, state, marked_delete=False),
+            )
+
+        # --- 確定パス ---
+        opened_files = []
+        status_by_pk = {}
+        try:
+            with transaction.atomic():
+                for pk in pks:
+                    obj = objs_by_pk.get(pk)
+                    if obj is None:
+                        continue
+                    if pk in to_delete:
+                        obj.is_deleted = True
+                        obj.deleted_at = timezone.now()
+                        obj.save(update_fields=["is_deleted", "deleted_at"])
+                        audit_services.log(
+                            employee=request.user,
+                            action="保管画面２ 削除",
+                            event_message=f"契約書「{obj.title}」を削除しました。",
+                        )
+                        status_by_pk[pk] = "削除"
+                    elif pk in forms_by_pk:
+                        f = forms_by_pk[pk]
+                        bucket = bulk_edit_services.staged_related_for(state, pk)
+                        related_changed = bool(bucket["add"] or bucket["remove"])
+                        if contract_edit_is_dirty(
+                            obj, f.cleaned_data, request.user, related_changed=related_changed
+                        ):
+                            new_files = []
+                            for ref in bucket["add"]:
+                                fh = upload_services.open_pending_file(ref["temp_name"])
+                                fh.name = ref["original_name"]
+                                opened_files.append(fh)
+                                new_files.append(fh)
+                            apply_contract_edit(
+                                obj, f.cleaned_data, request.user, bucket["remove"], new_files
+                            )
+                            audit_services.log(
+                                employee=request.user,
+                                action="保管画面２ 更新",
+                                event_message=f"契約書「{obj.title}」を更新しました。",
+                            )
+                            status_by_pk[pk] = "更新"
+                        else:
+                            status_by_pk[pk] = "更新なし"
+                    else:
+                        status_by_pk[pk] = "更新なし"
+        except (OSError, PendingFileStorageError, DBError):
+            logger.exception(
+                "契約書の一括編集確定中にエラーが発生しました: employee_no=%s", request.user.employee_no
+            )
+            messages.error(request, "更新に失敗しました。もう一度お試しください。")
+            return redirect("contracts:bulk_edit")
+        finally:
+            for fh in opened_files:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+
+        bulk_edit_services.discard_staged_related_files(state)
         bulk_edit_services.clear_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
+        return self._render_complete(request, pks, status_by_pk)
+
+    def _render_complete(self, request, pks, status_by_pk):
+        rows_objs = {c.pk: c for c in Contract.objects.filter(pk__in=pks)}
+        rows = [
+            {"obj": rows_objs[pk], "status": status_by_pk.get(pk, "更新なし")}
+            for pk in pks
+            if pk in rows_objs
+        ]
+        counts = {
+            "updated": sum(1 for r in rows if r["status"] == "更新"),
+            "unchanged": sum(1 for r in rows if r["status"] == "更新なし"),
+            "deleted": sum(1 for r in rows if r["status"] == "削除"),
+        }
+        self.object = rows[0]["obj"]
+        form = self._build_form(self.object)
         token = issue_token(request.session, self.form_id)
         return render(
             request,
@@ -552,14 +668,13 @@ class BulkEditView(RequiresContractEditMixin, View):
                 "contract": self.object,
                 "token": token,
                 "title_field": form["title_0"],
-                "complete": {"created": edited_contracts, "mode": "update"},
+                "complete": {"mode": "bulk", "rows": rows, "counts": counts},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
-                **_edit_delete_context(self.object),
             },
         )
 
-    def _context(self, request, form, token, state):
+    def _context(self, request, form, token, state, marked_delete):
         total = len(state["pks"])
         index = state["index"]
         return {
@@ -575,12 +690,26 @@ class BulkEditView(RequiresContractEditMixin, View):
                 "has_prev": index > 0,
                 "has_next": index < total - 1,
             },
-            **_edit_delete_context(self.object),
+            "marked_delete": marked_delete,
+            "can_delete": deletion_services.can_delete(self.object),
+            "related_rows": self._related_rows(state),
         }
 
-    def _build_form(self, data=None):
-        obj = self.object
-        return UploadStep2Form(
+    def _related_rows(self, state):
+        """一括編集画面の[3]関連書類の表示行。既存（ステージ済みの削除を除外）＋ステージ済みの
+        追加（「追加予定」）。追加分の個別取消は用意しない（キャンセルで一括破棄する。"""
+        bucket = bulk_edit_services.staged_related_for(state, self.object.pk)
+        removed = set(bucket["remove"])
+        rows = [
+            {"kind": "existing", "id": rf.pk, "name": rf.display_name}
+            for rf in self.object.related_files.all()
+            if rf.pk not in removed
+        ]
+        rows += [{"kind": "staged_add", "id": None, "name": ref["original_name"]} for ref in bucket["add"]]
+        return rows
+
+    def _build_form(self, obj, data=None, marked_delete=False):
+        form = UploadStep2Form(
             data,
             employee=self.request.user,
             file_count=1,
@@ -600,6 +729,10 @@ class BulkEditView(RequiresContractEditMixin, View):
                 "memo": obj.memo,
             },
         )
+        if marked_delete:
+            for field in form.fields.values():
+                field.disabled = True
+        return form
 
 
 class SearchView(LoginRequiredMixin, View):
@@ -731,28 +864,14 @@ class DeleteView(LoginRequiredMixin, record_views.BaseDeleteView):
 
 
 class EditDeleteView(DeleteView):
-    """保管画面２（編集・edit.html）の[4]メモ欄直下「削除」ボタン。documents.views.EditDeleteViewと
-    同じ設計（削除自体はDeleteView＝BaseDeleteViewと同一、監査ログのaction名と削除後の遷移先
-    だけが違う）。契約書側はDeleteView継承でextra_permission_check（can_edit_contract）を
-    引き継ぐ。2026-08-27ユーザー確定でメモ欄クリアからレコードの論理削除に変更
-    （HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節参照）。
+    """単独編集画面（ContractEditView、edit.html）の[4]メモ欄直下「削除」ボタン。
+    documents.views.EditDeleteViewと同じ（削除自体はDeleteView＝BaseDeleteViewと同一、監査ログの
+    action名だけ違う。契約書側はDeleteView継承でextra_permission_check〈can_edit_contract〉を
+    引き継ぐ）。一括編集画面の削除は「更新」ボタンでまとめて確定する別方式（ステージ型）のため
+    このビューは通らない。2026-08-27ユーザー確定でメモ欄クリアからレコードの論理削除に変更。
     """
 
     audit_action = "保管画面２ 削除"
-    bulk_edit_session_key = BULK_EDIT_SESSION_KEY
-    bulk_edit_url_name = "contracts:bulk_edit"
-
-    def _post_delete_redirect(self, request, obj, success_message):
-        messages.success(request, success_message)
-        # from_bulkは一括編集ウィザード（BulkEditView）が描画したedit.htmlの削除フォームにのみ
-        # 埋まる（documents.views.EditDeleteViewと同じ理由）。
-        if request.POST.get("from_bulk"):
-            new_state = bulk_edit_services.remove_bulk_edit_pk(
-                request.session, self.bulk_edit_session_key, obj.pk
-            )
-            if new_state is not None:
-                return redirect(self.bulk_edit_url_name)
-        return redirect(self.search_url_name)
 
 
 def _strip_ext(filename):

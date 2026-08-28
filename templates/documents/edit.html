@@ -8,7 +8,13 @@
       <div class="system-title">
         <div class="system-sub">クラウド文書管理システム -文書管理-</div>
         <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
-          <button type="button" onclick="window.location.href='{% url 'documents:search' %}'">＜ 戻る</button>
+          {% if bulk %}
+            {# 一括編集中の「戻る」は、ステージした内容（関連書類の一時ファイル含む）を破棄して #}
+            {# 検索画面へ戻る＝キャンセルと同義。メインフォーム外なので form= 属性で紐付ける。 #}
+            <button type="submit" form="meta-input-form" name="bulk_action" value="cancel">＜ 戻る</button>
+          {% else %}
+            <button type="button" onclick="window.location.href='{% url 'documents:search' %}'">＜ 戻る</button>
+          {% endif %}
           <h1 style="margin: 0;">編集画面</h1>
         </div>
       </div>
@@ -62,7 +68,7 @@
       </div>
 
       <div class="meta-input-form-wrapper">
-        <form method="post" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
+        <form method="post" id="meta-input-form" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
           {% csrf_token %}
           <input type="hidden" name="token" value="{{ token }}">
 
@@ -72,7 +78,15 @@
             <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
           </div>
           {% if bulk %}
-            <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">選択した文書をまとめて編集中です。移動すると現在の内容が保存されます。</div>
+            <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">
+              選択した文書をまとめて編集中です。ページを移動しても入力内容は保持され、「更新」を押すと
+              変更のあった文書だけがまとめて更新されます。
+            </div>
+          {% endif %}
+          {% if marked_delete %}
+            <div style="font-size:12px; color:#c0392b; font-weight:bold; flex-shrink:0; margin-top:4px; background:#fdecea; border:1px solid #f5c6cb; border-radius:4px; padding:4px 8px;">
+              このページは削除予定です。「更新」を押すと削除が確定します。「削除取消」で元に戻せます。
+            </div>
           {% endif %}
 
           <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
@@ -112,34 +126,44 @@
               <h4>[4] メモ欄</h4>
               {{ form.memo }}
               {# 原本HTMLでは onclick 未設定の死んだモックだったが、xlsx 保管!B298-300（登録画面と #}
-              {# 同じ＝不要な文書を削除する。本登録から除外する）に基づき、2026-08-27ユーザー確定で #}
-              {# レコードの論理削除（documents:edit_delete → EditDeleteView）に変更した。 #}
-              {# can_delete が False（保存から1週間以上経過・削除済み）ならボタンごと非表示にする #}
-              {# （xlsx B300「初回登録から1週間以上経過しているものは削除不可。ボタンを非表示にする」）。 #}
+              {# 同じ＝不要な文書を削除する。本登録から除外する）に基づき、ユーザー確定でレコードの #}
+              {# 論理削除に変更。can_delete が False（保存から1週間以上経過・削除済み）ならボタンを #}
+              {# 非表示（xlsx B300）。単独編集は即時削除（EditDeleteView→検索画面へ）。一括編集は #}
+              {# 「削除予定」としてマークし「更新」でまとめて確定、「削除取消」で戻せる。 #}
               {% if can_delete %}
                 <div style="text-align: right; margin-top: 10px;">
-                  <button type="submit" form="record-delete-form"
-                          style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;"
-                          onclick="return confirm('この文書を削除します。よろしいですか？')">削除</button>
+                  {% if bulk %}
+                    <button type="submit" name="bulk_action" value="toggle_delete"
+                            style="background-color:{% if marked_delete %}#7f8c8d{% else %}#e74c3c{% endif %}; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;">
+                      {% if marked_delete %}削除取消{% else %}削除{% endif %}
+                    </button>
+                  {% else %}
+                    <button type="submit" form="record-delete-form"
+                            style="background-color:#e74c3c; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;"
+                            onclick="return confirm('この文書を削除します。よろしいですか？')">削除</button>
+                  {% endif %}
                 </div>
               {% endif %}
             </div>
           </div>
 
           <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
-            {# 原本html4の一括編集は「次へ」ボタンを持たず、常に「更新」（startUpdateMock）。 #}
-            {# レコード間の移動はページャー ＜ ＞ のみが担い、「更新」はどのページでも全件確定する。 #}
-            <button type="submit" class="btn-primary" style="padding:8px 30px;">更新</button>
-            <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:search' %}'">キャンセル</button>
+            {% if bulk %}
+              {# 一括編集：レコード間の移動はページャー ＜ ＞、「更新」で全ページ一括確定（変更が #}
+              {# あった文書だけ更新・削除予定を確定）、「キャンセル」でステージ内容を全破棄。 #}
+              <button type="submit" name="bulk_action" value="update" class="btn-primary" style="padding:8px 30px;">更新</button>
+              <button type="submit" name="bulk_action" value="cancel" class="btn-cancel">キャンセル</button>
+            {% else %}
+              <button type="submit" class="btn-primary" style="padding:8px 30px;">更新</button>
+              <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:search' %}'">キャンセル</button>
+            {% endif %}
           </div>
         </form>
-        {% if can_delete %}
-          {# [4]メモ欄直下の「削除」ボタン専用フォーム。フォーム入れ子を避けるためメインの #}
-          {# meta-input-form の外に置き、button[form=] 属性で関連付ける。一括編集ウィザードから #}
-          {# 開いた場合だけ from_bulk を送り、EditDeleteView がその1件を対象から外して次へ進む。 #}
+        {% if can_delete and not bulk %}
+          {# 単独編集の[4]メモ欄直下「削除」ボタン専用フォーム。フォーム入れ子を避けるため #}
+          {# メインの meta-input-form の外に置き、button[form=] 属性で関連付ける。 #}
           <form method="post" action="{{ delete_action_url }}" id="record-delete-form">
             {% csrf_token %}
-            {% if bulk %}<input type="hidden" name="from_bulk" value="1">{% endif %}
           </form>
         {% endif %}
       </div>

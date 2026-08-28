@@ -95,6 +95,32 @@ def apply_contract_edit(contract, cleaned_data, employee, remove_ids, new_relate
     return contract
 
 
+def contract_edit_is_dirty(contract, cleaned_data, employee, *, related_changed=False) -> bool:
+    """documents.services.document_edit_is_dirtyの契約書版（2026-08-28ユーザー確定：一括編集の
+    「更新」で変更が無いページは「更新なし」とする）。`apply_contract_edit`と同じ`department`
+    正規化を行った上で全コピー対象フィールドを比較し、加えて関連書類の増減（`related_changed`）が
+    あれば dirty とみなす。
+    """
+    department = cleaned_data["department"]
+    if not can_select_department(employee):
+        department = employee.department
+    return (
+        related_changed
+        or contract.title != cleaned_data["title_0"]
+        or contract.department_id != department.pk
+        or contract.group_id != cleaned_data["group"].pk
+        or contract.category_id != cleaned_data["category"].pk
+        or contract.year != cleaned_data["year"]
+        or contract.contract_date != cleaned_data["contract_date"]
+        or contract.contract_period_start != cleaned_data["contract_period_start"]
+        or contract.contract_period_end != cleaned_data["contract_period_end"]
+        or contract.renewal_date != cleaned_data["renewal_date"]
+        or contract.contract_amount != cleaned_data["contract_amount"]
+        or (contract.contract_partner or "") != (cleaned_data["contract_partner"] or "")
+        or (contract.memo or "") != (cleaned_data["memo"] or "")
+    )
+
+
 def parse_remove_related_ids(raw_value, *, employee_no):
     """remove_related_ids（JS側でhidden inputにカンマ区切りで積まれる想定）を数値のリストに
     変換する。フォーム改ざんで非数値が混じってもpk__inクエリの評価時に例外を出さないよう、

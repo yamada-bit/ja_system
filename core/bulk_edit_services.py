@@ -1,12 +1,33 @@
 """検索結果一覧「一括編集」用のセッション状態ヘルパー。
 
 `core.upload_services.get_pending_files`/`clear_pending_files`と同じ最小主義パターンで、
-セッションキー文字列は呼び出し元のアプリ（documents/contracts）が渡す。保持するのは
-「編集対象pkの並び順」と「現在どこまで進んだか」だけで、フォームの入力値そのものは
-持たない（各ステップの送信ごとにDBへ直接保存する save-as-you-go 方式のため）。
+セッションキー文字列は呼び出し元のアプリ（documents/contracts）が渡す。
+
+2026-08-28ユーザー確定で「更新」ボタン押下まで一切DBへ反映しない**ステージング型**に変更した
+（それ以前は各ステップの送信ごとにDBへ直接保存する save-as-you-go 方式だった。詳細は
+HTML_REIMPL_CHECKLIST_ARCHIVE.md「一括編集を全ページ一括確定モデルへ改修」節参照）。
+セッションに保持するのは全てJSON直列化可能な値のみ:
+
+    session[<app>_bulk_edit] = {
+        "pks": [int, ...],           # 編集対象の並び順
+        "index": int,                # 現在表示中のページ位置
+        "staged": {"<pk>": {<フォームフィールド名>: "<生値>"}},  # 入力欄に触れたページ
+        "to_delete": [int, ...],     # 「削除」ボタンでマークされた削除予定pk
+        "staged_related": {"<pk>": {"add": [{"temp_name", "original_name"}], "remove": [int]}},
+    }
+
+`staged` のキーは `str(pk)`（Djangoのセッションは既定でJSONシリアライズし、dictの整数キーは
+文字列化されるため、最初から文字列で統一する）。`staged_related` は契約書の関連書類専用で、
+追加ファイルは `MEDIA_ROOT/tmp_uploads/` に退避し `temp_name` だけを持つ（キャンセル・確定後に
+`discard_staged_related_files()` で実体を掃除する）。
 """
 
 import logging
+from pathlib import Path
+
+from django.conf import settings
+
+from core.upload_services import TMP_UPLOAD_SUBDIR
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +70,20 @@ def resolve_ordered_pks(raw_pks, *, model, dept_ids_resolver, employee):
 
 
 def start_bulk_edit(session, session_key, pks):
-    """一括編集ウィザードを開始し、対象pkの並び順と先頭位置をセッションに保存する。"""
-    session[session_key] = {"pks": pks, "index": 0}
+    """一括編集ウィザードを開始し、対象pkの並び順・先頭位置と空のステージ領域をセッションに保存する。"""
+    session[session_key] = {
+        "pks": pks,
+        "index": 0,
+        "staged": {},
+        "to_delete": [],
+        "staged_related": {},
+    }
+    session.modified = True
 
 
 def get_bulk_edit_state(session, session_key):
-    """`{"pks": [...], "index": int}`、未開始または期限切れの場合はNone。"""
+    """stateのdict、未開始または期限切れの場合はNone。古い形式（staged等が無い）を読んでも
+    落ちないよう、参照側は`state.get("staged", {})`のように防御的に扱う。"""
     return session.get(session_key)
 
 
@@ -64,40 +93,97 @@ def set_bulk_edit_index(session, session_key, index):
     if state is not None:
         state["index"] = index
         session[session_key] = state
+        session.modified = True
 
 
-def remove_bulk_edit_pk(session, session_key, pk):
-    """一括編集ウィザードの巡回中に、表示中の1件を対象から外して次へ進む
-    （保管画面２〈edit.html〉の削除ボタンから、対象レコードを論理削除した直後に呼ぶ。
-    2026-08-27ユーザー確定：一括編集中の削除は「その1件を対象から外して次のレコードへ進む」）。
-
-    `state["pks"]` から `pk` を除去し、`index` を新しい長さの範囲内へ収める（除去位置が
-    現在位置より前なら1つ前へずらし、末尾を削除した場合は最後の要素を指すよう詰める）。
-    対象が0件になったら `clear_bulk_edit_state` して `None` を返す。stateが無い場合も `None`。
-    それ以外は更新後のstate（dict）を返す。
-    """
+def stage_page(session, session_key, pk, form_values):
+    """ページ移動・トグル・更新の各POSTで、表示中ページのフォーム生値（str→str のdict）を
+    セッションへ退避する。`form_values`は呼び出し側（view）がアプリ別のフィールド名リストで
+    `{k: request.POST.get(k) for k in ...}` として組み立てて渡す。"""
     state = session.get(session_key)
-    if state is None or pk not in state["pks"]:
-        return None
-
-    removed_at = state["pks"].index(pk)
-    state["pks"].remove(pk)
-    if not state["pks"]:
-        clear_bulk_edit_state(session, session_key)
-        return None
-
-    index = state["index"]
-    # 除去したのが現在位置より前なら、見かけ上の並びを保つため index を1つ詰める。
-    # 現在位置そのもの／後ろを除去した場合は index を動かさず、末尾を超えたらクランプする
-    # （＝現在位置の要素を消したときは「次のレコード」が繰り上がって同じ index に来る）。
-    if removed_at < index:
-        index -= 1
-    index = min(index, len(state["pks"]) - 1)
-    state["index"] = index
+    if state is None:
+        return
+    state.setdefault("staged", {})[str(pk)] = form_values
     session[session_key] = state
     session.modified = True
-    return state
+
+
+def staged_page_data(state, pk):
+    """`state`にステージ済みの生値dictがあれば返す、無ければNone。"""
+    if not state:
+        return None
+    return state.get("staged", {}).get(str(pk))
+
+
+def toggle_delete_mark(session, session_key, pk):
+    """「削除」/「削除取消」ボタン。`to_delete`にpkを入れる/外す。戻り値は操作後に「削除予定か」。"""
+    state = session.get(session_key)
+    if state is None:
+        return False
+    to_delete = state.setdefault("to_delete", [])
+    if pk in to_delete:
+        to_delete.remove(pk)
+        now_marked = False
+    else:
+        to_delete.append(pk)
+        now_marked = True
+    session[session_key] = state
+    session.modified = True
+    return now_marked
+
+
+def is_marked_for_delete(state, pk):
+    return bool(state) and pk in state.get("to_delete", [])
+
+
+def stage_related(session, session_key, pk, *, add_refs=None, remove_ids=None):
+    """契約書の関連書類の増減をステージする。`add_refs`は tmp_uploads/ へ退避済みの
+    `[{"temp_name", "original_name"}]`、`remove_ids`は既存RelatedFileのpkリスト。
+    同じページで複数回呼ばれても累積する（×は既存行、file inputは新規追加）。"""
+    state = session.get(session_key)
+    if state is None:
+        return
+    bucket = state.setdefault("staged_related", {}).setdefault(str(pk), {"add": [], "remove": []})
+    if add_refs:
+        bucket["add"].extend(add_refs)
+    if remove_ids:
+        for rid in remove_ids:
+            if rid not in bucket["remove"]:
+                bucket["remove"].append(rid)
+    session[session_key] = state
+    session.modified = True
+
+
+def staged_related_for(state, pk):
+    """`{"add": [...], "remove": [...]}`（無ければ空の同型dict）。"""
+    if not state:
+        return {"add": [], "remove": []}
+    return state.get("staged_related", {}).get(str(pk), {"add": [], "remove": []})
+
+
+def discard_staged_related_files(state):
+    """`staged_related`の全 add エントリの一時ファイル実体を tmp_uploads/ から削除する
+    （キャンセル時、および「更新」確定でRelatedFileへ移し終えた後に呼ぶ）。削除失敗は
+    `clear_pending_files`と同じく握りつぶしてログに残し、処理は止めない。"""
+    if not state:
+        return
+    tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
+    for bucket in state.get("staged_related", {}).values():
+        for ref in bucket.get("add", []):
+            try:
+                (tmp_dir / ref["temp_name"]).unlink(missing_ok=True)
+            except OSError:
+                logger.exception(
+                    "一括編集ステージの関連書類一時ファイル削除に失敗しました: %s", ref.get("temp_name")
+                )
+
+
+def discard_bulk_edit(session, session_key):
+    """「キャンセル」ボタン。ステージした関連書類の一時ファイルを掃除してからstateを破棄する。"""
+    discard_staged_related_files(session.get(session_key))
+    clear_bulk_edit_state(session, session_key)
 
 
 def clear_bulk_edit_state(session, session_key):
     session.pop(session_key, None)
+    session.modified = True

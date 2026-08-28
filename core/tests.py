@@ -1099,58 +1099,69 @@ class UploadServicesErrorHandlingTests(TestCase):
         (self.tmp_dir / pending[0]["temp_name"]).unlink(missing_ok=True)
 
 
-class RemoveBulkEditPkTests(TestCase):
-    """core.bulk_edit_services.remove_bulk_edit_pk（保管画面２〈edit.html〉一括編集中の削除）。
-    表示中の1件を対象から外し、index を新しい並びの範囲へ収める。"""
+class BulkEditServicesStagingTests(TestCase):
+    """core.bulk_edit_services のステージング型セッションヘルパー（2026-08-28ユーザー確定）。"""
 
     KEY = "test_bulk_edit"
 
     def setUp(self):
-        from django.contrib.sessions.backends.db import SessionStore
-
         self.session = SessionStore()
 
-    def _start(self, pks, index):
-        self.session[self.KEY] = {"pks": list(pks), "index": index}
+    def _start(self, pks):
+        from core.bulk_edit_services import start_bulk_edit
 
-    def test_removing_current_index_advances_next_into_same_slot(self):
-        from core.bulk_edit_services import remove_bulk_edit_pk
+        start_bulk_edit(self.session, self.KEY, list(pks))
 
-        self._start([10, 20, 30], index=1)
-        state = remove_bulk_edit_pk(self.session, self.KEY, 20)
-        self.assertEqual(state["pks"], [10, 30])
-        self.assertEqual(state["index"], 1)
+    def test_start_initialises_staging_areas(self):
+        self._start([10, 20])
+        state = self.session[self.KEY]
+        self.assertEqual(state, {"pks": [10, 20], "index": 0, "staged": {}, "to_delete": [], "staged_related": {}})
 
-    def test_removing_earlier_item_shifts_index_back(self):
-        from core.bulk_edit_services import remove_bulk_edit_pk
+    def test_stage_page_and_read_back(self):
+        from core.bulk_edit_services import get_bulk_edit_state, stage_page, staged_page_data
 
-        self._start([10, 20, 30], index=2)
-        state = remove_bulk_edit_pk(self.session, self.KEY, 10)
-        self.assertEqual(state["pks"], [20, 30])
-        self.assertEqual(state["index"], 1)
+        self._start([10, 20])
+        stage_page(self.session, self.KEY, 10, {"title_0": "new"})
+        state = get_bulk_edit_state(self.session, self.KEY)
+        self.assertEqual(staged_page_data(state, 10), {"title_0": "new"})
+        self.assertIsNone(staged_page_data(state, 20))
 
-    def test_removing_last_item_while_on_it_clamps_index(self):
-        from core.bulk_edit_services import remove_bulk_edit_pk
+    def test_toggle_delete_mark(self):
+        from core.bulk_edit_services import is_marked_for_delete, toggle_delete_mark
 
-        self._start([10, 20, 30], index=2)
-        state = remove_bulk_edit_pk(self.session, self.KEY, 30)
-        self.assertEqual(state["pks"], [10, 20])
-        self.assertEqual(state["index"], 1)
+        self._start([10, 20])
+        self.assertTrue(toggle_delete_mark(self.session, self.KEY, 10))
+        self.assertTrue(is_marked_for_delete(self.session[self.KEY], 10))
+        self.assertFalse(toggle_delete_mark(self.session, self.KEY, 10))
+        self.assertFalse(is_marked_for_delete(self.session[self.KEY], 10))
 
-    def test_removing_only_item_clears_state_and_returns_none(self):
-        from core.bulk_edit_services import remove_bulk_edit_pk
+    def test_stage_related_accumulates(self):
+        from core.bulk_edit_services import stage_related, staged_related_for
 
-        self._start([10], index=0)
-        self.assertIsNone(remove_bulk_edit_pk(self.session, self.KEY, 10))
+        self._start([10])
+        stage_related(self.session, self.KEY, 10, add_refs=[{"temp_name": "t1", "original_name": "a.pdf"}])
+        stage_related(self.session, self.KEY, 10, remove_ids=[5, 5, 6])
+        bucket = staged_related_for(self.session[self.KEY], 10)
+        self.assertEqual([r["original_name"] for r in bucket["add"]], ["a.pdf"])
+        self.assertEqual(bucket["remove"], [5, 6])
+
+    def test_discard_bulk_edit_removes_staged_related_temp_files(self):
+        from pathlib import Path
+
+        from django.conf import settings
+
+        from core.bulk_edit_services import discard_bulk_edit, stage_related
+        from core.upload_services import TMP_UPLOAD_SUBDIR, stash_files_to_tmp
+
+        self._start([10])
+        refs = stash_files_to_tmp([SimpleUploadedFile("a.pdf", b"x")])
+        stage_related(self.session, self.KEY, 10, add_refs=refs)
+        tmp_path = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR / refs[0]["temp_name"]
+        self.assertTrue(tmp_path.exists())
+
+        discard_bulk_edit(self.session, self.KEY)
+        self.assertFalse(tmp_path.exists())
         self.assertIsNone(self.session.get(self.KEY))
-
-    def test_unknown_pk_or_missing_state_returns_none(self):
-        from core.bulk_edit_services import remove_bulk_edit_pk
-
-        self._start([10, 20], index=0)
-        self.assertIsNone(remove_bulk_edit_pk(self.session, self.KEY, 999))
-        self.session.pop(self.KEY, None)
-        self.assertIsNone(remove_bulk_edit_pk(self.session, self.KEY, 10))
 
 
 class ChunkUploadServiceTests(TestCase):

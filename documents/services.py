@@ -132,6 +132,30 @@ def apply_document_edit(doc, cleaned_data, employee):
     return doc
 
 
+def document_edit_is_dirty(doc, cleaned_data, employee) -> bool:
+    """一括編集の「更新」確定時に、このページを実際にDB保存する必要があるか（＝DBの現在値と
+    ステージ済み入力に差があるか）を判定する（2026-08-28ユーザー確定：変更が無いページは
+    「更新なし」として保存も監査ログ記録もしない）。`apply_document_edit`と同じ
+    `department`正規化を行った上でコピー対象フィールドを1つずつ比較する。
+
+    `expiry_date`は`apply_document_edit`が保存時に今日基準で再計算する派生値のため比較対象に
+    含めない（保存期間が変わらない限り実質不変で、変わればここで差が出る）。
+    """
+    department = cleaned_data["department"]
+    if not can_select_department(employee):
+        department = employee.department
+    return (
+        doc.title != cleaned_data["title_0"]
+        or doc.department_id != department.pk
+        or doc.group_id != cleaned_data["group"].pk
+        or doc.category_id != cleaned_data["category"].pk
+        or doc.year != cleaned_data["year"]
+        or doc.retention_period_id != cleaned_data["retention_period"].pk
+        or bool(doc.privacy_flag) != bool(cleaned_data["privacy_flag"])
+        or (doc.memo or "") != (cleaned_data["memo"] or "")
+    )
+
+
 def expiry_date_previews(retention_periods) -> dict[str, str]:
     """保管画面２・編集画面の保存満了日プレビュー（JS `calculateExpiryDate()`）用。
     基準日は「保存した日」で、実際の登録/更新時に使う`save_date`/`timezone.localdate()`と

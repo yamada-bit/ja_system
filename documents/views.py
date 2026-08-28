@@ -31,6 +31,7 @@ from documents.services import (
     apply_document_edit,
     build_zip_archive,
     calculate_expiry_date,
+    document_edit_is_dirty,
     document_searchable_department_ids,
     expiry_date_previews,
     scoped_get_object_or_404,
@@ -363,21 +364,33 @@ class BulkEditStartView(LoginRequiredMixin, View):
             messages.error(request, "編集するデータが選択されていません。")
             return redirect("documents:search")
 
+        # 開始のたび、前回の中断で残ったステージ内容（関連書類の一時ファイル含む）を掃除する
+        # （BaseUploadStep1View.getが保留ファイルを掃除するのと同じ安全網）。
+        bulk_edit_services.discard_bulk_edit(request.session, BULK_EDIT_SESSION_KEY)
         bulk_edit_services.start_bulk_edit(request.session, BULK_EDIT_SESSION_KEY, ordered_pks)
         return redirect("documents:bulk_edit")
 
 
+# 一括編集で各ページの生POST値としてセッションへ退避するフォームフィールド名
+# （UploadStep2Form のうちバッチ内で共通のメタデータ＋当該ページのタイトル）。
+DOCUMENT_BULK_FORM_FIELDS = (
+    "department", "group", "category", "year",
+    "retention_period", "privacy_flag", "memo", "title_0",
+)
+
+
 class BulkEditView(LoginRequiredMixin, View):
-    """一括編集ウィザード本体。DocumentEditView（screen-storage2の変更モード）のテンプレート
-    （edit.html）をそのまま再利用しつつ、BulkEditStartViewがセッションに積んだpk一覧を
-    ページャー（＜ N/M ＞）で1件ずつ巡回する。原本html4差分のモックJSは全件をブラウザ内の
-    配列に溜めて最後に一括保存する作りだったが、ModelChoiceFieldの値はセッションへの
-    JSONシリアライズに向かないため、本実装では「ページャー（＜／＞）で移動する際にまず
-    今表示している内容を検証・保存する」save-as-you-go方式にしている。「更新」ボタンは
-    原本と同じくどのページで押しても即座に選択全件を確定する（詳細な設計判断は
-    HTML_REIMPL_CHECKLIST_ARCHIVE.md参照）。単体編集用のトークン名
-    （"documents_edit"）とは別の"documents_bulk_edit"を使い、別タブで単体編集中でも
-    干渉しないようにする。
+    """一括編集ウィザード本体（ステージング型。2026-08-28ユーザー確定）。BulkEditStartViewが
+    セッションに積んだpk一覧をページャー（＜ N/M ＞）で1件ずつ巡回し、入力値・削除マーク（契約書は
+    関連書類の増減も）を**すべてセッションにステージ**する。「更新」ボタンを押したときに初めて
+    全ページを検証→1トランザクションで確定する（変更が無いページは「更新なし」で保存も監査ログも
+    しない＝DB現在値との比較。1ページでも入力エラーがあれば全体を止め最初のエラーページを表示）。
+    「キャンセル」でステージ内容（関連書類の一時ファイル含む）を破棄する。
+
+    以前は各ページ移動の都度DBへ保存する save-as-you-go 方式だった（詳細は
+    HTML_REIMPL_CHECKLIST_ARCHIVE.md「一括編集を全ページ一括確定モデルへ改修」節）。
+    単体編集用のトークン名（"documents_edit"）とは別の"documents_bulk_edit"を使い、別タブで
+    単体編集中でも干渉しないようにする。
     """
 
     template_name = "documents/edit.html"
@@ -390,69 +403,60 @@ class BulkEditView(LoginRequiredMixin, View):
             return None
         return state
 
+    def _current_object(self, request, state):
+        # セキュリティレビューで発見：部署スコープ外の文書へのセッション改ざん・URL直打ちを
+        # 防ぐ（documents.services.scoped_get_object_or_404 docstring参照）。
+        return scoped_get_object_or_404(
+            Document.objects.filter(is_deleted=False), request.user, state["pks"][state["index"]]
+        )
+
     def get(self, request):
         state = self._state(request)
         if state is None:
             return redirect("documents:search")
-
-        # セキュリティレビューで発見：部署スコープ外の文書へのセッション改ざん・URL直打ちを
-        # 防ぐ（documents.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
-        self.object = scoped_get_object_or_404(
-            Document.objects.filter(is_deleted=False), request.user, state["pks"][state["index"]]
-        )
-        form = self._build_form()
+        self.object = self._current_object(request, state)
+        marked_delete = bulk_edit_services.is_marked_for_delete(state, self.object.pk)
+        staged = bulk_edit_services.staged_page_data(state, self.object.pk)
+        form = self._build_form(self.object, data=staged, marked_delete=marked_delete)
         token = issue_token(request.session, self.form_id)
-        return render(request, self.template_name, self._context(request, form, token, state))
+        return render(
+            request, self.template_name, self._context(request, form, token, state, marked_delete)
+        )
 
     def post(self, request):
+        # 「キャンセル」/「＜ 戻る」：ステージ済みの関連書類一時ファイルを掃除して破棄する。
+        if request.POST.get("bulk_action") == "cancel":
+            bulk_edit_services.discard_bulk_edit(request.session, BULK_EDIT_SESSION_KEY)
+            return redirect("documents:search")
+
         state = self._state(request)
         if state is None:
             return redirect("documents:search")
+        self.object = self._current_object(request, state)
 
-        # セキュリティレビューで発見：部署スコープ外の文書へのセッション改ざん・URL直打ちを
-        # 防ぐ（documents.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
-        self.object = scoped_get_object_or_404(
-            Document.objects.filter(is_deleted=False), request.user, state["pks"][state["index"]]
-        )
         submitted_token = request.POST.get("token", "")
         if not consume_token(request.session, self.form_id, submitted_token):
             messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
             return redirect("documents:bulk_edit")
 
-        form = self._build_form(data=request.POST)
-        if not form.is_valid():
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, self._context(request, form, token, state))
-
-        try:
-            doc = apply_document_edit(self.object, form.cleaned_data, request.user)
-        except DBError:
-            # contracts.views.BulkEditView.postと同じ理由（documents.views.DocumentEditView.post
-            # と同様、以前はDBErrorが未捕捉のまま生の500になっていた。2026-08-25修正）。
-            logger.exception(
-                "文書の一括編集処理中にDBエラーが発生しました: document_id=%s, employee_no=%s",
+        marked_delete = bulk_edit_services.is_marked_for_delete(state, self.object.pk)
+        # 削除予定ページはフィールドがdisabledで送信されないため、入力値のステージ対象にしない。
+        if not marked_delete:
+            bulk_edit_services.stage_page(
+                request.session,
+                BULK_EDIT_SESSION_KEY,
                 self.object.pk,
-                request.user.employee_no,
+                {k: request.POST.get(k, "") for k in DOCUMENT_BULK_FORM_FIELDS},
             )
-            messages.error(request, "更新に失敗しました。もう一度お試しください。")
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, self._context(request, form, token, state))
-        audit_services.log(
-            employee=request.user,
-            action="保管画面２ 更新",
-            event_message=f"文書「{doc.title}」を更新しました。",
-            personal_info_flag=doc.privacy_flag,
-        )
 
-        # 原本html4の一括編集は、レコード間の移動をページャー ＜ ＞（changeActiveDoc）だけで行い、
-        # 「更新」ボタン（startUpdateMock）を押した時点で、現在何件目を表示していても選択全件を
-        # 確定して完了ポップアップに一覧表示する（「次へ」ボタンは原本に存在しない）。本実装は
-        # ModelChoiceFieldをセッションに載せられないため各移動で表示中の1件を都度保存する
-        # save-as-you-go方式だが、「どのページで更新を押しても即全件確定」という原本の挙動自体は
-        # 踏襲する（2026-08-27、原本フィデリティ監査での指摘を受けて修正）。
         total = len(state["pks"])
         index = state["index"]
+        action = request.POST.get("bulk_action")
         nav = request.POST.get("bulk_nav")
+
+        if action == "toggle_delete":
+            bulk_edit_services.toggle_delete_mark(request.session, BULK_EDIT_SESSION_KEY, self.object.pk)
+            return redirect("documents:bulk_edit")
         if nav == "prev":
             if index > 0:
                 bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index - 1)
@@ -462,11 +466,100 @@ class BulkEditView(LoginRequiredMixin, View):
                 bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, index + 1)
             return redirect("documents:bulk_edit")
 
-        # 「更新」ボタン（bulk_navなし）。DocumentEditView.postと同じ理由でリダイレクトせず、
-        # completeを付けてedit.htmlを再描画し完了モーダルを重ねる。
-        edited_docs_by_pk = {d.pk: d for d in Document.objects.filter(pk__in=state["pks"])}
-        edited_docs = [edited_docs_by_pk[pk] for pk in state["pks"] if pk in edited_docs_by_pk]
+        # 「更新」ボタン（bulk_action=update）：全ページ一括確定。
+        return self._commit(request)
+
+    def _commit(self, request):
+        state = bulk_edit_services.get_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
+        pks = state["pks"]
+        to_delete = set(state.get("to_delete", []))
+        staged = state.get("staged", {})
+        objs_by_pk = {d.pk: d for d in Document.objects.filter(pk__in=pks)}
+
+        # --- 検証パス：ステージ済みで削除予定でない全ページを検証。1つでもNGなら全体を止める。 ---
+        forms_by_pk = {}
+        invalid = []  # [(index, form)]
+        for i, pk in enumerate(pks):
+            if pk in to_delete or str(pk) not in staged or pk not in objs_by_pk:
+                continue
+            f = self._build_form(objs_by_pk[pk], data=staged[str(pk)])
+            if f.is_valid():
+                forms_by_pk[pk] = f
+            else:
+                invalid.append((i, f))
+
+        if invalid:
+            first_index, first_form = invalid[0]
+            bulk_edit_services.set_bulk_edit_index(request.session, BULK_EDIT_SESSION_KEY, first_index)
+            messages.error(request, f"{first_index + 1}件目に入力エラーがあります。修正してください。")
+            self.object = objs_by_pk[pks[first_index]]
+            token = issue_token(request.session, self.form_id)
+            state = bulk_edit_services.get_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
+            return render(
+                request,
+                self.template_name,
+                self._context(request, first_form, token, state, marked_delete=False),
+            )
+
+        # --- 確定パス ---
+        status_by_pk = {}
+        try:
+            with transaction.atomic():
+                for pk in pks:
+                    obj = objs_by_pk.get(pk)
+                    if obj is None:
+                        continue
+                    if pk in to_delete:
+                        obj.is_deleted = True
+                        obj.deleted_at = timezone.now()
+                        obj.save(update_fields=["is_deleted", "deleted_at"])
+                        audit_services.log(
+                            employee=request.user,
+                            action="保管画面２ 削除",
+                            event_message=f"文書「{obj.title}」を削除しました。",
+                            personal_info_flag=obj.privacy_flag,
+                        )
+                        status_by_pk[pk] = "削除"
+                    elif pk in forms_by_pk:
+                        f = forms_by_pk[pk]
+                        if document_edit_is_dirty(obj, f.cleaned_data, request.user):
+                            doc = apply_document_edit(obj, f.cleaned_data, request.user)
+                            audit_services.log(
+                                employee=request.user,
+                                action="保管画面２ 更新",
+                                event_message=f"文書「{doc.title}」を更新しました。",
+                                personal_info_flag=doc.privacy_flag,
+                            )
+                            status_by_pk[pk] = "更新"
+                        else:
+                            status_by_pk[pk] = "更新なし"
+                    else:
+                        status_by_pk[pk] = "更新なし"
+        except DBError:
+            logger.exception(
+                "文書の一括編集確定中にDBエラーが発生しました: employee_no=%s", request.user.employee_no
+            )
+            messages.error(request, "更新に失敗しました。もう一度お試しください。")
+            return redirect("documents:bulk_edit")
+
         bulk_edit_services.clear_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
+        return self._render_complete(request, pks, status_by_pk)
+
+    def _render_complete(self, request, pks, status_by_pk):
+        rows_objs = {d.pk: d for d in Document.objects.filter(pk__in=pks)}
+        rows = [
+            {"obj": rows_objs[pk], "status": status_by_pk.get(pk, "更新なし")}
+            for pk in pks
+            if pk in rows_objs
+        ]
+        counts = {
+            "updated": sum(1 for r in rows if r["status"] == "更新"),
+            "unchanged": sum(1 for r in rows if r["status"] == "更新なし"),
+            "deleted": sum(1 for r in rows if r["status"] == "削除"),
+        }
+        # 完了モーダルの背後に敷くedit.htmlは1件目のフォームで描画する（モーダルが全面を覆う）。
+        self.object = rows[0]["obj"]
+        form = self._build_form(self.object)
         token = issue_token(request.session, self.form_id)
         return render(
             request,
@@ -476,15 +569,14 @@ class BulkEditView(LoginRequiredMixin, View):
                 "document": self.object,
                 "token": token,
                 "title_field": form["title_0"],
-                "complete": {"created": edited_docs, "mode": "update"},
+                "complete": {"mode": "bulk", "rows": rows, "counts": counts},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="document"),
-                **_edit_delete_context(self.object),
                 **_expiry_preview_context(form),
             },
         )
 
-    def _context(self, request, form, token, state):
+    def _context(self, request, form, token, state, marked_delete):
         total = len(state["pks"])
         index = state["index"]
         return {
@@ -500,27 +592,33 @@ class BulkEditView(LoginRequiredMixin, View):
                 "has_prev": index > 0,
                 "has_next": index < total - 1,
             },
-            **_edit_delete_context(self.object),
+            "marked_delete": marked_delete,
+            "can_delete": deletion_services.can_delete(self.object),
             **_expiry_preview_context(form),
         }
 
-    def _build_form(self, data=None):
-        return UploadStep2Form(
+    def _build_form(self, obj, data=None, marked_delete=False):
+        form = UploadStep2Form(
             data,
             employee=self.request.user,
             file_count=1,
             edit_mode=True,
-            initial_titles=[self.object.title],
+            initial_titles=[obj.title],
             initial={
-                "department": self.object.department_id,
-                "group": self.object.group_id,
-                "category": self.object.category_id,
-                "year": self.object.year,
-                "retention_period": self.object.retention_period_id,
-                "privacy_flag": self.object.privacy_flag,
-                "memo": self.object.memo,
+                "department": obj.department_id,
+                "group": obj.group_id,
+                "category": obj.category_id,
+                "year": obj.year,
+                "retention_period": obj.retention_period_id,
+                "privacy_flag": obj.privacy_flag,
+                "memo": obj.memo,
             },
         )
+        if marked_delete:
+            # 削除予定ページは編集しても意味がないため全フィールドをロック（グレーアウト）する。
+            for field in form.fields.values():
+                field.disabled = True
+        return form
 
 
 def _strip_ext(filename):
@@ -696,31 +794,15 @@ class DeleteView(LoginRequiredMixin, record_views.BaseDeleteView):
 
 
 class EditDeleteView(DeleteView):
-    """保管画面２（編集・edit.html）の[4]メモ欄直下「削除」ボタン。xlsx 保管!B298-300は
+    """単独編集画面（DocumentEditView、edit.html）の[4]メモ欄直下「削除」ボタン。xlsx 保管!B298-300
     「登録画面と同じ（＝不要な文書を削除する。本登録から除外する）」＋「初回登録から1週間以上
     経過・削除済みはボタンを非表示」。原本HTMLは当該ボタンがonclick未設定の死んだモックで、
     以前はメモ欄クリア（common.jsのclearMemo）として実装していたが、2026-08-27ユーザー確定で
-    レコードの論理削除に変更した（HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節参照）。
+    レコードの論理削除（削除後は検索画面へ）に変更した（HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節）。
 
-    削除自体はDeleteView（＝BaseDeleteView）と同一（スコープ取得・can_delete検証・論理削除・
-    監査ログ）。異なるのは (1) 監査ログのaction名、(2) 削除後の遷移先だけ。
-    詳細ポップアップからのfetch削除と違い画面フォームからの通常POSTのため常に非AJAXで、
-    _post_delete_redirect()だけをオーバーライドする。
+    削除自体はDeleteView（＝BaseDeleteView）と同一（スコープ取得・can_delete検証・論理削除）。
+    異なるのは監査ログのaction名だけ。一括編集画面（BulkEditView）の削除は「更新」ボタンでまとめて
+    確定する別方式（ステージ型）のためこのビューは通らない。
     """
 
     audit_action = "保管画面２ 削除"
-    bulk_edit_session_key = BULK_EDIT_SESSION_KEY
-    bulk_edit_url_name = "documents:bulk_edit"
-
-    def _post_delete_redirect(self, request, obj, success_message):
-        messages.success(request, success_message)
-        # from_bulkは一括編集ウィザード（BulkEditView）が描画したedit.htmlの削除フォームにのみ
-        # 埋まる。別タブで単独編集中に一括編集セッションが残っていても誤検知しないよう、
-        # hiddenの有無で判定する（remove_bulk_edit_pkはpkがpks内に無ければNoneを返す）。
-        if request.POST.get("from_bulk"):
-            new_state = bulk_edit_services.remove_bulk_edit_pk(
-                request.session, self.bulk_edit_session_key, obj.pk
-            )
-            if new_state is not None:
-                return redirect(self.bulk_edit_url_name)
-        return redirect(self.search_url_name)

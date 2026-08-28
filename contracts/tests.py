@@ -958,8 +958,9 @@ class BulkDownloadViewTests(TestCase):
 
 
 class BulkEditViewTests(TestCase):
-    """screen-search（契約書モード）「一括編集」。documents.tests.BulkEditViewTestsと同じ設計・
-    同じアサーション観点（save-as-you-go方式、AuditLogが契約書ごとに1件ずつ記録されること）。"""
+    """screen-search（契約書モード）「一括編集」。documents.tests.BulkEditViewTestsと同じ設計
+    （ステージング型。「更新」まで DB 未反映、変更のあったページだけ確定）。契約書は関連書類の
+    増減も「更新」までステージし「キャンセル」で破棄する。"""
 
     def setUp(self):
         self.department = Department.objects.create(
@@ -1000,17 +1001,25 @@ class BulkEditViewTests(TestCase):
             r'name="token" value="([^"]+)"', get_response.content.decode("utf-8")
         ).group(1)
 
-    def _step_data(self, title, bulk_nav=None):
+    def _page_data(self, obj, *, title=None, group=None, action="update", **extra):
         data = {
             "token": self._get_token(),
-            "department": self.department.pk,
-            "group": self.group.pk,
-            "category": self.category.pk,
-            "year": 2026,
-            "title_0": title,
+            "department": obj.department_id,
+            "group": group if group is not None else obj.group_id,
+            "category": obj.category_id,
+            "year": obj.year,
+            "contract_date": "",
+            "contract_period_start": "",
+            "contract_period_end": "",
+            "renewal_date": "",
+            "contract_amount": "",
+            "contract_partner": obj.contract_partner or "",
+            "memo": obj.memo or "",
+            "title_0": title if title is not None else obj.title,
         }
-        if bulk_nav:
-            data["bulk_nav"] = bulk_nav
+        if action is not None:
+            data["bulk_action"] = action
+        data.update(extra)
         return data
 
     def test_start_without_selection_redirects_with_message(self):
@@ -1018,7 +1027,6 @@ class BulkEditViewTests(TestCase):
 
         response = self.client.post("/contracts/bulk-edit/start/", {})
         self.assertRedirects(response, "/contracts/search/")
-        # 文言は原本html4のalert("編集するデータが選択されていません。")に合わせる（B599「文書管理と同じ」）。
         texts = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertIn("編集するデータが選択されていません。", texts)
 
@@ -1026,59 +1034,7 @@ class BulkEditViewTests(TestCase):
         response = self.client.get("/contracts/bulk-edit/")
         self.assertRedirects(response, "/contracts/search/")
 
-    def test_walk_through_two_contracts_saves_each_and_records_per_item_audit_log(self):
-        contract1 = self._create_contract("c1")
-        contract2 = self._create_contract("c2")
-        self.client.post("/contracts/bulk-edit/start/", {"pks": [contract1.pk, contract2.pk]})
-
-        get_response = self.client.get("/contracts/bulk-edit/")
-        self.assertContains(get_response, "1 / 2")
-        response = self.client.post(
-            "/contracts/bulk-edit/", self._step_data("c1-編集後", bulk_nav="next")
-        )
-        self.assertRedirects(response, "/contracts/bulk-edit/")
-        contract1.refresh_from_db()
-        self.assertEqual(contract1.title, "c1-編集後")
-
-        get_response = self.client.get("/contracts/bulk-edit/")
-        self.assertContains(get_response, "2 / 2")
-        response = self.client.post("/contracts/bulk-edit/", self._step_data("c2-編集後"))
-        self.assertEqual(response.status_code, 200)
-        contract2.refresh_from_db()
-        self.assertEqual(contract2.title, "c2-編集後")
-        created = response.context["complete"]["created"]
-        self.assertEqual([c.pk for c in created], [contract1.pk, contract2.pk])
-
-        entries = AuditLog.objects.filter(action="保管画面２ 更新").order_by("timestamp")
-        self.assertEqual(entries.count(), 2)
-        self.assertIn("c1-編集後", entries[0].event_message)
-        self.assertIn("c2-編集後", entries[1].event_message)
-
-    def test_step_db_failure_shows_error_and_does_not_update_contract(self):
-        """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘1）で発見：
-        documents.tests.BulkEditViewTests.test_step_db_failure_shows_error_and_does_not_update_document
-        と同じ観点。BulkEditView.postの`except DBError:`（contracts/views.py:492）が未検証だった。"""
-        from django.contrib.messages import get_messages
-
-        from contracts.models import Contract
-
-        contract1 = self._create_contract("c1")
-        self.client.post("/contracts/bulk-edit/start/", {"pks": [contract1.pk]})
-        self.client.get("/contracts/bulk-edit/")
-
-        with mock.patch.object(Contract, "save", side_effect=DBError("db down")):
-            response = self.client.post("/contracts/bulk-edit/", self._step_data("c1-編集後"))
-
-        self.assertEqual(response.status_code, 200)
-        texts = [str(m) for m in get_messages(response.wsgi_request)]
-        self.assertTrue(any("更新に失敗しました" in t for t in texts))
-        contract1.refresh_from_db()
-        self.assertEqual(contract1.title, "c1")
-
     def test_start_with_all_pks_invalid_or_deleted_redirects_to_search(self):
-        """documents.tests.BulkEditViewTests.test_start_with_all_pks_invalid_or_deleted_redirects_to_search
-        と同じ観点（review_test_doc_contract.txt指摘2）。BulkEditStartView.postの
-        `if not ordered_pks:`分岐（contracts/views.py:413-415）が未検証だった。"""
         contract = self._create_contract("deleted")
         contract.is_deleted = True
         contract.save(update_fields=["is_deleted"])
@@ -1086,92 +1042,122 @@ class BulkEditViewTests(TestCase):
         self.assertRedirects(response, "/contracts/search/")
         self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
 
-    def test_prev_navigation_also_saves_current_step(self):
-        """documents.tests.BulkEditViewTests.test_prev_navigation_also_saves_current_stepと
-        同じ観点（review_test_doc_contract.txt指摘2）。「＜」（prev）ナビゲーションの分岐
-        （contracts/views.py:510-512）が未検証だった。"""
-        contract1 = self._create_contract("c1")
-        contract2 = self._create_contract("c2")
-        self.client.post("/contracts/bulk-edit/start/", {"pks": [contract1.pk, contract2.pk]})
-        self.client.get("/contracts/bulk-edit/")
-        self.client.post("/contracts/bulk-edit/", self._step_data("c1-編集後", bulk_nav="next"))
+    def test_update_commits_only_changed_pages_with_status(self):
+        cs = [self._create_contract(f"c{i}") for i in range(4)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        self.client.post("/contracts/bulk-edit/", self._page_data(cs[0], title="c0-new", action=None, bulk_nav="next"))
+        self.client.post("/contracts/bulk-edit/", self._page_data(cs[1], action=None, bulk_nav="next"))
+        resp = self.client.post("/contracts/bulk-edit/", self._page_data(cs[2]))
 
-        # 2件目に来たら内容を変更し、「＜」で1件目に戻る（移動時に2件目も保存される）
-        self.client.get("/contracts/bulk-edit/")
-        response = self.client.post(
-            "/contracts/bulk-edit/", self._step_data("c2-編集後", bulk_nav="prev")
-        )
-        self.assertRedirects(response, "/contracts/bulk-edit/")
-        contract2.refresh_from_db()
-        self.assertEqual(contract2.title, "c2-編集後")
-
-        get_response = self.client.get("/contracts/bulk-edit/")
-        self.assertContains(get_response, "1 / 2")
-
-    def test_update_button_finalizes_from_any_position(self):
-        """documents.tests.BulkEditViewTests.test_update_button_finalizes_from_any_positionと
-        同じ観点（原本html4のstartUpdateMock。2026-08-27、原本フィデリティ監査）。"""
-        contract1 = self._create_contract("c1")
-        contract2 = self._create_contract("c2")
-        contract3 = self._create_contract("c3")
-        self.client.post(
-            "/contracts/bulk-edit/start/", {"pks": [contract1.pk, contract2.pk, contract3.pk]}
-        )
-
-        get_response = self.client.get("/contracts/bulk-edit/")
-        self.assertContains(get_response, "1 / 3")
-        response = self.client.post("/contracts/bulk-edit/", self._step_data("c1-編集後"))
-
-        self.assertEqual(response.status_code, 200)
-        created = response.context["complete"]["created"]
-        self.assertEqual([c.pk for c in created], [contract1.pk, contract2.pk, contract3.pk])
-
-        contract1.refresh_from_db()
-        contract2.refresh_from_db()
-        contract3.refresh_from_db()
-        self.assertEqual(contract1.title, "c1-編集後")
-        self.assertEqual(contract2.title, "c2")
-        self.assertEqual(contract3.title, "c3")
-
+        self.assertEqual(resp.status_code, 200)
+        status = {r["obj"].pk: r["status"] for r in resp.context["complete"]["rows"]}
+        self.assertEqual(status[cs[0].pk], "更新")
+        self.assertEqual(status[cs[1].pk], "更新なし")
+        self.assertEqual(status[cs[3].pk], "更新なし")
+        self.assertEqual(resp.context["complete"]["counts"], {"updated": 1, "unchanged": 3, "deleted": 0})
+        cs[0].refresh_from_db(); cs[1].refresh_from_db()
+        self.assertEqual(cs[0].title, "c0-new")
+        self.assertEqual(cs[1].title, "c1")
         self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 1)
         self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
 
-    def test_related_files_added_and_removed_affect_only_current_contract(self):
-        """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘8）で発見：BulkEditViewでの
-        関連書類の追加・削除がcontracts.tests.ContractEditViewFileHandlingTests（単体編集）
-        にしか検証が無かった。一括編集ウィザードのsave-as-you-go方式で、1件目のステップで
-        関連書類を追加し、2件目のステップで（別の契約書の）関連書類を削除する操作が、
-        それぞれ正しい契約書インスタンスにのみ反映されることを確認する。"""
+    def test_delete_mark_and_commit_logical_deletes(self):
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        marked = self.client.post("/contracts/bulk-edit/", self._page_data(cs[0], action="toggle_delete"))
+        self.assertRedirects(marked, "/contracts/bulk-edit/")
+        page = self.client.get("/contracts/bulk-edit/")
+        self.assertTrue(page.context["marked_delete"])
+        self.assertContains(page, "削除取消")
+
+        resp = self.client.post("/contracts/bulk-edit/", self._page_data(cs[1]))
+        cs[0].refresh_from_db()
+        self.assertTrue(cs[0].is_deleted)
+        self.assertEqual(resp.context["complete"]["counts"]["deleted"], 1)
+        self.assertTrue(AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="c0").exists())
+
+    def test_cancel_discards_staged_changes(self):
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        self.client.post("/contracts/bulk-edit/", self._page_data(cs[0], title="c0-new", action=None, bulk_nav="next"))
+        resp = self.client.post("/contracts/bulk-edit/", {"bulk_action": "cancel"})
+        self.assertRedirects(resp, "/contracts/search/")
+        cs[0].refresh_from_db()
+        self.assertEqual(cs[0].title, "c0")
+        self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
+
+    def test_validation_error_stops_commit_and_jumps(self):
+        from django.contrib.messages import get_messages
+
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        self.client.post("/contracts/bulk-edit/", self._page_data(cs[0], title="c0-new", group="", action=None, bulk_nav="next"))
+        resp = self.client.post("/contracts/bulk-edit/", self._page_data(cs[1]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("complete", resp.context)
+        self.assertEqual(resp.context["contract"].pk, cs[0].pk)
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("1件目に入力エラー" in t for t in texts))
+        cs[0].refresh_from_db()
+        self.assertEqual(cs[0].title, "c0")
+
+    def test_related_files_add_is_staged_and_cancellable(self):
+        from pathlib import Path
+
+        from django.conf import settings
+
+        from contracts.models import RelatedFile
+        from core.upload_services import TMP_UPLOAD_SUBDIR
+
+        cs = [self._create_contract(f"c{i}") for i in range(2)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+
+        # 1件目に関連書類を追加してステージ（＞で移動）
+        data = self._page_data(cs[0], action=None, bulk_nav="next")
+        self.client.post(
+            "/contracts/bulk-edit/",
+            {**data, "related_files": SimpleUploadedFile("c0-rel.pdf", b"AAAA")},
+        )
+        # まだ RelatedFile には反映されていない（ステージのみ）
+        self.assertFalse(RelatedFile.objects.filter(contract=cs[0]).exists())
+        state = self.client.session["contracts_bulk_edit"]
+        add_refs = state["staged_related"][str(cs[0].pk)]["add"]
+        self.assertEqual(len(add_refs), 1)
+        tmp_path = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR / add_refs[0]["temp_name"]
+        self.assertTrue(tmp_path.exists())
+
+        # 追加予定として表示される
+        self.client.get("/contracts/bulk-edit/")  # index=1
+        back = self.client.post("/contracts/bulk-edit/", self._page_data(cs[1], action=None, bulk_nav="prev"))
+        self.assertRedirects(back, "/contracts/bulk-edit/")
+        page1 = self.client.get("/contracts/bulk-edit/")
+        self.assertContains(page1, "c0-rel.pdf（追加予定）")
+
+        # キャンセルで一時ファイルごと破棄
+        self.client.post("/contracts/bulk-edit/", {"bulk_action": "cancel"})
+        self.assertFalse(tmp_path.exists())
+        self.assertFalse(RelatedFile.objects.filter(contract=cs[0]).exists())
+
+    def test_related_files_add_and_remove_commit_on_update(self):
         from contracts.models import RelatedFile
 
-        contract1 = self._create_contract("c1")
-        contract2 = self._create_contract("c2")
-        existing_related = RelatedFile.objects.create(
-            contract=contract2, file=ContentFile(b"BBBB", name="c2-related.pdf"), display_order=0
+        c1 = self._create_contract("c1")
+        existing = RelatedFile.objects.create(
+            contract=c1, file=ContentFile(b"OLD", name="old.pdf"), display_order=0
         )
-        self.client.post("/contracts/bulk-edit/start/", {"pks": [contract1.pk, contract2.pk]})
-
-        # 1件目: 新規の関連書類を追加し、ページャー「＞」で2件目へ
-        self.client.get("/contracts/bulk-edit/")
-        data = self._step_data("c1-編集後", bulk_nav="next")
-        response = self.client.post(
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk]})
+        data = self._page_data(c1)
+        data["remove_related_ids"] = str(existing.pk)
+        resp = self.client.post(
             "/contracts/bulk-edit/",
-            {**data, "related_files": [ContentFile(b"AAAA", name="c1-related.pdf")]},
-            format="multipart",
+            {**data, "related_files": SimpleUploadedFile("new.pdf", b"NEW")},
         )
-        self.assertRedirects(response, "/contracts/bulk-edit/")
-        self.assertEqual(RelatedFile.objects.filter(contract=contract1).count(), 1)
-
-        # 2件目: 既存の関連書類を削除
-        self.client.get("/contracts/bulk-edit/")
-        data = self._step_data("c2-編集後")
-        data["remove_related_ids"] = str(existing_related.pk)
-        response = self.client.post("/contracts/bulk-edit/", data)
-        self.assertEqual(response.status_code, 200)
-
-        # それぞれの契約書にのみ影響が及んでいること
-        self.assertEqual(RelatedFile.objects.filter(contract=contract1).count(), 1)
-        self.assertFalse(RelatedFile.objects.filter(contract=contract2).exists())
+        self.assertEqual(resp.status_code, 200)
+        names = [rf.display_name for rf in RelatedFile.objects.filter(contract=c1)]
+        self.assertEqual(names, ["new.pdf"])
+        self.assertFalse(RelatedFile.objects.filter(pk=existing.pk).exists())
+        # 関連書類の変更だけでも「更新」として扱われる
+        self.assertEqual(resp.context["complete"]["counts"]["updated"], 1)
 
 
 class PreviewViewTests(TestCase):
@@ -2554,30 +2540,13 @@ class EditDeleteViewTests(TestCase):
         contract.refresh_from_db()
         self.assertFalse(contract.is_deleted)
 
-    def test_bulk_delete_removes_from_set_and_advances(self):
-        import re
-
-        from contracts.models import Contract
-
-        c1 = self._create_contract("一括1")
-        c2 = self._create_contract("一括2")
-        self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk, c2.pk]})
-        self.client.get("/contracts/bulk-edit/")
-        response = self.client.post(f"/contracts/{c1.pk}/edit-delete/", {"from_bulk": "1"})
-        self.assertRedirects(response, "/contracts/bulk-edit/")
-        c1.refresh_from_db()
-        self.assertTrue(c1.is_deleted)
-        state = self.client.session["contracts_bulk_edit"]
-        self.assertEqual(state["pks"], [c2.pk])
-        self.assertEqual(state["index"], 0)
-
-    def test_bulk_delete_last_remaining_clears_state(self):
-        c1 = self._create_contract("最後の1件")
-        self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk]})
-        self.client.get("/contracts/bulk-edit/")
-        response = self.client.post(f"/contracts/{c1.pk}/edit-delete/", {"from_bulk": "1"})
-        self.assertRedirects(response, "/contracts/search/")
-        self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
+    def test_single_edit_screen_has_no_bulk_delete_markup(self):
+        """一括編集の削除は「更新」でまとめて確定する別方式のため、単独編集画面には
+        toggle_delete ボタンも from_bulk hidden も出ない（EditDeleteView は単独編集専用）。"""
+        contract = self._create_contract("単独のみ")
+        response = self.client.get(f"/contracts/{contract.pk}/edit/")
+        self.assertNotContains(response, 'name="from_bulk"')
+        self.assertNotContains(response, 'value="toggle_delete"')
 
 
 class UploadStep2RemoveViewTests(TestCase):

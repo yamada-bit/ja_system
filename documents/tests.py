@@ -1008,10 +1008,10 @@ class BulkDownloadViewTests(TestCase):
 
 
 class BulkEditViewTests(TestCase):
-    """screen-search「一括編集」（html4差分で初めて仕様が提示された機能、
-    HTML_REIMPL_CHECKLIST_ARCHIVE.md「検索結果一覧 一括編集の実装」参照）。save-as-you-go方式で、各ステップの送信ごとに
-    その文書を都度保存し、AuditLogも文書ごとに1件ずつ記録されることを確認する
-    （一括ダウンロードのような集約1件ではない）。"""
+    """screen-search「一括編集」（ステージング型。2026-08-28ユーザー確定。
+    HTML_REIMPL_CHECKLIST_ARCHIVE.md「一括編集を全ページ一括確定モデルへ改修」参照）。
+    入力値・削除マークは「更新」ボタンまでセッションにステージされ、DBは未反映。「更新」で
+    全ページ検証→変更のあったページだけを1トランザクションで確定する。"""
 
     def setUp(self):
         self.department = Department.objects.create(
@@ -1050,20 +1050,23 @@ class BulkEditViewTests(TestCase):
             r'name="token" value="([^"]+)"', get_response.content.decode("utf-8")
         ).group(1)
 
-    def _step_data(self, title, bulk_nav=None):
+    def _page_data(self, obj, *, title=None, group=None, action="update", **extra):
+        """表示中ページのフォーム送信データ。既定は obj の現在値そのまま（＝dirtyでない）。
+        `action` は bulk_action（"update"/"toggle_delete"/"cancel"）、`bulk_nav` は extra で渡す。"""
         data = {
             "token": self._get_token(),
-            "department": self.department.pk,
-            "group": self.group.pk,
-            "category": self.category.pk,
-            "year": 2026,
-            "retention_period": self.retention_period.pk,
-            "privacy_flag": "False",
-            "memo": "",
-            "title_0": title,
+            "department": obj.department_id,
+            "group": group if group is not None else obj.group_id,
+            "category": obj.category_id,
+            "year": obj.year,
+            "retention_period": obj.retention_period_id,
+            "privacy_flag": "True" if obj.privacy_flag else "False",
+            "memo": obj.memo or "",
+            "title_0": title if title is not None else obj.title,
         }
-        if bulk_nav:
-            data["bulk_nav"] = bulk_nav
+        if action is not None:
+            data["bulk_action"] = action
+        data.update(extra)
         return data
 
     def test_start_without_selection_redirects_with_message(self):
@@ -1097,114 +1100,151 @@ class BulkEditViewTests(TestCase):
         response = self.client.get("/documents/bulk-edit/")
         self.assertRedirects(response, "/documents/search/")
 
-    def test_walk_through_two_documents_saves_each_and_records_per_item_audit_log(self):
+    def test_edits_are_staged_and_persist_across_navigation_without_touching_db(self):
         doc1 = self._create_document("doc1")
         doc2 = self._create_document("doc2")
         self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk]})
 
-        # 1件目: 内容を編集してページャー「＞」で2件目へ
-        get_response = self.client.get("/documents/bulk-edit/")
-        self.assertContains(get_response, "1 / 2")
-        response = self.client.post(
-            "/documents/bulk-edit/", self._step_data("doc1-編集後", bulk_nav="next")
-        )
-        self.assertRedirects(response, "/documents/bulk-edit/")
-        doc1.refresh_from_db()
-        self.assertEqual(doc1.title, "doc1-編集後")
-
-        # 2件目: 内容を編集して「更新」→全件確定しcompleteが返る
-        get_response = self.client.get("/documents/bulk-edit/")
-        self.assertContains(get_response, "2 / 2")
-        response = self.client.post(
-            "/documents/bulk-edit/", self._step_data("doc2-編集後")
-        )
-        self.assertEqual(response.status_code, 200)
-        doc2.refresh_from_db()
-        self.assertEqual(doc2.title, "doc2-編集後")
-        created = response.context["complete"]["created"]
-        self.assertEqual([d.pk for d in created], [doc1.pk, doc2.pk])
-
-        entries = AuditLog.objects.filter(action="保管画面２ 更新").order_by("timestamp")
-        self.assertEqual(entries.count(), 2)
-        self.assertIn("doc1-編集後", entries[0].event_message)
-        self.assertIn("doc2-編集後", entries[1].event_message)
-
-        # 完了後はセッション状態がクリアされ、直接アクセスすると検索画面に戻される
-        response = self.client.get("/documents/bulk-edit/")
-        self.assertRedirects(response, "/documents/search/")
-
-    def test_prev_navigation_also_saves_current_step(self):
-        doc1 = self._create_document("doc1")
-        doc2 = self._create_document("doc2")
-        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk]})
-        self.client.get("/documents/bulk-edit/")
-        self.client.post("/documents/bulk-edit/", self._step_data("doc1-編集後", bulk_nav="next"))
-
-        # 2件目に来たら内容を変更し、「＜」で1件目に戻る（移動時に2件目も保存される）
-        self.client.get("/documents/bulk-edit/")
-        response = self.client.post(
-            "/documents/bulk-edit/", self._step_data("doc2-編集後", bulk_nav="prev")
-        )
-        self.assertRedirects(response, "/documents/bulk-edit/")
-        doc2.refresh_from_db()
-        self.assertEqual(doc2.title, "doc2-編集後")
-
-        get_response = self.client.get("/documents/bulk-edit/")
-        self.assertContains(get_response, "1 / 2")
-
-    def test_update_button_finalizes_from_any_position(self):
-        """原本html4のstartUpdateMockと同じく、「更新」ボタン（bulk_navなし）は最終レコード
-        以外で押しても即座に選択全件を確定し、完了モーダルに全件を一覧表示する。表示中の
-        1件は保存され、未訪問のレコードは既存値のまま残る（2026-08-27、原本フィデリティ監査）。"""
-        doc1 = self._create_document("doc1")
-        doc2 = self._create_document("doc2")
-        doc3 = self._create_document("doc3")
+        # 1件目のタイトルを変更して＞、2件目へ→＜で1件目へ戻る
         self.client.post(
-            "/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk, doc3.pk]}
+            "/documents/bulk-edit/", self._page_data(doc1, title="doc1-編集後", action=None, bulk_nav="next")
         )
+        back = self.client.post(
+            "/documents/bulk-edit/", self._page_data(doc2, action=None, bulk_nav="prev")
+        )
+        self.assertRedirects(back, "/documents/bulk-edit/")
 
-        # 1件目を表示した状態でそのまま「更新」
-        get_response = self.client.get("/documents/bulk-edit/")
-        self.assertContains(get_response, "1 / 3")
-        response = self.client.post("/documents/bulk-edit/", self._step_data("doc1-編集後"))
-
-        self.assertEqual(response.status_code, 200)
-        created = response.context["complete"]["created"]
-        self.assertEqual([d.pk for d in created], [doc1.pk, doc2.pk, doc3.pk])
-
+        page1 = self.client.get("/documents/bulk-edit/")
+        self.assertContains(page1, "1 / 2")
+        self.assertContains(page1, 'value="doc1-編集後"')  # ステージ値が復元される
+        # DBは一切変わっていない
         doc1.refresh_from_db()
-        doc2.refresh_from_db()
-        doc3.refresh_from_db()
-        self.assertEqual(doc1.title, "doc1-編集後")
-        self.assertEqual(doc2.title, "doc2")
-        self.assertEqual(doc3.title, "doc3")
+        self.assertEqual(doc1.title, "doc1")
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 0)
 
-        # 表示中だった1件分のAuditLogのみ
-        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 1)
+    def test_update_commits_only_changed_pages_and_lists_all_with_status(self):
+        docs = [self._create_document(f"d{i}") for i in range(5)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
 
-        # 完了後はセッション状態がクリアされる
+        # 1件目・3件目だけタイトル変更（＞で巡回しつつステージ）
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[0], title="d0-new", action=None, bulk_nav="next"))
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[1], action=None, bulk_nav="next"))
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[2], title="d2-new", action=None, bulk_nav="next"))
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[3]))  # 更新
+
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.context["complete"]["rows"]
+        self.assertEqual(len(rows), 5)
+        status = {r["obj"].pk: r["status"] for r in rows}
+        self.assertEqual(status[docs[0].pk], "更新")
+        self.assertEqual(status[docs[2].pk], "更新")
+        self.assertEqual(status[docs[1].pk], "更新なし")
+        self.assertEqual(status[docs[3].pk], "更新なし")
+        self.assertEqual(status[docs[4].pk], "更新なし")
+        self.assertEqual(resp.context["complete"]["counts"], {"updated": 2, "unchanged": 3, "deleted": 0})
+
+        docs[0].refresh_from_db(); docs[2].refresh_from_db(); docs[4].refresh_from_db()
+        self.assertEqual(docs[0].title, "d0-new")
+        self.assertEqual(docs[2].title, "d2-new")
+        self.assertEqual(docs[4].title, "d4")
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 2)
         self.assertIsNone(self.client.session.get("documents_bulk_edit"))
 
-    def test_step_db_failure_shows_error_and_does_not_update_document(self):
-        """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘1）で発見：
-        BulkEditView.postの`except DBError:`が未検証だった。ステップ再描画（200）で
-        エラーメッセージが出て、対象文書が更新されないことを確認する。"""
+    def test_visiting_pages_without_changes_does_not_update_anything(self):
+        docs = [self._create_document(f"d{i}") for i in range(3)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[0], action=None, bulk_nav="next"))
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[1], action=None, bulk_nav="next"))
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[2]))
+
+        self.assertEqual(resp.context["complete"]["counts"], {"updated": 0, "unchanged": 3, "deleted": 0})
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 0)
+
+    def test_delete_mark_locks_fields_and_toggles_label(self):
+        docs = [self._create_document(f"d{i}") for i in range(2)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+
+        marked = self.client.post("/documents/bulk-edit/", self._page_data(docs[0], action="toggle_delete"))
+        self.assertRedirects(marked, "/documents/bulk-edit/")
+        page = self.client.get("/documents/bulk-edit/")
+        self.assertTrue(page.context["marked_delete"])
+        self.assertContains(page, "削除取消")
+        self.assertContains(page, "このページは削除予定です")
+        # 全フィールドが disabled（タイトル入力・メモ・年select で代表確認）
+        self.assertContains(page, 'name="title_0"')
+        self.assertContains(page, 'id="id_title_0"')
+        self.assertTrue(page.context["form"].fields["title_0"].disabled)
+        self.assertTrue(page.context["form"].fields["memo"].disabled)
+
+        # 削除取消 → to_delete から外れる
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[0], action="toggle_delete"))
+        state = self.client.session["documents_bulk_edit"]
+        self.assertEqual(state["to_delete"], [])
+
+    def test_update_commits_delete_marks_as_logical_delete(self):
+        docs = [self._create_document(f"d{i}") for i in range(3)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[0], action=None, bulk_nav="next"))
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[1], action="toggle_delete"))
+        # 2件目が削除予定のまま「更新」（＜で戻ってから）
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[1], action=None, bulk_nav="prev"))
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[0]))
+
+        docs[1].refresh_from_db()
+        self.assertTrue(docs[1].is_deleted)
+        self.assertIsNotNone(docs[1].deleted_at)
+        self.assertEqual(resp.context["complete"]["counts"]["deleted"], 1)
+        self.assertTrue(
+            AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="d1").exists()
+        )
+
+    def test_cancel_discards_all_staged_changes(self):
+        docs = [self._create_document(f"d{i}") for i in range(2)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[0], title="d0-new", action=None, bulk_nav="next"))
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[1], action="toggle_delete"))
+
+        resp = self.client.post("/documents/bulk-edit/", {"bulk_action": "cancel"})
+        self.assertRedirects(resp, "/documents/search/")
+        docs[0].refresh_from_db(); docs[1].refresh_from_db()
+        self.assertEqual(docs[0].title, "d0")
+        self.assertFalse(docs[1].is_deleted)
+        self.assertIsNone(self.client.session.get("documents_bulk_edit"))
+
+    def test_validation_error_stops_whole_commit_and_jumps_to_error_page(self):
+        from django.contrib.messages import get_messages
+
+        docs = [self._create_document(f"d{i}") for i in range(3)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        # 2件目を分類なしでステージ（＞で移動しながら）
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[0], action=None, bulk_nav="next"))
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[1], title="d1-new", group="", action=None, bulk_nav="next"))
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[2]))  # 更新
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("complete", resp.context)
+        self.assertEqual(resp.context["document"].pk, docs[1].pk)  # 2件目へジャンプ
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("2件目に入力エラー" in t for t in texts))
+        for d in docs:
+            d.refresh_from_db()
+        self.assertEqual([d.title for d in docs], ["d0", "d1", "d2"])  # DB無変更
+
+    def test_commit_db_failure_shows_error_and_keeps_state(self):
         from django.contrib.messages import get_messages
 
         from documents.models import Document
 
-        doc1 = self._create_document("doc1")
-        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk]})
-        self.client.get("/documents/bulk-edit/")
-
+        docs = [self._create_document(f"d{i}") for i in range(2)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
         with mock.patch.object(Document, "save", side_effect=DBError("db down")):
-            response = self.client.post("/documents/bulk-edit/", self._step_data("doc1-編集後"))
-
-        self.assertEqual(response.status_code, 200)
-        texts = [str(m) for m in get_messages(response.wsgi_request)]
+            resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[0], title="d0-new"))
+        self.assertRedirects(resp, "/documents/bulk-edit/")
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
         self.assertTrue(any("更新に失敗しました" in t for t in texts))
-        doc1.refresh_from_db()
-        self.assertEqual(doc1.title, "doc1")
+        docs[0].refresh_from_db()
+        self.assertEqual(docs[0].title, "d0")
+        self.assertIsNotNone(self.client.session.get("documents_bulk_edit"))
 
 
 class DeletedDocumentDirectAccessTests(TestCase):
@@ -2701,52 +2741,13 @@ class EditDeleteViewTests(TestCase):
         doc.refresh_from_db()
         self.assertFalse(doc.is_deleted)
 
-    def test_bulk_edit_screen_renders_from_bulk_hidden_input(self):
-        doc1 = self._create_document("一括表示")
-        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk]})
-        response = self.client.get("/documents/bulk-edit/")
-        self.assertContains(response, 'name="from_bulk"')
-        self.assertContains(response, f"/documents/{doc1.pk}/edit-delete/")
-
-    def test_bulk_delete_removes_from_set_and_advances_to_next(self):
-        from documents.models import Document
-
-        doc1 = self._create_document("一括1")
-        doc2 = self._create_document("一括2")
-        doc3 = self._create_document("一括3")
-        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk, doc2.pk, doc3.pk]})
-
-        # 2件目を表示中に削除
-        self.client.get("/documents/bulk-edit/")  # index=0
-        self.client.post("/documents/bulk-edit/", {
-            "token": self._bulk_token(), "department": self.department.pk, "group": self.group.pk,
-            "category": self.category.pk, "year": 2026, "retention_period": self.retention_period.pk,
-            "privacy_flag": "False", "memo": "", "title_0": "一括1", "bulk_nav": "next",
-        })  # index=1（doc2）へ
-        response = self.client.post(f"/documents/{doc2.pk}/edit-delete/", {"from_bulk": "1"})
-        self.assertRedirects(response, "/documents/bulk-edit/")
-
-        doc2.refresh_from_db()
-        self.assertTrue(doc2.is_deleted)
-        state = self.client.session["documents_bulk_edit"]
-        self.assertEqual(state["pks"], [doc1.pk, doc3.pk])
-        # 現在位置の要素を消したので、次のレコード（doc3）が同じindexに繰り上がる
-        self.assertEqual(state["index"], 1)
-        self.client.get("/documents/bulk-edit/")  # doc3 が表示できること（404にならない）
-
-    def test_bulk_delete_last_remaining_clears_state_and_redirects_to_search(self):
-        doc1 = self._create_document("最後の1件")
-        self.client.post("/documents/bulk-edit/start/", {"pks": [doc1.pk]})
-        self.client.get("/documents/bulk-edit/")
-        response = self.client.post(f"/documents/{doc1.pk}/edit-delete/", {"from_bulk": "1"})
-        self.assertRedirects(response, "/documents/search/")
-        self.assertIsNone(self.client.session.get("documents_bulk_edit"))
-
-    def _bulk_token(self):
-        import re
-
-        page = self.client.get("/documents/bulk-edit/")
-        return re.search(r'name="token" value="([^"]+)"', page.content.decode("utf-8")).group(1)
+    def test_single_edit_screen_has_no_bulk_delete_markup(self):
+        """一括編集の削除は「更新」でまとめて確定する別方式のため、単独編集画面には
+        toggle_delete ボタンも from_bulk hidden も出ない（EditDeleteView は単独編集専用）。"""
+        doc = self._create_document("単独のみ")
+        response = self.client.get(f"/documents/{doc.pk}/edit/")
+        self.assertNotContains(response, 'name="from_bulk"')
+        self.assertNotContains(response, 'value="toggle_delete"')
 
 
 class UploadStep2RemoveViewTests(TestCase):
