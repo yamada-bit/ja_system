@@ -2588,3 +2588,33 @@ R-7（論理削除のたびに正規化カラム再計算）。
 ### 検証（全体）
 高3件・中2件を1件ずつ修正し、都度関連テストを実行。最終 `manage.py test`（全アプリ）は
 **752件PASS**（本修正で新規テスト14件純増）。
+
+
+## チャンク分割アップロードのチャンクサイズを settings 化（2026-08-28）
+
+ユーザーから「500MB等の大容量文書を5MBずつ分割アップロードしているが、このサイズで
+妥当か」という問い合わせ。評価結果は「5MBは安全側で、そのままでも問題なし。大容量主体で
+往復回数を減らしたいなら10MB程度まで可。5MB未満にはしない。上限は必ず
+`MAX_UPLOAD_SIZE_BYTES`（1リクエストボディ上限）より十分小さく、かつ本番リバースプロキシの
+ボディサイズ上限がこの値＋αを許可していること」。あわせてユーザー指示で、JSハードコードを
+やめて settings 化した（過去に「テスト用1MBのまま戻し忘れ」事故があった箇所。同ファイル
+「チャンク分割アップロードのチャンクサイズ食い違いを修正」節参照）。
+
+- [x] `config/settings/base.py`：`CHUNK_UPLOAD_CHUNK_SIZE_BYTES`（`env.int`、既定 5 * 1024 * 1024）
+  追加。推奨サイズ・下限/上限の制約・リバースプロキシ依存をコメントで明記。
+- [x] `.env.example`：`CHUNK_UPLOAD_CHUNK_SIZE_BYTES` をコメントアウトで追記（推奨値の注記付き）。
+- [x] `core/upload_views.py` `BaseUploadStep1View._context()`：`chunk_upload_chunk_size_bytes` を
+  テンプレートコンテキストへ追加（documents/contracts 共通）。
+- [x] `templates/{documents,contracts}/storage1.html`：`uploadFilesInChunks()` の第3引数へ
+  `{{ chunk_upload_chunk_size_bytes }}` を渡す。
+- [x] `static/js/chunk_upload.js`：`const CHUNK_UPLOAD_CHUNK_SIZE`（ハードコード）を廃止し、
+  `uploadFilesInChunks(files, uploadUrl, chunkSize)` の引数で受け取る方式に変更。引数未指定・
+  不正値（0以下・NaN）用に `CHUNK_UPLOAD_CHUNK_SIZE_FALLBACK`（5MB）を残す。推奨サイズを
+  ファイル冒頭コメントに記載。サーバー側（`combine_upload_chunks`）はチャンクサイズを参照
+  していないため変更不要。
+- [x] テスト追加：`documents/tests.py ChunkUploadAPITests.
+  test_step1_passes_configured_chunk_size_to_template`（settings 上書きが保管画面１の
+  レンダリング結果に反映されること）。
+
+### 検証
+`manage.py test documents contracts` **332件PASS**（新規1件純増）。

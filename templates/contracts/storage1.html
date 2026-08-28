@@ -96,7 +96,11 @@
 
     if (filesToChunk.length > 0) {
       try {
-        await uploadFilesInChunks(filesToChunk, "{% url 'contracts:upload_chunk' %}");
+        await uploadFilesInChunks(
+          filesToChunk,
+          "{% url 'contracts:upload_chunk' %}",
+          {{ chunk_upload_chunk_size_bytes }},
+        );
       } catch (err) {
         alert(String(err.message || err));
         return;

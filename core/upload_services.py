@@ -200,8 +200,10 @@ def open_pending_file(temp_name):
 # チャンク分割アップロード（screen-storage1が、選択されたファイルのサイズが
 # settings.MAX_UPLOAD_SIZE_BYTESを超える場合にstatic/js/chunk_upload.jsから自動的に使う）。
 # 大容量PDFはDjangoの1リクエストボディ上限（settings.MAX_UPLOAD_SIZE_BYTES/
-# DATA_UPLOAD_MAX_MEMORY_SIZE）に引っかかるため、ブラウザ側で5MBずつのチャンクに分割して
+# DATA_UPLOAD_MAX_MEMORY_SIZE）に引っかかるため、ブラウザ側で
+# settings.CHUNK_UPLOAD_CHUNK_SIZE_BYTES（既定5MB）ずつのチャンクに分割して
 # 順次送信し、ここで結合する（core.upload_views.BaseChunkUploadAPIView参照）。
+# サーバー側はチャンクサイズを参照せずchunk_index順に連結するだけ。
 #
 # ja_pj_old（core/upload_services.py）の同名機能とは異なり、結合完了ファイルを別の
 # 「保留プール」に貯めてから通常アップロードのPOST側で合流させる、という中間層は置いていない。

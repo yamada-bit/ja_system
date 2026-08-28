@@ -155,8 +155,16 @@ class BaseUploadStep1View(View):
         return redirect(self.next_url_name)
 
     def _context(self):
-        # storage1.htmlのJSがMAX_UPLOAD_SIZE_BYTES基準でチャンク分割の要否を判定するため渡す。
-        return {"max_upload_size_bytes": settings.MAX_UPLOAD_SIZE_BYTES}
+        # storage1.htmlのJSに渡す:
+        #  - max_upload_size_bytes: このサイズを超えるファイル（または合計で超える組み合わせ）を
+        #    チャンク分割アップロードへ振り分けるしきい値。
+        #  - chunk_upload_chunk_size_bytes: 1チャンクあたりのバイト数（static/js/chunk_upload.js
+        #    へ引数で渡す）。以前はJSにハードコードしていた値をsettingsへ集約したもの
+        #    （推奨サイズ等の詳細は config/settings/base.py の CHUNK_UPLOAD_CHUNK_SIZE_BYTES 参照）。
+        return {
+            "max_upload_size_bytes": settings.MAX_UPLOAD_SIZE_BYTES,
+            "chunk_upload_chunk_size_bytes": settings.CHUNK_UPLOAD_CHUNK_SIZE_BYTES,
+        }
 
 
 class BaseUploadStep2RemoveView(View):

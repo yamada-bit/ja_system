@@ -10,8 +10,21 @@
 // サイズ判定し、超えるファイルだけこの関数に渡す（閾値以下のファイルは従来通り
 // documents/contracts.UploadStep1View.postへの一括POSTのまま）。
 
-// ja_pj_oldと同じチャンクサイズ。
-const CHUNK_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+// チャンクサイズはsettings.CHUNK_UPLOAD_CHUNK_SIZE_BYTES（storage1.htmlのテンプレート
+// コンテキスト経由）をuploadFilesInChunks()の第3引数で受け取る。以前はここに
+// `5 * 1024 * 1024`をハードコードしていたが、テスト用に1MBへ書き換えたまま戻し忘れる事故が
+// あったためsettingsへ集約した（HTML_REIMPL_CHECKLIST_ARCHIVE.md「チャンク分割アップロードの
+// チャンクサイズ食い違いを修正」参照）。
+//
+// 推奨サイズ: 既定の5MBのままで問題ない。大容量ファイル主体で往復回数を減らしたい場合は
+//   10MB程度まで可（500MBで100→50往復）。5MB未満にはしない（往復数・リクエスト処理
+//   オーバーヘッドが増えるだけで、リトライ機構が無いため障害耐性はほぼ改善しない）。
+//   上限は必ずMAX_UPLOAD_SIZE_BYTES（1リクエストボディ上限）より十分小さく、かつ本番
+//   リバースプロキシのボディサイズ上限がこの値＋αを許可していること
+//   （詳細はconfig/settings/base.pyのCHUNK_UPLOAD_CHUNK_SIZE_BYTES参照）。
+//
+// 引数未指定・不正値（0以下・NaN）の場合のフォールバック。
+const CHUNK_UPLOAD_CHUNK_SIZE_FALLBACK = 5 * 1024 * 1024; // 5MB
 
 // crypto.randomUUID()はSecure Context（HTTPS or localhost）でのみ利用可能。本番運用がTLS終端無し
 // （HTTP）のままの場合、window.crypto.randomUUIDが存在せずTypeErrorになる可能性があるため
@@ -56,9 +69,10 @@ function splitFilesBySizeBudget(files, threshold) {
 // バッチへの合流・画面遷移は呼び出し元（storage1.htmlのsubmitハンドラ）が続けて行う通常
 // アップロードのPOST（documents/contracts.UploadStep1View.post）が担当するため、この関数自体は
 // 画面遷移しない。
-async function uploadFilesInChunks(files, uploadUrl) {
+async function uploadFilesInChunks(files, uploadUrl, chunkSize) {
+  const chunkBytes = Number(chunkSize) > 0 ? Number(chunkSize) : CHUNK_UPLOAD_CHUNK_SIZE_FALLBACK;
   const totalChunksAll = files.reduce(
-    (sum, f) => sum + Math.ceil(f.size / CHUNK_UPLOAD_CHUNK_SIZE), 0,
+    (sum, f) => sum + Math.ceil(f.size / chunkBytes), 0,
   );
   let sentChunks = 0;
   // エラー発生時、それより前に完了したファイルは既にサーバー側のセッションへ格納済み
@@ -76,7 +90,7 @@ async function uploadFilesInChunks(files, uploadUrl) {
 
   try {
     for (const file of files) {
-      const totalChunks = Math.ceil(file.size / CHUNK_UPLOAD_CHUNK_SIZE);
+      const totalChunks = Math.ceil(file.size / chunkBytes);
       if (totalChunks === 0) {
         // 空ファイル（file.size === 0）はチャンクが1つも生成されずサイレントに無視されてしまう
         // ため、他の一括アップロード経路（documents/contracts.UploadStep1View.post）と同様に
@@ -85,7 +99,7 @@ async function uploadFilesInChunks(files, uploadUrl) {
       }
       const uploadId = generateUploadId();
       for (let i = 0; i < totalChunks; i++) {
-        const chunk = file.slice(i * CHUNK_UPLOAD_CHUNK_SIZE, (i + 1) * CHUNK_UPLOAD_CHUNK_SIZE);
+        const chunk = file.slice(i * chunkBytes, (i + 1) * chunkBytes);
         const formData = new FormData();
         formData.append('upload_id', uploadId);
         formData.append('file_name', file.name);

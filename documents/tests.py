@@ -2776,7 +2776,8 @@ class UploadStep2ImmediateExtractionTests(TestCase):
 
 class ChunkUploadAPITests(TestCase):
     """screen-storage1のチャンク分割アップロードAPI（documents:upload_chunk）。
-    ja_pj_oldから移植した、大容量ファイルをMAX_UPLOAD_SIZE_BYTES超過時に5MBずつ分割送信する機能。
+    ja_pj_oldから移植した、大容量ファイルをMAX_UPLOAD_SIZE_BYTES超過時に
+    settings.CHUNK_UPLOAD_CHUNK_SIZE_BYTES（既定5MB）ずつ分割送信する機能。
     """
 
     def setUp(self):
@@ -2839,6 +2840,15 @@ class ChunkUploadAPITests(TestCase):
     def test_malformed_request_returns_400(self):
         response = self.client.post("/documents/upload/chunk/", {"upload_id": "abc"})
         self.assertEqual(response.status_code, 400)
+
+    def test_step1_passes_configured_chunk_size_to_template(self):
+        """チャンクサイズはJSにハードコードせず、settings.CHUNK_UPLOAD_CHUNK_SIZE_BYTESを
+        保管画面１のテンプレートコンテキスト経由でstatic/js/chunk_upload.jsへ渡す
+        （core.upload_views.BaseUploadStep1View._context）。settingsを上書きすると
+        レンダリング結果に反映されること。"""
+        with self.settings(CHUNK_UPLOAD_CHUNK_SIZE_BYTES=10 * 1024 * 1024):
+            response = self.client.get("/documents/upload/step1/")
+        self.assertContains(response, str(10 * 1024 * 1024))
 
 
 class OptionsAPIViewTests(TestCase):

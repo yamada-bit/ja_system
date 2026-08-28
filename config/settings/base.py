@@ -140,10 +140,28 @@ LOGOUT_REDIRECT_URL = "accounts:login"
 MAX_UPLOAD_SIZE_BYTES = env.int("MAX_UPLOAD_SIZE_BYTES", default=50 * 1024 * 1024)
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE_BYTES
 
-# MAX_UPLOAD_SIZE_BYTESを超えるファイルは、storage1.htmlのJSが5MBずつのチャンクに分割して
+# MAX_UPLOAD_SIZE_BYTESを超えるファイルは、storage1.htmlのJSがチャンクに分割して
 # 順次POSTする（core.upload_views.BaseChunkUploadAPIView）。これは結合後の最終ファイルサイズの
 # 上限で、DATA_UPLOAD_MAX_MEMORY_SIZE（1リクエストボディの上限）とは独立した値。
 CHUNK_UPLOAD_MAX_SIZE_BYTES = env.int("CHUNK_UPLOAD_MAX_SIZE_BYTES", default=500 * 1024 * 1024)
+
+# チャンク1個あたりのバイト数。static/js/chunk_upload.jsが1チャンク=1 POSTで直列送信し、
+# core.upload_services.combine_upload_chunksがサーバー側で連結する。サーバーはこの値を
+# 参照せず（連結はchunk_index順に並べるだけ）、クライアント側のスループット／障害耐性の
+# トレードオフを決める値。以前はJSにハードコードしていたが、テスト用に書き換えたまま戻し
+# 忘れる事故があったため（HTML_REIMPL_CHECKLIST_ARCHIVE.md参照）、settingsへ集約して
+# storage1.htmlのテンプレートコンテキスト経由でJSへ渡す。
+#
+# 推奨: 既定の5MB（5 * 1024 * 1024）のままで問題ない。大容量ファイル主体で往復回数を
+#       減らしたい場合は10MB程度まで上げてよい（500MBで100→50往復）。
+#   下限の目安: 5MB未満にはしない（往復数とリクエスト処理オーバーヘッドが増えるだけ。
+#              リトライ／レジューム機構は無いため小さくしても障害耐性はほぼ改善しない）。
+#   上限の制約: 必ず MAX_UPLOAD_SIZE_BYTES（= DATA_UPLOAD_MAX_MEMORY_SIZE、1リクエスト
+#              ボディ上限）より十分小さくすること。multipartのオーバーヘッド分の余裕も
+#              見て 20〜25MB を超えないのが安全。さらに本番リバースプロキシの
+#              ボディサイズ上限（nginx client_max_body_size、既定1MB）がこの値＋αを
+#              許可している必要がある（実運用ではこれが最も効く制約）。
+CHUNK_UPLOAD_CHUNK_SIZE_BYTES = env.int("CHUNK_UPLOAD_CHUNK_SIZE_BYTES", default=5 * 1024 * 1024)
 
 # tmp_uploads/配下（保管画面１→２のウィザード間の一時保存、チャンクアップロードの断片）は、
 # ブラウザを閉じる等でウィザードを完走しなかった場合に孤児として残り続ける

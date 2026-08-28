@@ -78,6 +78,13 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   低優先度L-1〜L-3・情報I-1は修正せず`review_security.txt`「対応結果」節に理由付きで記録。
   アプリ全体CSP・MEDIA別オリジン配信は中期対応として見送り。詳細はアーカイブ
   「セキュリティレビュー（review_security.txt）優先度「高」「中」の反映」節参照。
+- チャンク分割アップロードのチャンクサイズを settings 化（2026-08-28、ユーザー問い合わせ→指示）：
+  JSハードコード（5MB）を `settings.CHUNK_UPLOAD_CHUNK_SIZE_BYTES`（`env.int`、既定5MB）へ集約し、
+  保管画面１のテンプレートコンテキスト経由で `chunk_upload.js` の `uploadFilesInChunks()` 第3引数へ
+  渡す方式に変更。推奨サイズ（既定のまま可、大容量主体なら10MBまで、5MB未満不可、上限は
+  `MAX_UPLOAD_SIZE_BYTES` とリバースプロキシのボディ上限に依存）をコメントで明記。
+  `manage.py test documents contracts` 332件PASS（新規1件）。詳細はアーカイブ
+  「チャンク分割アップロードのチャンクサイズを settings 化」節参照。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加
