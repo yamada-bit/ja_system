@@ -26,6 +26,13 @@
         {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
       </ul>
     {% endif %}
+    {# 複数ファイル一括登録で「N件目に入力エラーがあります。」を案内する（該当ファイルの #}
+    {# .doc-fieldset は active_doc_index で最初から表示される）。 #}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li style="color:#c0392b;">{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
 
     <div class="storage-layout">
       <div class="pdf-preview-container">
@@ -60,6 +67,10 @@
         <form method="post" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
           {% csrf_token %}
           <input type="hidden" name="token" value="{{ token }}">
+          {# 「削除」（アップロード取り消し）はメインフォームごと送信して他ファイルの入力を保持する #}
+          {# （2026-08-31）。JSが action=remove と remove_index（表示中の添字）をセットして submit する。 #}
+          <input type="hidden" name="action" id="storage-action" value="">
+          <input type="hidden" name="remove_index" id="remove-upload-index" value="">
 
           <div class="pager-top" style="flex-shrink:0;">
             <button type="button" id="btn-prev-doc" onclick="changeActiveDoc(-1)">＜</button>
@@ -68,64 +79,73 @@
           </div>
 
           <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
-            <div class="form-section">
-              <h4>[1] 保管先</h4>
-              <div class="form-row">
-                <label>部署</label>
-                {{ form.department }}
-                {% for error in form.department.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            {# 2026-08-31ユーザー確定：複数ファイルを一括登録するとき、メタデータは「1回の入力で #}
+            {# 全件共通」ではなく、ページャーで表示中のファイルごとに個別入力する。file_field_sets #}
+            {# （core.upload_views）がファイル単位のフィールド束を渡す。各セットは data-doc-index で #}
+            {# JS が表示/非表示を切り替える（.doc-fieldset）。1ファイルでも同じ構造で描画される。 #}
+            {% for fs in file_field_sets %}
+            <div class="doc-fieldset" data-doc-index="{{ fs.index }}"{% if fs.index != active_doc_index %} style="display:none;"{% endif %}>
+              <div class="form-section">
+                <h4>[1] 保管先</h4>
+                <div class="form-row">
+                  <label>部署</label>
+                  {{ fs.fields.department }}
+                  {% for error in fs.fields.department.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
+                <div class="form-row">
+                  <label>分類</label>
+                  {{ fs.fields.group }}
+                  {% for error in fs.fields.group.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
+                <div class="form-row">
+                  <label>年</label>
+                  {{ fs.fields.year }}
+                  {% for error in fs.fields.year.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
+                <div class="form-row">
+                  <label>カテゴリー</label>
+                  {{ fs.fields.category }}
+                  {% for error in fs.fields.category.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
               </div>
-              <div class="form-row">
-                <label>分類</label>
-                {{ form.group }}
-                {% for error in form.group.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
-              </div>
-              <div class="form-row">
-                <label>年</label>
-                {{ form.year }}
-              </div>
-              <div class="form-row">
-                <label>カテゴリー</label>
-                {{ form.category }}
-                {% for error in form.category.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
-              </div>
-            </div>
 
-            <div class="form-section">
-              <h4>[2] 文書情報</h4>
-              {% for item, title_field in file_rows %}
-                <div class="form-row title-row" data-doc-index="{{ forloop.counter0 }}"{% if not forloop.first %} style="display:none;"{% endif %}>
+              <div class="form-section">
+                <h4>[2] 文書情報</h4>
+                <div class="form-row">
                   <label>文書タイトル</label>
-                  {{ title_field }}
-                  {% for error in title_field.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+                  {{ fs.fields.title }}
+                  {% for error in fs.fields.title.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
                 </div>
-              {% endfor %}
-              <div class="form-row">
-                <label>保存期間</label>
-                <div class="input-with-unit">
-                  {{ form.retention_period }}
-                  <span id="expiry-date-calc" style="font-size:13px; color:#7f8c8d; margin-left:10px;"></span>
+                <div class="form-row">
+                  <label>保存期間</label>
+                  <div class="input-with-unit">
+                    {{ fs.fields.retention_period }}
+                    <span id="expiry-date-calc-{{ fs.index }}" style="font-size:13px; color:#7f8c8d; margin-left:10px;"></span>
+                  </div>
+                  {% for error in fs.fields.retention_period.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
                 </div>
               </div>
-            </div>
 
-            <div class="form-section">
-              <h4>[3] 個人情報</h4>
-              <div class="form-row">
-                <label>個人情報が</label>
-                <div class="radio-group">{{ form.privacy_flag }}</div>
+              <div class="form-section">
+                <h4>[3] 個人情報</h4>
+                <div class="form-row">
+                  <label>個人情報が</label>
+                  <div class="radio-group">{{ fs.fields.privacy_flag }}</div>
+                </div>
+              </div>
+
+              <div class="form-section">
+                <h4>[4] メモ欄</h4>
+                {{ fs.fields.memo }}
               </div>
             </div>
-
-            <div class="form-section">
-              <h4>[4] メモ欄</h4>
-              {{ form.memo }}
-            </div>
+            {% endfor %}
             {# 原本HTMLでは onclick 未設定の死んだモックだったが、xlsx 保管!B197-198「誤って #}
             {# アップロードした文書、不要な文書を削除する。(本登録から除外する)」に基づき、 #}
             {# 2026-08-27ユーザー確定で「表示中のファイルのアップロード取り消し（他のファイルは #}
             {# 登録処理を続行）」に変更した。まだDBレコードは無いため論理削除ではなく、セッションの #}
-            {# 保留ファイル一覧から1件外すだけ（documents:upload_step2_remove）。 #}
+            {# 保留ファイル一覧から1件外すだけ。2026-08-31：メインフォームごと submit して #}
+            {# 他ファイルの入力を保持する（action=remove、UploadStep2View._handle_remove）。 #}
             {# html5 で「削除」ボタンの div を [4]メモ欄ボックスの外（スクロール領域末尾）へ移動 #}
             {# （Rev1.4 で追加された説明画像 image69/image70 がこの配置を示している）。 #}
             <div style="text-align: right; margin-top: 10px;">
@@ -137,12 +157,6 @@
             <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
             <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:upload_step1' %}'">キャンセル</button>
           </div>
-        </form>
-        {# [4]メモ欄「削除」ボタン（アップロード取り消し）専用フォーム。メインフォームの外に置き、 #}
-        {# JS がページャーの現在位置（activeDocIndex）を index に詰めて submit する。 #}
-        <form method="post" action="{% url 'documents:upload_step2_remove' %}" id="remove-upload-form">
-          {% csrf_token %}
-          <input type="hidden" name="index" id="remove-upload-index">
         </form>
       </div>
     </div>
@@ -163,7 +177,7 @@
     const previewKinds = [
       {% for kind in preview_kinds %}"{{ kind|escapejs }}"{% if not forloop.last %}, {% endif %}{% endfor %}
     ];
-    let activeDocIndex = 0;
+    let activeDocIndex = {{ active_doc_index|default:0 }};
 
     function setupActiveDoc() {
       const total = fileNames.length;
@@ -198,8 +212,8 @@
         mockBody.style.display = 'none';
       }
 
-      document.querySelectorAll('.title-row').forEach((row) => {
-        row.style.display = (parseInt(row.dataset.docIndex, 10) === activeDocIndex) ? '' : 'none';
+      document.querySelectorAll('.doc-fieldset').forEach((set) => {
+        set.style.display = (parseInt(set.dataset.docIndex, 10) === activeDocIndex) ? '' : 'none';
       });
       document.getElementById('btn-prev-doc').disabled = (activeDocIndex === 0);
       document.getElementById('btn-next-doc').disabled = (activeDocIndex === total - 1);
@@ -212,13 +226,16 @@
       setupActiveDoc();
     };
 
-    // [4]メモ欄「削除」ボタン＝表示中ファイルのアップロード取り消し。サーバー往復が必要なため
-    // （セッションの保留ファイル一覧を書き換える）、入力途中の他項目は破棄される旨を確認する。
+    // [4]メモ欄「削除」ボタン＝表示中ファイルのアップロード取り消し。セッションの保留ファイル
+    // 一覧を書き換えるためサーバー往復が要るが、メインフォームごと送信することで他ファイルの
+    // 入力値はサーバー側で詰め直して保持する（2026-08-31、UploadStep2View._handle_remove）。
     document.getElementById('btn-remove-upload').addEventListener('click', function () {
       if (!confirm('「' + fileNames[activeDocIndex] + '」のアップロードを取り消します。'
-          + '入力中の内容は破棄されます。よろしいですか？')) return;
+          + '（他のファイルの入力内容は保持されます）よろしいですか？')) return;
+      const mainForm = document.querySelector('form.meta-input-form');
       document.getElementById('remove-upload-index').value = activeDocIndex;
-      document.getElementById('remove-upload-form').submit();
+      document.getElementById('storage-action').value = 'remove';
+      if (mainForm.requestSubmit) mainForm.requestSubmit(); else mainForm.submit();
     });
 
     setupActiveDoc();
@@ -229,9 +246,13 @@
   // documents.services.expiry_date_previewsがサーバー側で算出した{保存期間pk: 保存満了日}を
   // json_scriptで埋め込み、JSは保存期間selectの選択に応じて引くだけにする（JS側で日付計算
   // ロジックを二重実装しない。documents/views.py _expiry_preview_context参照）。
-  window.calculateExpiryDate = function () {
-    const periodSelect = document.getElementById('storage-period');
-    const span = document.getElementById('expiry-date-calc');
+  // 2026-08-31：メタデータがファイルごとになったため引数idxを取り、storage-period-{idx} /
+  // expiry-date-calc-{idx} を対象にする（保存期間selectのonchangeが calculateExpiryDate(idx)
+  // を呼ぶ。documents.forms.UploadStep2Form参照）。previews マップは全ファイル共通で1個のまま。
+  window.calculateExpiryDate = function (idx) {
+    const periodSelect = document.getElementById('storage-period-' + idx);
+    const span = document.getElementById('expiry-date-calc-' + idx);
+    if (!periodSelect || !span) return;
     const previews = JSON.parse(document.getElementById('expiry-previews').textContent);
     const iso = previews[periodSelect.value];
     if (!iso) {
@@ -242,6 +263,8 @@
     span.textContent = `（有効期限：${y}年${m}月${d}日）`;
   };
 
-  calculateExpiryDate();
+  document.querySelectorAll('.doc-fieldset').forEach((set) => {
+    calculateExpiryDate(parseInt(set.dataset.docIndex, 10));
+  });
 </script>
 {% endblock %}

@@ -95,7 +95,7 @@
               <div class="form-row">
                 <label>契約書名</label>
                 {{ title_field }}
-                {% for error in title_field.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+                {% for error in title_field.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
               </div>
               <div class="form-row" style="margin-top:10px;"><label>契約日</label>{{ form.contract_date }}</div>
               <div class="form-row"><label>契約期間</label>{{ form.contract_period_start }} ～ {{ form.contract_period_end }}</div>

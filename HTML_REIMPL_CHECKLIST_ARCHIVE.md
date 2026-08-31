@@ -2618,3 +2618,132 @@ R-7（論理削除のたびに正規化カラム再計算）。
 
 ### 検証
 `manage.py test documents contracts` **332件PASS**（新規1件純増）。
+
+## 保管画面２／編集画面のフィールドエラー表示位置を入力欄の下へ（2026-08-31）
+
+ユーザー報告：保管画面２で分類・カテゴリーを空欄のまま「登録」すると
+「このフィールドは必須です。」（Django必須エラーの日本語ロケール訳）が出るが、
+`.form-row`（`display:flex; align-items:center;`）の中に素の `<div style="color:#c0392b;">`
+で描画していたため、エラーが入力欄・「選択」ボタンの**右隣に横並び**で表示されていた。
+入力欄の真下に出す方が自然、という指摘。原本モックはDjangoのエラー`<div>`を描画しないため
+原本フィデリティ上の制約は無い。
+
+- [x] `static/css/django_widgets.css`：`.form-row:has(.field-error) { flex-wrap: wrap; }` ＋
+  `.form-row .field-error { flex-basis:100%; margin-left:100px; margin-top:2px;
+  color:#c0392b; font-size:12px; }` を追加。`margin-left` は `.form-row label` の
+  `width:100px` に合わせ、折り返したエラーを入力欄の左端に揃える。`.form-row` を使う
+  テンプレートは保管／編集の4画面のみ（`grep` で確認済み）。
+  ※当初は `.form-row { flex-wrap: wrap }`（全行）だったが、契約書 storage2 の
+  「契約期間 [from]～[to]」行が折り返す副作用があり `:has(.field-error)` で
+  エラー行のみに限定した（同日、下記「追補」参照）。
+- [x] `templates/{documents,contracts}/storage2.html`：部署／分類／カテゴリー／文書タイトルの
+  エラー `<div>` を `style="color:#c0392b;"` から `class="field-error"` へ。
+- [x] `templates/{documents,contracts}/edit.html`：文書／契約書タイトルのエラー `<div>` も同様に
+  変更（同じ `.form-row` 構造で同じ横並び不具合があるため）。edit.html は部署／分類／
+  カテゴリーのエラー自体を描画していない（別件・今回はスコープ外）。
+
+### 検証
+実プレビューで管理者ログイン → `/documents/upload/step1/` にダミーPDFをPOST →
+`/documents/upload/step2/` で空submit。分類・カテゴリー両方のエラーが
+`getBoundingClientRect()` 実測で入力欄の直下（`err.y >= input.bottom`）かつ
+左端一致（`err.x == input.x`）に表示されることを確認。
+
+## 保管画面２：複数件登録のメタデータをファイルごとの個別入力へ（2026-08-31、ユーザー依頼）
+
+ユーザー依頼：保管画面２（新規保管）で複数ファイルを一括選択したとき、メタデータ
+（部署・分類・年・カテゴリー・保存期間・個人情報・メモ／契約書は契約日等）を「1回の入力で
+バッチ全件へ共通適用」ではなく、**ページャーで表示中のファイルごとに個別入力**する。
+未入力ファイルの初期値は「空欄・既定値スタート」（部署＝ログインユーザーの部署、個人情報＝
+「含まれる」、年＝当年。直前ファイルからのコピーはしない）。
+
+原本HTML確定版のJS（`startRegisterMock()`）はタイトル以外をバッチ共通適用しており、これは
+**原本との意図的な差異**（ユーザー明示依頼のため原本一致よりユーザー指示を優先。CLAUDE.md
+「原本フィデリティに関する運用方針」）。編集画面（`edit.html`＝単体編集・一括編集、常に
+1ファイル）は挙動不変。
+
+### 設計
+
+- ページャーは従来どおり純JS（サーバー往復なし）。createモードではメタデータ欄を
+  ファイル数ぶんDOMに展開し、`.doc-fieldset[data-doc-index]` をJSで表示/非表示切替、送信は全件同時。
+- `documents/contracts.forms.UploadStep2Form`：`self.per_file_mode = not edit_mode`。createでは
+  `PER_FILE_FIELDS`（クラス属性）を `copy.deepcopy` でファイル数ぶん複製して `{name}_{i}` に
+  差し替える（1ファイルでも `_0`）。年choices・部署disable/初期値・分類/カテゴリー部署スコープ・
+  （documents）保存期間widgetの `id`/`onchange` 添字化を、生成後の添字付きフィールド全てに適用。
+  ヘルパー `file_data(i)`（保存する値の辞書、per_file_mode なら `{name}_{i}` を引く）と
+  `first_error_file_index()` を追加。編集モードは無添字のまま（`_build_form` は `edit_mode=True`）。
+- `core/upload_views.py`：`file_field_sets(form, pending, field_names)` を追加（ファイル単位の
+  `{"item", "index", "fields": {...}}` をテンプレートへ）。`file_rows` は据え置き（JSのファイル名一覧用）。
+- `documents/contracts.views.UploadStep2View`：保存ループを `form.file_data(i)` ベースへ。
+  バリデーションエラー時は `messages.error("N件目に入力エラーがあります。")`（複数件時）＋
+  context `active_doc_index = form.first_error_file_index()`。`_expiry_preview_context` は
+  `retention_period` または `retention_period_0` の queryset を使うようガード。
+- `templates/{documents,contracts}/storage2.html`：静的な [1]〜[4] ブロックを `file_field_sets`
+  ループ（`.doc-fieldset`）へ。documents は保存満了日プレビューを `calculateExpiryDate(idx)` に
+  引数化（`#storage-period-{idx}` / `#expiry-date-calc-{idx}`、previews マップは共通1個）。
+  contracts は関連書類（`related_files_{index}`、以前から一括対応済み）も `.doc-fieldset` 内へ移設し、
+  JSの個別切替（`.title-row`/`.related-files-row`）を `.doc-fieldset` 一括切替に統一。
+  Djangoの `messages` を表示するブロックを追加（従来は `form.non_field_errors` のみ）。
+
+### テスト
+
+- 既存の単一ファイルPOSTテスト（`UploadStep2ViewValidationTests`、`UploadStep2FormDepartmentInitialTests`、
+  `UploadStep2FormGroupCategoryScopeTests`、`UploadFileIOErrorTests`、`UploadStep2ImmediateExtractionTests`、
+  `RelatedFilesMultiUploadTests`）のメタデータキーを `department` → `department_0` 等へ更新
+  （documents/contracts 両方）。
+- 追加（documents `UploadStep2PerFileMetadataTests`、contracts `UploadStep2ViewValidationTests`）：
+  2ファイルを別々の分類/カテゴリー/年/保存期間/個人情報/メモで登録 → 各々が自分の値で保存され
+  保存満了日もファイルごとに計算されること／2件目だけ分類欠落 → 200・`group_1` エラー・
+  `active_doc_index==1`・messages「2件目」・レコード0件／`file_data()`・`first_error_file_index()`。
+
+### 検証
+
+- `manage.py test documents contracts` **336件PASS**（新規4件）。`manage.py test core` 134件PASS。
+- 実プレビュー：管理者ログイン → step1へダミーPDF2件POST → step2。`.doc-fieldset` が2個・
+  各フィールド名が `*_0`/`*_1`・`storage-period-{i}`/`expiry-date-calc-{i}` が個別・ページャーで
+  表示切替。file0=(分類Ａ,一般文書,2025,1年,個人情報あり)、file1=(分類Ｂ,予算関係,2023,10年,なし)で
+  登録 → DBで Document 2件が各々の値・別々の `expiry_date` を保持することを確認。
+  2件目の分類を空にPOST → `activeDocIndex=1`・「2件目に入力エラーがあります。」・2件目の
+  `.doc-fieldset` に `.field-error` 表示を確認。
+
+### 追補（同日、ユーザー報告）
+
+1. 契約書 storage2 の [3]関連書類の複数行 `{# … #}` コメントが画面に生表示されていた
+   （CLAUDE.md「技術的な既知の落とし穴」＝複数行 `{# #}` は `.` が改行に不一致でコメントとして
+   機能しない、の再発）。`{% comment %}…{% endcomment %}` に修正。
+2. 「保管画面２／編集画面のフィールドエラー表示位置」節で `.form-row { flex-wrap: wrap }` を
+   全 `.form-row` に付けたところ、契約書 storage2 の「契約期間 [from] ～ [to]」行が折り返して
+   縦積みになった。`django_widgets.css` を `.form-row:has(.field-error) { flex-wrap: wrap }` に
+   限定し、エラーを含む行だけ折り返す（`:has()` は対象4画面の利用ブラウザで可）。実プレビュー
+   （幅1400）で契約期間の from～to が同一行、必須エラーは入力欄直下・左端一致を再確認。
+
+### 追補（2026-08-31、ユーザー要望）：「削除」で他ファイルの入力を保持する
+
+ファイルごと個別入力にしたことで、複数件登録中に「削除」（アップロード取り消し）を押すと
+入力済みの全ファイルの内容がクリアされる問題が顕在化。**削除しても残るファイルの入力を保持**
+するよう変更。
+
+- 旧：「削除」は専用フォーム `#remove-upload-form`（`upload_step2_remove` URL、
+  `BaseUploadStep2RemoveView`）を submit → セッションから1件外し **redirect**（PRG）→
+  step2 の GET が空フォームを再描画。
+- 新：「削除」は**メインフォームごと** submit（hidden `action=remove` ＋ `remove_index`）。
+  `UploadStep2View._handle_remove`（documents/contracts）がセッションから1件外し、
+  `core.upload_views.remap_step2_initial_after_remove` で残りファイルのPOST値を削除位置に
+  合わせて詰め直し（後ろの `{name}_{i}` を1つ前へ）、**unbound**フォームの `initial` に載せて
+  そのまま render（redirectしない＝バリデーションエラーも出さない）。全件外れたら step1 へ redirect。
+- `UploadStep2Form.__init__` の部署初期値を `self.initial[...] =` から
+  `self.initial.setdefault(...)` に変更（削除後再描画でview側が渡す保持済み部署を優先）。
+- `templates/{documents,contracts}/storage2.html`：`#remove-upload-form` を廃止。メインフォームに
+  `<input type="hidden" name="action">` `<input type="hidden" name="remove_index">` を追加。
+  削除ボタンJSは `mainForm.requestSubmit()`。契約書は送信前に file input を `disabled` にして
+  関連書類の無駄な二重アップロードを防ぐ（関連書類はブラウザ仕様で復元不可＝選び直し、と confirm 文言で明示）。
+- `BaseUploadStep2RemoveView`・`documents/contracts.views.UploadStep2RemoveView`・
+  `upload_step2_remove` URL を**削除**（UIから到達不能かつ redirect で入力を捨てる旧実装のため）。
+  関連テスト（`UploadStep2RemoveViewTests`）は新方式（`action=remove` を step2 へ POST、
+  200 render・入力保持・詰め直しを検証）に書き換え。
+
+### 検証（追補分）
+
+- `manage.py test documents contracts core` **470件PASS**。
+- 実プレビュー：3ファイルに別々のタイトル・メモ・分類・年を入力 → 3件目を「削除」→ 2件が
+  値保持（分類は表示ラベルも解決）。続けて1件目を「削除」→ 残り1件が `_0` へ詰め直されて表示。
+  最後の1件を「削除」→ step1 へ redirect。通常の「登録」（action 空）は従来どおり動作。

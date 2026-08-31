@@ -1,3 +1,4 @@
+import copy
 import datetime
 import logging
 from decimal import Decimal, InvalidOperation
@@ -52,7 +53,16 @@ class UploadStep2Form(forms.Form):
     保存期間の選択式フィールドが無く（固定10年、contracts.services.calculate_expiry_date）、
     契約特有項目（契約日・契約期間・契約更新日・契約金額・契約先名）を持つ。
     部署/分類/カテゴリーは原本通り`core.widgets.PopupSelectWidget`を使う。
+
+    新規保管（createモード）では複数契約書を一括選択した場合でもメタデータをファイルごとに
+    個別入力する（2026-08-31ユーザー確定。詳細は documents.forms.UploadStep2Form docstring）。
+    `PER_FILE_FIELDS`をファイル数ぶん複製して`{name}_{i}`に差し替える。編集モードは無添字のまま。
     """
+
+    PER_FILE_FIELDS = (
+        "department", "group", "category", "year", "contract_date", "contract_period_start",
+        "contract_period_end", "renewal_date", "contract_amount", "contract_partner", "memo",
+    )
 
     department = forms.ModelChoiceField(
         label="部署",
@@ -124,33 +134,52 @@ class UploadStep2Form(forms.Form):
     def __init__(self, *args, employee=None, file_count=1, initial_titles=None, edit_mode=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.employee = employee
+        self.file_count = file_count
+        # createモードはメタデータ項目もファイルごと（{name}_{i}）。編集モードは無添字のまま。
+        self.per_file_mode = not edit_mode
         current = datetime.date.today().year
-        # documents.forms.UploadStep2Form.__init__と同じ理由（core.forms.year_choices_with_existing
-        # のdocstring参照）。編集モード（ContractEditView）では対象の現在の年を選択肢から
-        # 外さないことで、年欄に触れずに更新しただけで年が意図せず書き換わる事故を防ぐ。
-        self.fields["year"].choices = year_choices_with_existing(self.initial.get("year"))
-        self.fields["year"].initial = current
-        # xlsx 保管!B412-416: documents.forms.UploadStep2Formと同じ理由。管理者以外は自部署固定とし、
-        # 「選択」ボタンのみ非表示にする（欄自体は表示したまま読み取り専用にする。ボタン非表示は
-        # core.widgets.PopupSelectWidget側）。self.initial（Formのinitial=辞書）はself.fields[x].
-        # initialより解決時に優先されるため（Django BaseForm.get_initial_for_field）、view側から
-        # 渡されたinitial={"department": ...}を確実に上書きするにはここも更新する必要がある。
-        if employee is not None and not can_select_department(employee):
-            self.fields["department"].disabled = True
-            self.initial["department"] = employee.department_id
-        elif employee is not None and not edit_mode:
-            # documents.forms.UploadStep2Form.__init__と同じ理由（xlsx 保管!B82「初期値は
-            # ログインユーザーの部署名をセット」は新規登録画面のみ。編集画面は既存契約書の
-            # 部署をContractEditView._build_formがinitialで渡すため、ここで上書きしない）。
-            self.initial["department"] = employee.department_id
+
+        if self.per_file_mode:
+            for name in self.PER_FILE_FIELDS:
+                base_field = self.fields.pop(name)
+                for i in range(file_count):
+                    self.fields[f"{name}_{i}"] = copy.deepcopy(base_field)
+
+        def fname(base, i):
+            return f"{base}_{i}" if self.per_file_mode else base
+
         # xlsx 保管!P430,P459(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
         group_qs, category_qs = scoped_group_and_category_querysets(
             doc_kbn=DocKbn.CONTRACT, kind="contract", employee=employee
         )
-        self.fields["group"].queryset = group_qs
-        self.fields["group"].widget.queryset = group_qs
-        self.fields["category"].queryset = category_qs
-        self.fields["category"].widget.queryset = category_qs
+
+        for i in range(file_count):
+            # documents.forms.UploadStep2Form.__init__と同じ理由（year_choices_with_existing
+            # docstring）。編集モードは対象の現在の年を選択肢から外さない。createは常にNone。
+            year_field = self.fields[fname("year", i)]
+            year_field.choices = year_choices_with_existing(
+                None if self.per_file_mode else self.initial.get("year")
+            )
+            year_field.initial = current
+
+            # xlsx 保管!B412-416: 管理者以外は自部署固定＋「選択」ボタン非表示（欄は読み取り専用で
+            # 表示）。self.initial は fields[x].initial より優先されるため（Django
+            # BaseForm.get_initial_for_field）、view側initialを確実に上書きするにはここも更新する。
+            dept_field = self.fields[fname("department", i)]
+            if employee is not None and not can_select_department(employee):
+                dept_field.disabled = True
+                self.initial[fname("department", i)] = employee.department_id
+            elif employee is not None and not edit_mode:
+                # xlsx 保管!B82「初期値はログインユーザーの部署名をセット」は新規登録画面のみ。
+                # setdefaultなのは「削除」後の再描画でview側が保持済み部署をinitialで渡すため
+                # （2026-08-31、documents.forms.UploadStep2Formと同じ）。
+                self.initial.setdefault(fname("department", i), employee.department_id)
+
+            for base, qs in (("group", group_qs), ("category", category_qs)):
+                f = self.fields[fname(base, i)]
+                f.queryset = qs
+                f.widget.queryset = qs
+
         initial_titles = initial_titles or []
         for i in range(file_count):
             initial = initial_titles[i] if i < len(initial_titles) else ""
@@ -158,8 +187,23 @@ class UploadStep2Form(forms.Form):
                 label=f"契約書タイトル({i + 1})", initial=initial, max_length=255
             )
 
-    def titles(self, file_count):
-        return [self.cleaned_data[f"title_{i}"] for i in range(file_count)]
+    def file_data(self, i):
+        """i番目のファイルとして保存するクリーン値の辞書（キーは PER_FILE_FIELDS ＋ "title"）。
+        documents.forms.UploadStep2Form.file_data と同じ役割。"""
+        suffix = f"_{i}" if self.per_file_mode else ""
+        data = {name: self.cleaned_data[f"{name}{suffix}"] for name in self.PER_FILE_FIELDS}
+        data["title"] = self.cleaned_data[f"title_{i}"]
+        return data
+
+    def first_error_file_index(self):
+        """最初に入力エラーを持つファイルの添字（無ければ0）。per_file_mode でのみ意味を持つ。"""
+        if not self.per_file_mode:
+            return 0
+        for i in range(self.file_count):
+            keys = {f"{name}_{i}" for name in self.PER_FILE_FIELDS} | {f"title_{i}"}
+            if keys & set(self.errors):
+                return i
+        return 0
 
 
 class SearchForm(forms.Form):

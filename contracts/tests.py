@@ -798,12 +798,14 @@ class RelatedFilesMultiUploadTests(TestCase):
         token = re.search(r'name="token" value="([^"]+)"', step2.content.decode("utf-8")).group(1)
 
         before = set(Contract.objects.values_list("pk", flat=True))
+        # 2026-08-31：メタデータはファイルごと（*_0 / *_1）。ここでは年をファイルごとに
+        # 変えて、共通適用ではなく個別に保存されることも併せて確認する。
         self.client.post("/contracts/upload/step2/", {
             "token": token,
-            "department": self.department.pk,
-            "group": self.group.pk,
-            "category": self.category.pk,
-            "year": 2026,
+            "department_0": self.department.pk, "group_0": self.group.pk,
+            "category_0": self.category.pk, "year_0": 2025,
+            "department_1": self.department.pk, "group_1": self.group.pk,
+            "category_1": self.category.pk, "year_1": 2026,
             "title_0": "契約書A",
             "title_1": "契約書B",
             "related_files_0": SimpleUploadedFile("rel_a.txt", b"REL-A"),
@@ -813,6 +815,7 @@ class RelatedFilesMultiUploadTests(TestCase):
         self.assertEqual(len(created), 2)
         self.assertIn("rel_a", created[0].related_files.get().file.name)
         self.assertIn("rel_b", created[1].related_files.get().file.name)
+        self.assertEqual([created[0].year, created[1].year], [2025, 2026])
 
 
 class SearchAuditLogTests(TestCase):
@@ -1870,10 +1873,11 @@ class UploadStep2FormDepartmentInitialTests(TestCase):
         PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
 
     def test_admin_new_registration_defaults_to_own_department(self):
+        # 新規保管はメタデータがファイルごと（department_0..）。2026-08-31、per_file_mode。
         from contracts.forms import UploadStep2Form
 
         form = UploadStep2Form(employee=self.admin, edit_mode=False)
-        self.assertEqual(form["department"].value(), self.admin.department_id)
+        self.assertEqual(form["department_0"].value(), self.admin.department_id)
 
     def test_admin_edit_screen_keeps_contracts_own_department(self):
         from contracts.forms import UploadStep2Form
@@ -1939,18 +1943,19 @@ class UploadStep2FormGroupCategoryScopeTests(TestCase):
         response = self.client.post(
             "/contracts/upload/step2/",
             {
+                # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、per_file_mode。
                 "token": token,
-                "department": self.department.pk,
-                "group": self.other_group.pk,
-                "category": self.other_category.pk,
-                "year": 2026,
+                "department_0": self.department.pk,
+                "group_0": self.other_group.pk,
+                "category_0": self.other_category.pk,
+                "year_0": 2026,
                 "title_0": "テスト契約書",
             },
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["form"].is_valid())
-        self.assertIn("group", response.context["form"].errors)
-        self.assertIn("category", response.context["form"].errors)
+        self.assertIn("group_0", response.context["form"].errors)
+        self.assertIn("category_0", response.context["form"].errors)
 
     def test_department_scope_overrides_cross_department_contract_visible_groups_grant(self):
         """documents.tests.UploadStep2FormGroupCategoryScopeTests.
@@ -1966,7 +1971,7 @@ class UploadStep2FormGroupCategoryScopeTests(TestCase):
         profile.contract_visible_groups.add(self.own_group, self.other_group)
 
         form = UploadStep2Form(employee=self.staff)
-        group_ids = set(form.fields["group"].queryset.values_list("pk", flat=True))
+        group_ids = set(form.fields["group_0"].queryset.values_list("pk", flat=True))
         self.assertIn(self.own_group.pk, group_ids)
         self.assertNotIn(self.other_group.pk, group_ids)
 
@@ -2235,12 +2240,13 @@ class UploadStep2ViewValidationTests(TestCase):
         )
 
     def _valid_data(self, token):
+        # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、per_file_mode。
         return {
             "token": token,
-            "department": self.department.pk,
-            "group": self.group.pk,
-            "category": self.category.pk,
-            "year": 2026,
+            "department_0": self.department.pk,
+            "group_0": self.group.pk,
+            "category_0": self.category.pk,
+            "year_0": 2026,
             "title_0": "テスト契約書",
         }
 
@@ -2248,10 +2254,10 @@ class UploadStep2ViewValidationTests(TestCase):
         """必須項目（分類）欠落時、200で再描画されform.errorsに反映されること。"""
         step2 = self.client.get("/contracts/upload/step2/")
         data = self._valid_data(step2.context["token"])
-        del data["group"]
+        del data["group_0"]
         response = self.client.post("/contracts/upload/step2/", data)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("group", response.context["form"].errors)
+        self.assertIn("group_0", response.context["form"].errors)
 
         from contracts.models import Contract
 
@@ -2268,6 +2274,33 @@ class UploadStep2ViewValidationTests(TestCase):
         self.assertRedirects(response, "/contracts/upload/step1/")
         texts = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("二重に送信された可能性がある" in t for t in texts))
+        self.assertFalse(Contract.objects.exists())
+
+    def test_multi_file_second_invalid_blocks_all_and_reports_index(self):
+        """複数ファイル一括登録（2026-08-31、per_file_mode）で2件目が分類欠落なら、
+        全体を止めて「2件目」を案内し、active_doc_index で該当ファイルを表示する。"""
+        from django.contrib.messages import get_messages
+
+        from contracts.models import Contract
+
+        self.client.get("/contracts/upload/step1/")  # setUp が積んだ保留ファイルを掃除
+        self.client.post("/contracts/upload/step1/", {"files": [
+            SimpleUploadedFile("a.pdf", b"AAAA", content_type="application/pdf"),
+            SimpleUploadedFile("b.pdf", b"BBBB", content_type="application/pdf"),
+        ]})
+        token = self.client.get("/contracts/upload/step2/").context["token"]
+        response = self.client.post("/contracts/upload/step2/", {
+            "token": token,
+            "department_0": self.department.pk, "group_0": self.group.pk,
+            "category_0": self.category.pk, "year_0": 2026, "title_0": "契約A",
+            "department_1": self.department.pk, "category_1": self.category.pk,
+            "year_1": 2026, "title_1": "契約B",  # group_1 欠落
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("group_1", response.context["form"].errors)
+        self.assertEqual(response.context["active_doc_index"], 1)
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("2件目" in t for t in texts))
         self.assertFalse(Contract.objects.exists())
 
 
@@ -2336,11 +2369,12 @@ class UploadFileIOErrorTests(TestCase):
             response = self.client.post(
                 "/contracts/upload/step2/",
                 {
+                    # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、per_file_mode。
                     "token": token,
-                    "department": self.department.pk,
-                    "group": group.pk,
-                    "category": category.pk,
-                    "year": 2026,
+                    "department_0": self.department.pk,
+                    "group_0": group.pk,
+                    "category_0": category.pk,
+                    "year_0": 2026,
                     "title_0": "テスト契約書",
                 },
             )
@@ -2401,11 +2435,12 @@ class UploadStep2ImmediateExtractionTests(TestCase):
             response = self.client.post(
                 "/contracts/upload/step2/",
                 {
+                    # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、per_file_mode。
                     "token": self.token,
-                    "department": self.department.pk,
-                    "group": self.group.pk,
-                    "category": self.category.pk,
-                    "year": 2026,
+                    "department_0": self.department.pk,
+                    "group_0": self.group.pk,
+                    "category_0": self.category.pk,
+                    "year_0": 2026,
                     "title_0": "テスト契約書",
                 },
             )
@@ -2964,7 +2999,9 @@ class EditDeleteViewTests(TestCase):
 
 class UploadStep2RemoveViewTests(TestCase):
     """保管画面２（登録）の「削除」ボタン＝表示中ファイルのアップロード取り消し
-    （documents.tests.UploadStep2RemoveViewTestsと同じ観点。契約書側はRequiresContractEditMixin）。"""
+    （documents.tests.UploadStep2RemoveViewTestsと同じ観点。2026-08-31：メインフォームごと
+    送信〈action=remove〉して他ファイルの入力を保持する方式へ変更。契約書側は
+    RequiresContractEditMixin）。"""
 
     def setUp(self):
         self.department = Department.objects.create(
@@ -2985,7 +3022,13 @@ class UploadStep2RemoveViewTests(TestCase):
             {"files": [SimpleUploadedFile(n, b"dummy", content_type="application/pdf") for n in names]},
         )
 
-    def test_remove_one_keeps_others_and_deletes_temp_file(self):
+    def _remove(self, index, extra=None):
+        step2 = self.client.get("/contracts/upload/step2/")
+        data = {"token": step2.context["token"], "action": "remove", "remove_index": str(index)}
+        data.update(extra or {})
+        return self.client.post("/contracts/upload/step2/", data)
+
+    def test_remove_one_keeps_others_preserves_input_and_deletes_temp_file(self):
         from pathlib import Path
 
         from django.conf import settings
@@ -2996,33 +3039,40 @@ class UploadStep2RemoveViewTests(TestCase):
         pending_before = get_pending_files(self.client.session, "contracts_pending_upload")
         removed_temp = pending_before[0]["temp_name"]
 
-        response = self.client.post("/contracts/upload/step2/remove/", {"index": "0"})
-        self.assertRedirects(response, "/contracts/upload/step2/")
-
+        response = self._remove(0, {
+            "department_0": self.department.pk, "title_0": "甲", "contract_partner_0": "甲社",
+            "department_1": self.department.pk, "title_1": "乙", "contract_partner_1": "乙社",
+        })
+        self.assertEqual(response.status_code, 200)
         pending_after = get_pending_files(self.client.session, "contracts_pending_upload")
         self.assertEqual([p["original_name"] for p in pending_after], ["b.pdf"])
         self.assertFalse((Path(settings.MEDIA_ROOT) / "tmp_uploads" / removed_temp).exists())
+        form = response.context["form"]
+        self.assertEqual(form["title_0"].value(), "乙")
+        self.assertEqual(form["contract_partner_0"].value(), "乙社")
 
-    def test_step2_get_renders_remove_button_and_hidden_form(self):
+    def test_step2_get_renders_remove_button_and_action_inputs(self):
         self._select_files("a.pdf", "b.pdf")
         response = self.client.get("/contracts/upload/step2/")
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'id="btn-remove-upload"')
-        self.assertContains(response, "/contracts/upload/step2/remove/")
+        self.assertContains(response, 'name="action"')
+        self.assertContains(response, 'name="remove_index"')
+        self.assertNotContains(response, "/contracts/upload/step2/remove/")
 
     def test_remove_button_div_is_outside_memo_form_section(self):
         """html5 で「削除」ボタンの div は [4]メモ欄の form-section の外へ移動
         （documents 側と同じ。Rev1.4 追加の説明画像 image69/image70 と対応）。"""
         self._select_files("a.pdf", "b.pdf")
         content = self.client.get("/contracts/upload/step2/").content.decode("utf-8")
-        memo_idx = content.index("[4] メモ欄")
+        memo_idx = content.rindex("[4] メモ欄")
         button_idx = content.index('id="btn-remove-upload"')
         self.assertIn("</div>", content[memo_idx:button_idx])
         self.assertLess(button_idx, content.index("storage-outer-actions"))
 
     def test_remove_last_pending_redirects_to_step1(self):
         self._select_files("only.pdf")
-        response = self.client.post("/contracts/upload/step2/remove/", {"index": "0"})
+        response = self._remove(0)
         self.assertRedirects(response, "/contracts/upload/step1/")
 
     def test_requires_contract_edit_permission(self):
@@ -3035,5 +3085,7 @@ class UploadStep2RemoveViewTests(TestCase):
         )
         self._select_files("a.pdf")
         self.client.login(username="2", password="pass1234")
-        response = self.client.post("/contracts/upload/step2/remove/", {"index": "0"})
+        response = self.client.post(
+            "/contracts/upload/step2/", {"action": "remove", "remove_index": "0"}
+        )
         self.assertEqual(response.status_code, 403)

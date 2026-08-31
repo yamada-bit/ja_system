@@ -26,6 +26,12 @@
         {% for error in form.non_field_errors %}<li style="color:#c0392b;">{{ error }}</li>{% endfor %}
       </ul>
     {% endif %}
+    {# 複数ファイル一括登録で「N件目に入力エラーがあります。」を案内する。 #}
+    {% if messages %}
+      <ul class="messages">
+        {% for message in messages %}<li style="color:#c0392b;">{{ message }}</li>{% endfor %}
+      </ul>
+    {% endif %}
 
     <div class="storage-layout">
       <div class="pdf-preview-container">
@@ -54,6 +60,9 @@
         <form method="post" enctype="multipart/form-data" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
           {% csrf_token %}
           <input type="hidden" name="token" value="{{ token }}">
+          {# 「削除」はメインフォームごと送信して他ファイルの入力を保持する（2026-08-31）。 #}
+          <input type="hidden" name="action" id="storage-action" value="">
+          <input type="hidden" name="remove_index" id="remove-upload-index" value="">
 
           <div class="pager-top" style="flex-shrink:0;">
             <button type="button" id="btn-prev-doc" onclick="changeActiveDoc(-1)">＜</button>
@@ -62,72 +71,81 @@
           </div>
 
           <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
-            <div class="form-section">
-              <h4>[1] 保管先</h4>
-              <div class="form-row">
-                <label>部署</label>
-                {{ form.department }}
-                {% for error in form.department.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
-              </div>
-              <div class="form-row">
-                <label>分類</label>
-                {{ form.group }}
-                {% for error in form.group.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
-              </div>
-              <div class="form-row">
-                <label>年</label>
-                {{ form.year }}
-              </div>
-              <div class="form-row">
-                <label>カテゴリー</label>
-                {{ form.category }}
-                {% for error in form.category.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
-              </div>
-            </div>
-
-            <div class="form-section">
-              <h4>[2] 文書情報</h4>
-              {% for item, title_field in file_rows %}
-                <div class="form-row title-row" data-doc-index="{{ forloop.counter0 }}"{% if not forloop.first %} style="display:none;"{% endif %}>
-                  <label>契約書タイトル</label>
-                  {{ title_field }}
-                  {% for error in title_field.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            {# 2026-08-31ユーザー確定：複数ファイル一括登録時、メタデータは「全件共通」ではなく #}
+            {# ページャーで表示中のファイルごとに個別入力する（documents/storage2.htmlと同じ）。 #}
+            {# file_field_sets（core.upload_views）がファイル単位のフィールド束を渡し、JS が #}
+            {# data-doc-index で .doc-fieldset の表示/非表示を切り替える。関連書類も同じ添字で #}
+            {# ファイルごとに独立（related_files_{index}、以前から一括登録対応済み）。 #}
+            {% for fs in file_field_sets %}
+            <div class="doc-fieldset" data-doc-index="{{ fs.index }}"{% if fs.index != active_doc_index %} style="display:none;"{% endif %}>
+              <div class="form-section">
+                <h4>[1] 保管先</h4>
+                <div class="form-row">
+                  <label>部署</label>
+                  {{ fs.fields.department }}
+                  {% for error in fs.fields.department.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
                 </div>
-              {% endfor %}
-              <div class="form-row" style="margin-top:10px;"><label>契約日</label>{{ form.contract_date }}</div>
-              <div class="form-row"><label>契約期間</label>{{ form.contract_period_start }} ～ {{ form.contract_period_end }}</div>
-              <div class="form-row"><label>契約更新日</label>{{ form.renewal_date }}</div>
-              <div class="form-row"><label>契約金額</label>{{ form.contract_amount }} 円</div>
-              <div class="form-row"><label>契約先名</label>{{ form.contract_partner }}</div>
-            </div>
+                <div class="form-row">
+                  <label>分類</label>
+                  {{ fs.fields.group }}
+                  {% for error in fs.fields.group.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
+                <div class="form-row">
+                  <label>年</label>
+                  {{ fs.fields.year }}
+                  {% for error in fs.fields.year.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
+                <div class="form-row">
+                  <label>カテゴリー</label>
+                  {{ fs.fields.category }}
+                  {% for error in fs.fields.category.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
+              </div>
 
-            <div class="form-section">
-              <h4>[3] 関連書類</h4>
-              {# 原本index.html:1567-1589のsetupStorageFormForActiveDoc()は、アクティブ文書を
-                 切り替えるたびに関連書類欄のコンテナをリセットする＝一括登録の各契約書ごとに
-                 個別の関連書類を添付できる想定。以前はHTML/xlsxに複数件一括時の割り当て方法が
-                 未定義という理由で1件登録時のみに制限していたが、原本フィデリティ監査を受けて
-                 契約書タイトル欄（title-row）と同じdata-doc-index方式で文書ごとに独立した
-                 コンテナ・inputを用意し、原本の挙動通り件数に関わらず添付できるようにする。 #}
-              {% for item, title_field in file_rows %}
-                <div class="form-row related-files-row" data-doc-index="{{ forloop.counter0 }}" style="flex-direction:column; align-items:flex-start; gap:5px;{% if not forloop.first %} display:none;{% endif %}">
+              <div class="form-section">
+                <h4>[2] 文書情報</h4>
+                <div class="form-row">
+                  <label>契約書タイトル</label>
+                  {{ fs.fields.title }}
+                  {% for error in fs.fields.title.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
+                <div class="form-row" style="margin-top:10px;"><label>契約日</label>{{ fs.fields.contract_date }}</div>
+                <div class="form-row"><label>契約期間</label>{{ fs.fields.contract_period_start }} ～ {{ fs.fields.contract_period_end }}</div>
+                <div class="form-row"><label>契約更新日</label>{{ fs.fields.renewal_date }}</div>
+                <div class="form-row"><label>契約金額</label>{{ fs.fields.contract_amount }} 円</div>
+                <div class="form-row"><label>契約先名</label>{{ fs.fields.contract_partner }}</div>
+              </div>
+
+              <div class="form-section">
+                <h4>[3] 関連書類</h4>
+                {% comment %}
+                  原本index.html:1567-1589のsetupStorageFormForActiveDoc()は、アクティブ文書を
+                  切り替えるたびに関連書類欄のコンテナをリセットする＝一括登録の各契約書ごとに
+                  個別の関連書類を添付できる想定。契約書タイトル欄と同じdata-doc-index方式で
+                  文書ごとに独立したコンテナ・inputを用意する（.doc-fieldset内へ移設）。
+                  ※ 複数行コメントは {# #} だと画面に生表示される（CLAUDE.md 既知の罠）。
+                {% endcomment %}
+                <div class="form-row" style="flex-direction:column; align-items:flex-start; gap:5px;">
                   <label style="width:100%;">関連書類</label>
-                  <div id="storage-file-inputs-container-{{ forloop.counter0 }}" style="width:100%;">
+                  <div id="storage-file-inputs-container-{{ fs.index }}" style="width:100%;">
                     <div class="related-file-row">
-                      <input type="file" name="related_files_{{ forloop.counter0 }}" onchange="handleRelatedFileChange(this)">
+                      <input type="file" name="related_files_{{ fs.index }}" onchange="handleRelatedFileChange(this)">
                     </div>
                   </div>
                 </div>
-              {% endfor %}
-            </div>
+              </div>
 
-            <div class="form-section">
-              <h4>[4] メモ欄</h4>
-              {{ form.memo }}
+              <div class="form-section">
+                <h4>[4] メモ欄</h4>
+                {{ fs.fields.memo }}
+              </div>
             </div>
+            {% endfor %}
             {# documents/storage2.htmlと同じ（xlsx 保管!B487-488「誤ってアップロードした契約書、 #}
             {# 不要な契約書を削除する。(本登録から除外する)」。2026-08-27ユーザー確定で「表示中 #}
-            {# ファイルのアップロード取り消し、他は登録処理を続行」に変更。contracts:upload_step2_remove）。 #}
+            {# ファイルのアップロード取り消し、他は登録処理を続行」に変更。2026-08-31：メインフォーム #}
+            {# ごと submit して他ファイルの入力を保持する（action=remove。関連書類はファイル入力の #}
+            {# ため復元不可＝選び直しが必要）。 #}
             {# html5 で「削除」ボタンの div を [4]メモ欄ボックスの外（スクロール領域末尾）へ移動 #}
             {# （Rev1.4 で追加された説明画像 image69/image70 がこの配置を示している）。 #}
             <div style="text-align: right; margin-top: 10px;">
@@ -139,11 +157,6 @@
             <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
             <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'contracts:upload_step1' %}'">キャンセル</button>
           </div>
-        </form>
-        {# [4]メモ欄「削除」ボタン（アップロード取り消し）専用フォーム。documents/storage2.htmlと同じ。 #}
-        <form method="post" action="{% url 'contracts:upload_step2_remove' %}" id="remove-upload-form">
-          {% csrf_token %}
-          <input type="hidden" name="index" id="remove-upload-index">
         </form>
       </div>
     </div>
@@ -163,7 +176,7 @@
     const previewKinds = [
       {% for kind in preview_kinds %}"{{ kind|escapejs }}"{% if not forloop.last %}, {% endif %}{% endfor %}
     ];
-    let activeDocIndex = 0;
+    let activeDocIndex = {{ active_doc_index|default:0 }};
 
     function setupActiveDoc() {
       const total = fileNames.length;
@@ -196,11 +209,8 @@
         mockBody.style.display = 'none';
       }
 
-      document.querySelectorAll('.title-row').forEach((row) => {
-        row.style.display = (parseInt(row.dataset.docIndex, 10) === activeDocIndex) ? '' : 'none';
-      });
-      document.querySelectorAll('.related-files-row').forEach((row) => {
-        row.style.display = (parseInt(row.dataset.docIndex, 10) === activeDocIndex) ? '' : 'none';
+      document.querySelectorAll('.doc-fieldset').forEach((set) => {
+        set.style.display = (parseInt(set.dataset.docIndex, 10) === activeDocIndex) ? '' : 'none';
       });
       document.getElementById('btn-prev-doc').disabled = (activeDocIndex === 0);
       document.getElementById('btn-next-doc').disabled = (activeDocIndex === total - 1);
@@ -214,11 +224,18 @@
     };
 
     // [4]メモ欄「削除」ボタン＝表示中ファイルのアップロード取り消し（documents/storage2.htmlと同じ）。
+    // メインフォームごと送信し、他ファイルの入力値はサーバー側で詰め直して保持する
+    // （UploadStep2View._handle_remove）。関連書類（file input）はブラウザ仕様で復元できないため、
+    // 破棄されるファイルの分だけでなく残るファイルの添付も送信前に無効化して二重アップロードを避ける
+    // （どのみち再描画後に選び直しになる）。
     document.getElementById('btn-remove-upload').addEventListener('click', function () {
       if (!confirm('「' + fileNames[activeDocIndex] + '」のアップロードを取り消します。'
-          + '入力中の内容は破棄されます。よろしいですか？')) return;
+          + '（他のファイルの入力内容は保持されます。関連書類は選び直しが必要です）よろしいですか？')) return;
+      const mainForm = document.querySelector('form.meta-input-form');
+      mainForm.querySelectorAll('input[type="file"]').forEach(function (inp) { inp.disabled = true; });
       document.getElementById('remove-upload-index').value = activeDocIndex;
-      document.getElementById('remove-upload-form').submit();
+      document.getElementById('storage-action').value = 'remove';
+      if (mainForm.requestSubmit) mainForm.requestSubmit(); else mainForm.submit();
     });
 
     setupActiveDoc();

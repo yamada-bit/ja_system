@@ -2080,17 +2080,19 @@ class UploadStep2FormDepartmentInitialTests(TestCase):
         PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
 
     def test_admin_new_registration_defaults_to_own_department(self):
+        # 新規登録（edit_mode=False）はメタデータがファイルごと（department_0..）になった
+        # （2026-08-31、documents.forms.UploadStep2Form.per_file_mode）。
         from documents.forms import UploadStep2Form
 
         form = UploadStep2Form(employee=self.admin, edit_mode=False)
-        self.assertEqual(form["department"].value(), self.admin.department_id)
+        self.assertEqual(form["department_0"].value(), self.admin.department_id)
 
     def test_staff_new_registration_defaults_to_own_department(self):
         from documents.forms import UploadStep2Form
 
         form = UploadStep2Form(employee=self.staff, edit_mode=False)
-        self.assertEqual(form["department"].value(), self.staff.department_id)
-        self.assertTrue(form.fields["department"].disabled)
+        self.assertEqual(form["department_0"].value(), self.staff.department_id)
+        self.assertTrue(form.fields["department_0"].disabled)
 
     def test_admin_edit_screen_keeps_documents_own_department(self):
         """管理者が自部署とは異なる部署の文書を編集する場合、初期値は文書側の部署のままで
@@ -2164,21 +2166,22 @@ class UploadStep2FormGroupCategoryScopeTests(TestCase):
         response = self.client.post(
             "/documents/upload/step2/",
             {
+                # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、UploadStep2Form.per_file_mode。
                 "token": token,
-                "department": self.department.pk,
-                "group": self.other_group.pk,
-                "category": self.other_category.pk,
-                "year": 2026,
-                "retention_period": self.retention_period.pk,
-                "privacy_flag": "False",
-                "memo": "",
+                "department_0": self.department.pk,
+                "group_0": self.other_group.pk,
+                "category_0": self.other_category.pk,
+                "year_0": 2026,
+                "retention_period_0": self.retention_period.pk,
+                "privacy_flag_0": "False",
+                "memo_0": "",
                 "title_0": "テスト文書",
             },
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["form"].is_valid())
-        self.assertIn("group", response.context["form"].errors)
-        self.assertIn("category", response.context["form"].errors)
+        self.assertIn("group_0", response.context["form"].errors)
+        self.assertIn("category_0", response.context["form"].errors)
 
     def test_department_scope_overrides_cross_department_doc_visible_groups_grant(self):
         """documents/forms.pyの部署スコープ導入時、権限管理でdoc_visible_groupsに他部署の
@@ -2192,7 +2195,7 @@ class UploadStep2FormGroupCategoryScopeTests(TestCase):
         profile.doc_visible_groups.add(self.own_group, self.other_group)
 
         form = UploadStep2Form(employee=self.staff)
-        group_ids = set(form.fields["group"].queryset.values_list("pk", flat=True))
+        group_ids = set(form.fields["group_0"].queryset.values_list("pk", flat=True))
         self.assertIn(self.own_group.pk, group_ids)
         self.assertNotIn(self.other_group.pk, group_ids)
 
@@ -2589,13 +2592,14 @@ class UploadFileIOErrorTests(TestCase):
             response = self.client.post(
                 "/documents/upload/step2/",
                 {
+                    # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、per_file_mode。
                     "token": token,
-                    "department": self.department.pk,
-                    "group": group.pk,
-                    "category": category.pk,
-                    "year": 2026,
-                    "retention_period": retention_period.pk,
-                    "privacy_flag": "True",
+                    "department_0": self.department.pk,
+                    "group_0": group.pk,
+                    "category_0": category.pk,
+                    "year_0": 2026,
+                    "retention_period_0": retention_period.pk,
+                    "privacy_flag_0": "True",
                     "title_0": "テスト文書",
                 },
             )
@@ -2632,15 +2636,16 @@ class UploadStep2ViewValidationTests(TestCase):
         )
 
     def _valid_data(self, token):
+        # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、UploadStep2Form.per_file_mode。
         return {
             "token": token,
-            "department": self.department.pk,
-            "group": self.group.pk,
-            "category": self.category.pk,
-            "year": 2026,
-            "retention_period": self.retention_period.pk,
-            "privacy_flag": "False",
-            "memo": "",
+            "department_0": self.department.pk,
+            "group_0": self.group.pk,
+            "category_0": self.category.pk,
+            "year_0": 2026,
+            "retention_period_0": self.retention_period.pk,
+            "privacy_flag_0": "False",
+            "memo_0": "",
             "title_0": "テスト文書",
         }
 
@@ -2648,10 +2653,10 @@ class UploadStep2ViewValidationTests(TestCase):
         """必須項目（分類）欠落時、200で再描画されform.errorsに反映されること。"""
         step2 = self.client.get("/documents/upload/step2/")
         data = self._valid_data(step2.context["token"])
-        del data["group"]
+        del data["group_0"]
         response = self.client.post("/documents/upload/step2/", data)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("group", response.context["form"].errors)
+        self.assertIn("group_0", response.context["form"].errors)
 
         from documents.models import Document
 
@@ -2669,6 +2674,113 @@ class UploadStep2ViewValidationTests(TestCase):
         texts = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("二重に送信された可能性がある" in t for t in texts))
         self.assertFalse(Document.objects.exists())
+
+
+class UploadStep2PerFileMetadataTests(TestCase):
+    """保管画面２（新規保管）で複数ファイルを一括登録するとき、メタデータ（部署・分類・年・
+    カテゴリー・保存期間・個人情報・メモ）をバッチ共通ではなく **ファイルごとに個別入力** する
+    （2026-08-31ユーザー確定。documents.forms.UploadStep2Form.per_file_mode）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.group_a = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.group_b = Group.objects.create(code="B", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT)
+        self.cat_a = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group_a, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.cat_b = Category.objects.create(
+            code="002", name="カテゴリーＢ", group=self.group_b, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.rp1 = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.rp5 = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=5, period_unit=RetentionPeriodUnit.YEAR, display_order=2
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def _start_two_files(self):
+        self.client.post("/documents/upload/step1/", {"files": [
+            SimpleUploadedFile("a.pdf", b"AAAA", content_type="application/pdf"),
+            SimpleUploadedFile("b.pdf", b"BBBB", content_type="application/pdf"),
+        ]})
+        return self.client.get("/documents/upload/step2/").context["token"]
+
+    def test_each_file_saved_with_its_own_metadata(self):
+        from documents.models import Document
+
+        token = self._start_two_files()
+        self.client.post("/documents/upload/step2/", {
+            "token": token,
+            "department_0": self.department.pk, "group_0": self.group_a.pk,
+            "category_0": self.cat_a.pk, "year_0": 2025, "retention_period_0": self.rp1.pk,
+            "privacy_flag_0": "True", "memo_0": "メモA", "title_0": "文書A",
+            "department_1": self.department.pk, "group_1": self.group_b.pk,
+            "category_1": self.cat_b.pk, "year_1": 2026, "retention_period_1": self.rp5.pk,
+            "privacy_flag_1": "False", "memo_1": "メモB", "title_1": "文書B",
+        })
+        a = Document.objects.get(title="文書A")
+        b = Document.objects.get(title="文書B")
+        self.assertEqual(
+            (a.group_id, a.category_id, a.year, a.retention_period_id, a.privacy_flag, a.memo),
+            (self.group_a.pk, self.cat_a.pk, 2025, self.rp1.pk, True, "メモA"),
+        )
+        self.assertEqual(
+            (b.group_id, b.category_id, b.year, b.retention_period_id, b.privacy_flag, b.memo),
+            (self.group_b.pk, self.cat_b.pk, 2026, self.rp5.pk, False, "メモB"),
+        )
+        # 保存満了日は各ファイルの保存期間で個別に計算される。
+        self.assertNotEqual(a.expiry_date, b.expiry_date)
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 登録").count(), 2)
+
+    def test_second_file_invalid_blocks_all_and_reports_index(self):
+        from django.contrib.messages import get_messages
+
+        from documents.models import Document
+
+        token = self._start_two_files()
+        response = self.client.post("/documents/upload/step2/", {
+            "token": token,
+            "department_0": self.department.pk, "group_0": self.group_a.pk,
+            "category_0": self.cat_a.pk, "year_0": 2025, "retention_period_0": self.rp1.pk,
+            "privacy_flag_0": "True", "memo_0": "", "title_0": "文書A",
+            # 2件目は分類欠落
+            "department_1": self.department.pk, "category_1": self.cat_b.pk,
+            "year_1": 2026, "retention_period_1": self.rp5.pk,
+            "privacy_flag_1": "False", "memo_1": "", "title_1": "文書B",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("group_1", response.context["form"].errors)
+        self.assertEqual(response.context["active_doc_index"], 1)
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("2件目" in t for t in texts))
+        self.assertFalse(Document.objects.exists())
+
+    def test_form_file_data_and_first_error_file_index(self):
+        from documents.forms import UploadStep2Form
+
+        form = UploadStep2Form(
+            {
+                "department_0": self.department.pk, "group_0": self.group_a.pk,
+                "category_0": self.cat_a.pk, "year_0": 2025, "retention_period_0": self.rp1.pk,
+                "privacy_flag_0": "True", "memo_0": "x", "title_0": "A",
+                "department_1": self.department.pk, "category_1": self.cat_b.pk,
+                "year_1": 2026, "retention_period_1": self.rp5.pk,
+                "privacy_flag_1": "False", "memo_1": "", "title_1": "B",
+            },
+            employee=self.employee, file_count=2,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.first_error_file_index(), 1)  # group_1 欠落
+        self.assertEqual(form.file_data(0)["group"], self.group_a)
+        self.assertEqual(form.file_data(0)["title"], "A")
 
 
 class UploadBlockedFileTypeTests(TestCase):
@@ -2759,13 +2871,14 @@ class UploadStep2ImmediateExtractionTests(TestCase):
             response = self.client.post(
                 "/documents/upload/step2/",
                 {
+                    # 新規保管はメタデータがファイルごと（*_0）。2026-08-31、per_file_mode。
                     "token": self.token,
-                    "department": self.department.pk,
-                    "group": self.group.pk,
-                    "category": self.category.pk,
-                    "year": 2026,
-                    "retention_period": self.retention_period.pk,
-                    "privacy_flag": "True",
+                    "department_0": self.department.pk,
+                    "group_0": self.group.pk,
+                    "category_0": self.category.pk,
+                    "year_0": 2026,
+                    "retention_period_0": self.retention_period.pk,
+                    "privacy_flag_0": "True",
                     "title_0": "テスト文書",
                 },
             )
@@ -3132,7 +3245,9 @@ class EditDeleteViewTests(TestCase):
 
 class UploadStep2RemoveViewTests(TestCase):
     """保管画面２（登録）の「削除」ボタン＝表示中ファイルのアップロード取り消し
-    （2026-08-27ユーザー確定。他のファイルは登録処理を続行、入力途中は破棄）。"""
+    （2026-08-27ユーザー確定。他のファイルは登録処理を続行）。2026-08-31ユーザー要望で、
+    メインフォームごと送信（`action=remove`）し、他ファイルの入力値をサーバー側で詰め直して
+    保持する方式に変更（redirectせず render。UploadStep2View._handle_remove）。"""
 
     def setUp(self):
         self.department = Department.objects.create(
@@ -3150,52 +3265,66 @@ class UploadStep2RemoveViewTests(TestCase):
             {"files": [SimpleUploadedFile(n, b"dummy", content_type="application/pdf") for n in names]},
         )
 
-    def test_step2_get_renders_remove_button_and_hidden_form(self):
+    def test_step2_get_renders_remove_button_and_action_inputs(self):
         self._select_files("a.pdf", "b.pdf")
         response = self.client.get("/documents/upload/step2/")
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'id="btn-remove-upload"')
-        self.assertContains(response, 'id="remove-upload-form"')
-        self.assertContains(response, "/documents/upload/step2/remove/")
+        self.assertContains(response, 'name="action"')
+        self.assertContains(response, 'name="remove_index"')
+        # 旧・専用フォーム/URLは廃止済み。
+        self.assertNotContains(response, "/documents/upload/step2/remove/")
+        self.assertNotContains(response, 'id="remove-upload-form"')
 
     def test_remove_button_div_is_outside_memo_form_section(self):
         """html5 で「削除」ボタンの div は [4]メモ欄の form-section の外
-        （スクロール領域末尾）へ移動した（Rev1.4 追加の説明画像 image69/image70 と対応）。
-        form.memo は Textarea 単体で div を含まないため、メモ欄見出しと削除ボタンの間に
-        </div>（form-section の閉じ）が現れることで「外側にある」ことを判定できる。"""
+        （スクロール領域末尾）へ移動した（Rev1.4 追加の説明画像 image69/image70 と対応）。"""
         self._select_files("a.pdf", "b.pdf")
         content = self.client.get("/documents/upload/step2/").content.decode("utf-8")
-        memo_idx = content.index("[4] メモ欄")
+        memo_idx = content.rindex("[4] メモ欄")
         button_idx = content.index('id="btn-remove-upload"')
         self.assertIn("</div>", content[memo_idx:button_idx])
         self.assertLess(button_idx, content.index("storage-outer-actions"))
 
-    def test_remove_one_keeps_others_and_deletes_temp_file(self):
+    def test_remove_one_keeps_others_preserves_input_and_deletes_temp_file(self):
+        from pathlib import Path
+
+        from django.conf import settings
+
         from core.upload_services import get_pending_files
 
         self._select_files("a.pdf", "b.pdf")
         pending_before = get_pending_files(self.client.session, "documents_pending_upload")
         removed_temp = pending_before[0]["temp_name"]
+        step2 = self.client.get("/documents/upload/step2/")
 
-        response = self.client.post("/documents/upload/step2/remove/", {"index": "0"})
-        self.assertRedirects(response, "/documents/upload/step2/")
-
+        # 1件目を削除。2件目に入力済みのタイトル・メモを渡して保持されることを確認する。
+        response = self.client.post("/documents/upload/step2/", {
+            "token": step2.context["token"],
+            "action": "remove",
+            "remove_index": "0",
+            "department_0": self.department.pk, "title_0": "1件目タイトル", "memo_0": "1件目メモ",
+            "department_1": self.department.pk, "title_1": "2件目タイトル", "memo_1": "2件目メモ",
+        })
+        self.assertEqual(response.status_code, 200)  # redirectせず再描画
         pending_after = get_pending_files(self.client.session, "documents_pending_upload")
         self.assertEqual([p["original_name"] for p in pending_after], ["b.pdf"])
-
-        from pathlib import Path
-
-        from django.conf import settings
-
-        self.assertFalse(
-            (Path(settings.MEDIA_ROOT) / "tmp_uploads" / removed_temp).exists()
-        )
+        self.assertFalse((Path(settings.MEDIA_ROOT) / "tmp_uploads" / removed_temp).exists())
+        # 残った2件目の入力が1件目の位置（_0）へ詰め直されて表示されること。
+        form = response.context["form"]
+        self.assertEqual(form["title_0"].value(), "2件目タイトル")
+        self.assertEqual(form["memo_0"].value(), "2件目メモ")
+        # フォームはunbound（エラー表示なし）。
+        self.assertFalse(form.is_bound)
 
     def test_remove_last_pending_redirects_to_step1(self):
         from core.upload_services import get_pending_files
 
         self._select_files("only.pdf")
-        response = self.client.post("/documents/upload/step2/remove/", {"index": "0"})
+        step2 = self.client.get("/documents/upload/step2/")
+        response = self.client.post("/documents/upload/step2/", {
+            "token": step2.context["token"], "action": "remove", "remove_index": "0",
+        })
         self.assertRedirects(response, "/documents/upload/step1/")
         self.assertEqual(
             get_pending_files(self.client.session, "documents_pending_upload"), []
@@ -3203,10 +3332,16 @@ class UploadStep2RemoveViewTests(TestCase):
 
     def test_out_of_range_index_does_not_crash(self):
         self._select_files("a.pdf")
-        response = self.client.post("/documents/upload/step2/remove/", {"index": "5"})
+        step2 = self.client.get("/documents/upload/step2/")
+        response = self.client.post("/documents/upload/step2/", {
+            "token": step2.context["token"], "action": "remove", "remove_index": "5",
+        })
         self.assertRedirects(response, "/documents/upload/step2/")
 
     def test_non_numeric_index_is_rejected_gracefully(self):
         self._select_files("a.pdf")
-        response = self.client.post("/documents/upload/step2/remove/", {"index": "abc"})
+        step2 = self.client.get("/documents/upload/step2/")
+        response = self.client.post("/documents/upload/step2/", {
+            "token": step2.context["token"], "action": "remove", "remove_index": "abc",
+        })
         self.assertRedirects(response, "/documents/upload/step2/")

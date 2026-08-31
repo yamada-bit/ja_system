@@ -85,6 +85,27 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   `MAX_UPLOAD_SIZE_BYTES` とリバースプロキシのボディ上限に依存）をコメントで明記。
   `manage.py test documents contracts` 332件PASS（新規1件）。詳細はアーカイブ
   「チャンク分割アップロードのチャンクサイズを settings 化」節参照。
+- 保管画面２：複数件登録のメタデータをファイルごとの個別入力へ（2026-08-31、ユーザー依頼）：
+  新規保管で複数ファイルを一括選択したとき、部署・分類・年・カテゴリー・保存期間・個人情報・
+  メモ（契約書は契約日等）を「1回の入力でバッチ共通適用」から「ページャーで表示中のファイル
+  ごとに個別入力」へ変更（原本の `startRegisterMock()` はバッチ共通＝意図的な差異）。
+  `UploadStep2Form` が createモードで `PER_FILE_FIELDS` を `{name}_{i}` に複製、`file_data(i)` /
+  `first_error_file_index()` 追加。`core.upload_views.file_field_sets` ＋ storage2.html を
+  `.doc-fieldset` ループ化。編集画面（1ファイル）は挙動不変。続く追補で、複数件登録中の
+  「削除」（アップロード取り消し）が残るファイルの入力を保持するよう変更（メインフォームごと
+  `action=remove` で送信 → `UploadStep2View._handle_remove` が残りの入力値を詰め直して
+  unbound フォームの initial に載せ再描画。旧 `upload_step2_remove` URL/`BaseUploadStep2RemoveView`
+  は廃止）。契約書 storage2 の複数行 `{# #}` コメント生表示・`.form-row` 全行 flex-wrap による
+  契約期間行の折り返しも同時修正（`:has(.field-error)` に限定）。`manage.py test documents
+  contracts core` 470件PASS。詳細はアーカイブ「保管画面２：複数件登録のメタデータをファイル
+  ごとの個別入力へ」節（追補3つ含む）参照。
+- 保管画面２／編集画面のフィールドエラー表示位置を入力欄の下へ（2026-08-31、ユーザー指摘）：
+  `.form-row`（flex）内で素の `<div>` だったDjango必須エラーが入力欄の右隣に横並び表示されて
+  いたため、`django_widgets.css` に `.form-row:has(.field-error) { flex-wrap:wrap }` ＋
+  `.field-error`（flex-basis:100%、ラベル幅ぶん字下げ）を追加し、storage2/edit の4テンプレートの
+  エラー `<div>` を `class="field-error"` へ統一。実プレビューで分類・カテゴリーのエラーが
+  入力欄直下に出ることを実測確認。詳細はアーカイブ
+  「保管画面２／編集画面のフィールドエラー表示位置を入力欄の下へ」節参照。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

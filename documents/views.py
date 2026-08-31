@@ -52,15 +52,76 @@ class UploadStep1View(LoginRequiredMixin, upload_views.BaseUploadStep1View):
 
 
 class UploadStep2View(LoginRequiredMixin, View):
-    """screen-storage2（保管・登録）。複数ファイルを1回の入力（部署・分類・年・カテゴリー・
-    保存期間・個人情報・メモ）でまとめて登録する。HTML確定版はPDFプレビュー+ページャーで
-    1ファイルずつタイトルを編集する構成だが、本実装ではファイル一覧を並べてタイトルを個別入力
-    する形に簡略化している（機能的には同等。フェーズ7の画面突き合わせ検証で見た目の再現度を
-    再検討する）。
+    """screen-storage2（保管・登録）。複数ファイルを一括選択した場合、メタデータ（部署・分類・
+    年・カテゴリー・保存期間・個人情報・メモ）はページャーで表示中のファイルごとに個別入力する
+    （2026-08-31ユーザー確定。原本HTML確定版のJS `startRegisterMock()` はタイトル以外を
+    バッチ共通適用しており、ここは意図的な差異。UploadStep2Form docstring／
+    HTML_REIMPL_CHECKLIST_ARCHIVE.md「保管画面２：複数件登録のメタデータをファイルごとの
+    個別入力へ」参照）。保存ループは `form.file_data(i)` を通す。
     """
 
     template_name = "documents/storage2.html"
     form_id = "documents_upload_step2"
+
+    def _handle_remove(self, request, pending):
+        """「削除」ボタン＝表示中ファイルのアップロード取り消し。セッションの保留ファイル一覧から
+        1件外し、残りのファイルの入力値を詰め直して（core.upload_views.
+        remap_step2_initial_after_remove）フォームのinitialに載せ、そのまま再描画する
+        （redirectせず render。他ファイルの入力を保持するため。2026-08-31ユーザー要望）。"""
+        try:
+            index = int(request.POST.get("remove_index", ""))
+        except (TypeError, ValueError):
+            logger.warning(
+                "保管画面２ アップロード取り消しに不正なindexが送られました: employee_no=%s value=%r",
+                request.user.employee_no, request.POST.get("remove_index"),
+            )
+            return redirect("documents:upload_step2")
+        removed = upload_services.remove_pending_file(request.session, PENDING_SESSION_KEY, index)
+        if removed is None:
+            # 範囲外（多重送信等で既に件数が変わっている）。現状の一覧をそのまま再表示する。
+            return redirect("documents:upload_step2")
+        logger.info(
+            "保管画面２ アップロード取り消し: employee_no=%s file=%s",
+            request.user.employee_no, removed["original_name"],
+        )
+        remaining = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
+        if not remaining:
+            messages.info(request, "アップロードを取り消しました。文書を選択し直してください。")
+            return redirect("documents:upload_step1")
+        initial = upload_views.remap_step2_initial_after_remove(
+            request.POST, removed_index=index, new_count=len(remaining),
+            per_file_fields=UploadStep2Form.PER_FILE_FIELDS,
+        )
+        form = UploadStep2Form(
+            employee=request.user,
+            file_count=len(remaining),
+            initial_titles=[_strip_ext(item["original_name"]) for item in remaining],
+            initial=initial,
+        )
+        messages.info(request, f"「{removed['original_name']}」のアップロードを取り消しました。")
+        return self._render_form(
+            request, form, remaining, active_doc_index=min(index, len(remaining) - 1)
+        )
+
+    def _render_form(self, request, form, pending, active_doc_index=0):
+        """GET・バリデーションエラー再描画・「削除」後の再描画で共通の保管画面２レンダリング。"""
+        token = issue_token(request.session, self.form_id)
+        return render(
+            request,
+            self.template_name,
+            {
+                "form": form,
+                "file_rows": upload_views.file_rows(form, pending),
+                "file_field_sets": upload_views.file_field_sets(
+                    form, pending, UploadStep2Form.PER_FILE_FIELDS
+                ),
+                "active_doc_index": active_doc_index,
+                "token": token,
+                "mode": "create",
+                **_pending_preview_context(request, pending),
+                **_expiry_preview_context(form),
+            },
+        )
 
     def get(self, request):
         pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
@@ -71,25 +132,18 @@ class UploadStep2View(LoginRequiredMixin, View):
         form = UploadStep2Form(
             employee=request.user, file_count=len(pending), initial_titles=initial_titles
         )
-        token = issue_token(request.session, self.form_id)
-        return render(
-            request,
-            self.template_name,
-            {
-                "form": form,
-                "file_rows": upload_views.file_rows(form, pending),
-                "token": token,
-                "mode": "create",
-                **_pending_preview_context(request, pending),
-                **_expiry_preview_context(form),
-            },
-        )
+        return self._render_form(request, form, pending)
 
     def post(self, request):
         pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
         if not pending:
             messages.error(request, "保管する文書が選択されていません。")
             return redirect("documents:upload_step1")
+
+        # 「削除」（表示中ファイルのアップロード取り消し）。他ファイルの入力を保持したまま
+        # 再描画する（2026-08-31ユーザー要望）。二重送信トークンは消費しない（最終登録ではない）。
+        if request.POST.get("action") == "remove":
+            return self._handle_remove(request, pending)
 
         submitted_token = request.POST.get("token", "")
         if not consume_token(request.session, self.form_id, submitted_token):
@@ -98,27 +152,12 @@ class UploadStep2View(LoginRequiredMixin, View):
 
         form = UploadStep2Form(request.POST, employee=request.user, file_count=len(pending))
         if not form.is_valid():
-            token = issue_token(request.session, self.form_id)
-            return render(
-                request,
-                self.template_name,
-                {
-                    "form": form,
-                    "file_rows": upload_views.file_rows(form, pending),
-                    "token": token,
-                    "mode": "create",
-                    **_pending_preview_context(request, pending),
-                    **_expiry_preview_context(form),
-                },
-            )
+            error_index = form.first_error_file_index()
+            if len(pending) > 1:
+                messages.error(request, f"{error_index + 1}件目に入力エラーがあります。")
+            return self._render_form(request, form, pending, active_doc_index=error_index)
 
-        department = form.cleaned_data["department"]
-        if not can_select_department(request.user):
-            # disabledフィールドはブラウザから改ざんされてもクリーンデータには反映されない想定だが、
-            # サーバー側でも権限の無いユーザーの部署指定は無視し必ず自部署にする（IDOR対策）。
-            department = request.user.department
-
-        titles = form.titles(len(pending))
+        can_select = can_select_department(request.user)
         save_date = timezone.now()
         created = []
         try:
@@ -127,20 +166,27 @@ class UploadStep2View(LoginRequiredMixin, View):
             # ループ全体を1トランザクションにする（原本フィデリティ監査で発見：以前はループ内で
             # document.save()の都度コミットされ、途中失敗時に一部だけ登録される恐れがあった）。
             with transaction.atomic():
-                for pending_item, title in zip(pending, titles):
+                for i, pending_item in enumerate(pending):
+                    # メタデータは2026-08-31ユーザー確定でファイルごとに個別入力
+                    # （form.file_data(i)＝per_file_modeなら{name}_{i}を引く。UploadStep2Form参照）。
+                    fd = form.file_data(i)
+                    department = fd["department"]
+                    if not can_select:
+                        # disabledフィールドはブラウザから改ざんされてもクリーンデータに反映されない
+                        # 想定だが、サーバー側でも権限の無いユーザーの部署指定は無視し必ず自部署に
+                        # する（IDOR対策）。
+                        department = request.user.department
                     document = Document(
-                        title=title,
+                        title=fd["title"],
                         department=department,
-                        group=form.cleaned_data["group"],
-                        category=form.cleaned_data["category"],
-                        year=form.cleaned_data["year"],
-                        retention_period=form.cleaned_data["retention_period"],
-                        privacy_flag=form.cleaned_data["privacy_flag"],
-                        memo=form.cleaned_data["memo"],
+                        group=fd["group"],
+                        category=fd["category"],
+                        year=fd["year"],
+                        retention_period=fd["retention_period"],
+                        privacy_flag=fd["privacy_flag"],
+                        memo=fd["memo"],
                         uploader=request.user,
-                        expiry_date=calculate_expiry_date(
-                            save_date.date(), form.cleaned_data["retention_period"]
-                        ),
+                        expiry_date=calculate_expiry_date(save_date.date(), fd["retention_period"]),
                     )
                     temp_file = upload_services.open_pending_file(pending_item["temp_name"])
                     try:
@@ -209,6 +255,10 @@ class UploadStep2View(LoginRequiredMixin, View):
             {
                 "form": form,
                 "file_rows": upload_views.file_rows(form, pending),
+                "file_field_sets": upload_views.file_field_sets(
+                    form, pending, UploadStep2Form.PER_FILE_FIELDS
+                ),
+                "active_doc_index": 0,
                 "token": token,
                 "mode": "create",
                 "complete": {"created": created, "mode": "create"},
@@ -680,8 +730,13 @@ def _expiry_preview_context(form):
     """storage2.html・edit.htmlの保存満了日プレビュー用。formの`retention_period`選択肢に
     対する{pk: ISO日付文字列}を渡し、JS側はこれを引くだけで済むようにする（documents.services.
     expiry_date_previews docstring参照）。
+
+    保管画面２（新規保管）はメタデータがファイルごと（`retention_period_0`,…）になるため
+    無添字フィールドが無い。選択肢（queryset）は全ファイル共通なので`retention_period_0`を
+    代表に使う（UploadStep2Form.per_file_mode）。編集モードは従来どおり`retention_period`。
     """
-    return {"expiry_previews": expiry_date_previews(form.fields["retention_period"].queryset)}
+    field = form.fields.get("retention_period") or form.fields.get("retention_period_0")
+    return {"expiry_previews": expiry_date_previews(field.queryset)}
 
 
 def _pending_preview_context(request, pending):
@@ -706,16 +761,6 @@ class PendingPreviewView(LoginRequiredMixin, upload_views.BasePendingPreviewView
 
     pending_session_key = PENDING_SESSION_KEY
     kind = "document"
-
-
-class UploadStep2RemoveView(LoginRequiredMixin, upload_views.BaseUploadStep2RemoveView):
-    """保管画面２（登録）の「削除」ボタン。表示中の1ファイルだけをアップロード取り消しする。
-    実体はcore.upload_views.BaseUploadStep2RemoveViewに集約（contracts側と対称）。"""
-
-    pending_session_key = PENDING_SESSION_KEY
-    step1_url_name = "documents:upload_step1"
-    step2_url_name = "documents:upload_step2"
-    entity_label = "文書"
 
 
 class SearchView(LoginRequiredMixin, View):

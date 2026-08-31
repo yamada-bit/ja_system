@@ -111,14 +111,73 @@ class UploadStep1View(RequiresContractEditMixin, upload_views.BaseUploadStep1Vie
 
 
 class UploadStep2View(RequiresContractEditMixin, View):
-    """screen-storage2（契約書モード・登録）。関連書類の添付は、バッチ内ファイルが1件の場合のみ
-    対応する（複数契約書を一括登録するバッチに対して関連書類をどう振り分けるかはHTML/xlsxに
-    明記が無いため、あいまいさを避けるスコープ限定）。保管フロー全体のURL直叩き対策は
-    RequiresContractEditMixin参照。
+    """screen-storage2（契約書モード・登録）。複数ファイルを一括選択した場合、メタデータ
+    （部署・分類・年・カテゴリー・契約日等・メモ）も関連書類もページャーで表示中のファイル
+    ごとに個別入力する（メタデータのファイルごと化は2026-08-31ユーザー確定、
+    documents.views.UploadStep2View／UploadStep2Form docstring参照。関連書類は
+    `related_files_{index}` で以前から一括登録対応済み）。保存ループは `form.file_data(i)` を通す。
+    保管フロー全体のURL直叩き対策は RequiresContractEditMixin参照。
     """
 
     template_name = "contracts/storage2.html"
     form_id = "contracts_upload_step2"
+
+    def _render_form(self, request, form, pending, active_doc_index=0):
+        """GET・バリデーションエラー再描画・「削除」後の再描画で共通の保管画面２レンダリング。"""
+        token = issue_token(request.session, self.form_id)
+        return render(
+            request,
+            self.template_name,
+            {
+                "form": form,
+                "file_rows": upload_views.file_rows(form, pending),
+                "file_field_sets": upload_views.file_field_sets(
+                    form, pending, UploadStep2Form.PER_FILE_FIELDS
+                ),
+                "active_doc_index": active_doc_index,
+                "token": token,
+                "mode": "create",
+                **_pending_preview_context(request, pending),
+            },
+        )
+
+    def _handle_remove(self, request, pending):
+        """「削除」ボタン＝表示中ファイルのアップロード取り消し。残りのファイルの入力値を
+        詰め直して再描画する（documents.views.UploadStep2View._handle_remove と同じ。
+        契約書の関連書類はファイル入力のためブラウザ仕様で復元不可＝選び直しが必要）。"""
+        try:
+            index = int(request.POST.get("remove_index", ""))
+        except (TypeError, ValueError):
+            logger.warning(
+                "保管画面２ アップロード取り消しに不正なindexが送られました: employee_no=%s value=%r",
+                request.user.employee_no, request.POST.get("remove_index"),
+            )
+            return redirect("contracts:upload_step2")
+        removed = upload_services.remove_pending_file(request.session, PENDING_SESSION_KEY, index)
+        if removed is None:
+            return redirect("contracts:upload_step2")
+        logger.info(
+            "保管画面２ アップロード取り消し: employee_no=%s file=%s",
+            request.user.employee_no, removed["original_name"],
+        )
+        remaining = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
+        if not remaining:
+            messages.info(request, "アップロードを取り消しました。契約書を選択し直してください。")
+            return redirect("contracts:upload_step1")
+        initial = upload_views.remap_step2_initial_after_remove(
+            request.POST, removed_index=index, new_count=len(remaining),
+            per_file_fields=UploadStep2Form.PER_FILE_FIELDS,
+        )
+        form = UploadStep2Form(
+            employee=request.user,
+            file_count=len(remaining),
+            initial_titles=[_strip_ext(item["original_name"]) for item in remaining],
+            initial=initial,
+        )
+        messages.info(request, f"「{removed['original_name']}」のアップロードを取り消しました。")
+        return self._render_form(
+            request, form, remaining, active_doc_index=min(index, len(remaining) - 1)
+        )
 
     def get(self, request):
         pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
@@ -129,24 +188,17 @@ class UploadStep2View(RequiresContractEditMixin, View):
         form = UploadStep2Form(
             employee=request.user, file_count=len(pending), initial_titles=initial_titles
         )
-        token = issue_token(request.session, self.form_id)
-        return render(
-            request,
-            self.template_name,
-            {
-                "form": form,
-                "file_rows": upload_views.file_rows(form, pending),
-                "token": token,
-                "mode": "create",
-                **_pending_preview_context(request, pending),
-            },
-        )
+        return self._render_form(request, form, pending)
 
     def post(self, request):
         pending = upload_services.get_pending_files(request.session, PENDING_SESSION_KEY)
         if not pending:
             messages.error(request, "保管する契約書が選択されていません。")
             return redirect("contracts:upload_step1")
+
+        # 「削除」（表示中ファイルのアップロード取り消し）。他ファイルの入力を保持したまま再描画。
+        if request.POST.get("action") == "remove":
+            return self._handle_remove(request, pending)
 
         submitted_token = request.POST.get("token", "")
         if not consume_token(request.session, self.form_id, submitted_token):
@@ -155,24 +207,12 @@ class UploadStep2View(RequiresContractEditMixin, View):
 
         form = UploadStep2Form(request.POST, employee=request.user, file_count=len(pending))
         if not form.is_valid():
-            token = issue_token(request.session, self.form_id)
-            return render(
-                request,
-                self.template_name,
-                {
-                    "form": form,
-                    "file_rows": upload_views.file_rows(form, pending),
-                    "token": token,
-                    "mode": "create",
-                    **_pending_preview_context(request, pending),
-                },
-            )
+            error_index = form.first_error_file_index()
+            if len(pending) > 1:
+                messages.error(request, f"{error_index + 1}件目に入力エラーがあります。")
+            return self._render_form(request, form, pending, active_doc_index=error_index)
 
-        department = form.cleaned_data["department"]
-        if not can_select_department(request.user):
-            department = request.user.department
-
-        titles = form.titles(len(pending))
+        can_select = can_select_department(request.user)
         save_date = timezone.now()
         created = []
         created_related = []
@@ -182,20 +222,26 @@ class UploadStep2View(RequiresContractEditMixin, View):
             # 中途半端な状態を残さないよう、ループ全体を1トランザクションにする
             # （documents.views.UploadStep2Viewと同じ理由。原本フィデリティ監査で発見）。
             with transaction.atomic():
-                for doc_index, (pending_item, title) in enumerate(zip(pending, titles)):
+                for doc_index, pending_item in enumerate(pending):
+                    # メタデータは2026-08-31ユーザー確定でファイルごとに個別入力
+                    # （form.file_data(i)。documents.views.UploadStep2Viewと同じ）。
+                    fd = form.file_data(doc_index)
+                    department = fd["department"]
+                    if not can_select:
+                        department = request.user.department
                     contract = Contract(
-                        title=title,
+                        title=fd["title"],
                         department=department,
-                        group=form.cleaned_data["group"],
-                        category=form.cleaned_data["category"],
-                        year=form.cleaned_data["year"],
-                        contract_date=form.cleaned_data["contract_date"],
-                        contract_period_start=form.cleaned_data["contract_period_start"],
-                        contract_period_end=form.cleaned_data["contract_period_end"],
-                        renewal_date=form.cleaned_data["renewal_date"],
-                        contract_amount=form.cleaned_data["contract_amount"],
-                        contract_partner=form.cleaned_data["contract_partner"],
-                        memo=form.cleaned_data["memo"],
+                        group=fd["group"],
+                        category=fd["category"],
+                        year=fd["year"],
+                        contract_date=fd["contract_date"],
+                        contract_period_start=fd["contract_period_start"],
+                        contract_period_end=fd["contract_period_end"],
+                        renewal_date=fd["renewal_date"],
+                        contract_amount=fd["contract_amount"],
+                        contract_partner=fd["contract_partner"],
+                        memo=fd["memo"],
                         uploader=request.user,
                         expiry_date=calculate_expiry_date(save_date.date()),
                     )
@@ -265,6 +311,10 @@ class UploadStep2View(RequiresContractEditMixin, View):
             {
                 "form": form,
                 "file_rows": upload_views.file_rows(form, pending),
+                "file_field_sets": upload_views.file_field_sets(
+                    form, pending, UploadStep2Form.PER_FILE_FIELDS
+                ),
+                "active_doc_index": 0,
                 "token": token,
                 "mode": "create",
                 "complete": {"created": created, "mode": "create"},
@@ -954,14 +1004,3 @@ class PendingPreviewView(RequiresContractEditMixin, upload_views.BasePendingPrev
 
     pending_session_key = PENDING_SESSION_KEY
     kind = "contract"
-
-
-class UploadStep2RemoveView(RequiresContractEditMixin, upload_views.BaseUploadStep2RemoveView):
-    """保管画面２（登録）の「削除」ボタン。表示中の1ファイルだけをアップロード取り消しする。
-    実体はcore.upload_views.BaseUploadStep2RemoveViewに集約（documents側と対称）。保管フローの
-    一部のためRequiresContractEditMixinを適用する。"""
-
-    pending_session_key = PENDING_SESSION_KEY
-    step1_url_name = "contracts:upload_step1"
-    step2_url_name = "contracts:upload_step2"
-    entity_label = "契約書"

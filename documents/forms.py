@@ -1,3 +1,4 @@
+import copy
 import datetime
 import logging
 
@@ -25,15 +26,30 @@ API_OPTIONS_URL = reverse_lazy("documents:api_options")
 
 
 class UploadStep2Form(forms.Form):
-    """screen-storage2（文書モード）の保管先・文書情報フォーム。バッチ内の全ファイルに共通の
-    メタデータ（部署・分類・年・カテゴリー・保存期間・個人情報・メモ）を1回の入力で適用する
-    （HTML確定版のJSも`startRegisterMock()`で分類・年・カテゴリー等をバッチ全体に共通適用しており、
-    ファイルごとに異なるのはタイトルのみ＝別途`title_0`,`title_1`,...を動的に追加する）。
+    """screen-storage2（文書モード）の保管先・文書情報フォーム。
+
+    新規保管（createモード＝`edit_mode=False`）では、複数ファイルを一括選択した場合でも
+    **メタデータ（部署・分類・年・カテゴリー・保存期間・個人情報・メモ）をファイルごとに
+    個別入力する**（2026-08-31ユーザー確定。ページャーで表示中のファイルの分だけ設定する）。
+    そのため、`PER_FILE_FIELDS`の各フィールドをファイル数ぶん複製して`{name}_0`,`{name}_1`,…に
+    差し替える（タイトルも従来どおり`title_0`,`title_1`,…）。原本HTML確定版のJS
+    （`startRegisterMock()`）はタイトル以外をバッチ全体へ共通適用しており、ここは原本との
+    意図的な差異（ユーザー明示依頼のため原本一致よりユーザー指示を優先。CLAUDE.md
+    「原本フィデリティに関する運用方針」）。
+
+    編集モード（`edit_mode=True`＝DocumentEditView／BulkEditView、常に1ファイル）は複製せず
+    無添字（`department`,`group`,…）のまま。ビューの保存ループは`file_data(i)`を通すことで
+    どちらのモードでも分岐しない。
 
     部署/分類/カテゴリーは原本通り`core.widgets.PopupSelectWidget`（読み取り専用テキスト＋
     「選択」ボタン→ポップアップ）を使う。年・保存期間は原本でも素の`<select>`のため、
     Djangoの既定ウィジェットのままにしている。
     """
+
+    # createモードでファイルごとに複製する項目名（タイトルは別枠でtitle_Nとして追加）。
+    PER_FILE_FIELDS = (
+        "department", "group", "year", "category", "retention_period", "privacy_flag", "memo",
+    )
 
     department = forms.ModelChoiceField(
         label="部署",
@@ -109,41 +125,70 @@ class UploadStep2Form(forms.Form):
     def __init__(self, *args, employee=None, file_count=1, initial_titles=None, edit_mode=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.employee = employee
+        self.file_count = file_count
+        # createモードはメタデータ項目もファイルごと（{name}_{i}）。編集モードは無添字のまま。
+        self.per_file_mode = not edit_mode
         current = datetime.date.today().year
-        # 編集モード（DocumentEditView）では選択肢に対象の現在の年を必ず含める
-        # （core.forms.year_choices_with_existingのdocstring参照。含めないと、直近ウィンドウ外の
-        # 古い年を持つ文書を年欄に触れずに更新しただけで年が意図せず書き換わってしまう）。
-        self.fields["year"].choices = year_choices_with_existing(self.initial.get("year"))
-        self.fields["year"].initial = current
-        # xlsx 保管!B78-82: 部署名欄「選択」ボタンは権限管理で権限が"管理者"のユーザのみ表示
-        # （B79-81）。管理者以外はボタンを非表示にした上で自部署固定（読み取り専用）にする
-        # （ボタン非表示はcore.widgets.PopupSelectWidget側。改ざん防止のためPOST値も無視し
-        # view側で強制する）。
-        # self.initial（Formのinitial=辞書）はself.fields[x].initialより解決時に優先されるため
-        # （Django BaseForm.get_initial_for_field）、view側から渡されたinitial={"department": ...}を
-        # 確実に上書きするにはここも更新する必要がある。
-        if employee is not None and not can_select_department(employee):
-            self.fields["department"].disabled = True
-            self.initial["department"] = employee.department_id
-        elif employee is not None and not edit_mode:
-            # B82「初期値はログインユーザーの部署名をセット」は新規登録画面（管理者は「選択」
-            # ボタンで別部署に変更可能）。編集画面は既存文書の部署をview側から渡すため、
-            # ここで上書きしない（上書きすると、年欄で既に修正した「一切触れていないのに
-            # 値が意図せず書き換わる」のと同種の事故になる。documents.views.DocumentEditView
-            # は既存documentのdepartmentをinitialとして渡している）。
-            self.initial["department"] = employee.department_id
-        # xlsx 権限管理!B172-175(Rev1.1)「文書管理-文書-保存満了日変更」。OFFの場合、保存済み
-        # 文書の保存期間は編集不可（新規保管時はまだ「保存済み」ではないため対象外）。
-        if edit_mode and employee is not None and not can_edit_retention(employee):
-            self.fields["retention_period"].disabled = True
+
+        if self.per_file_mode:
+            # PER_FILE_FIELDS をファイル数ぶん複製して {name}_0.. に差し替える（素の name は消す）。
+            # Field.__deepcopy__ が widget.attrs も複製するため、各コピーの属性は独立する。
+            for name in self.PER_FILE_FIELDS:
+                base_field = self.fields.pop(name)
+                for i in range(file_count):
+                    self.fields[f"{name}_{i}"] = copy.deepcopy(base_field)
+
+        def fname(base, i):
+            return f"{base}_{i}" if self.per_file_mode else base
+
         # xlsx 保管!P139,P174(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
         group_qs, category_qs = scoped_group_and_category_querysets(
             doc_kbn=DocKbn.DOCUMENT, kind="document", employee=employee
         )
-        self.fields["group"].queryset = group_qs
-        self.fields["group"].widget.queryset = group_qs
-        self.fields["category"].queryset = category_qs
-        self.fields["category"].widget.queryset = category_qs
+
+        for i in range(file_count):
+            # 年: 実行時の直近年で選択肢生成。編集モードでは対象の現在の年を必ず含める
+            # （core.forms.year_choices_with_existing docstring。含めないと年欄に触れず更新
+            # しただけで年が意図せず書き換わる）。createは既存年が無いため常にNone。
+            year_field = self.fields[fname("year", i)]
+            year_field.choices = year_choices_with_existing(
+                None if self.per_file_mode else self.initial.get("year")
+            )
+            year_field.initial = current
+
+            # xlsx 保管!B78-82: 部署名欄「選択」ボタンは権限が"管理者"のユーザのみ表示。管理者以外は
+            # ボタン非表示＋自部署固定（読み取り専用）。self.initial（Formのinitial辞書）は
+            # fields[x].initialより優先されるため（Django BaseForm.get_initial_for_field）、
+            # view側initialを確実に上書きするにはここも更新する。
+            dept_field = self.fields[fname("department", i)]
+            if employee is not None and not can_select_department(employee):
+                dept_field.disabled = True
+                self.initial[fname("department", i)] = employee.department_id
+            elif employee is not None and not edit_mode:
+                # B82「初期値はログインユーザーの部署名をセット」は新規登録画面のみ。編集画面は
+                # 既存文書の部署をview側がinitialで渡すため上書きしない。setdefaultにしているのは、
+                # 「削除」（アップロード取り消し）後の再描画でview側が保持済みの部署をinitialで
+                # 渡してくるため（2026-08-31、core.upload_views.remap_step2_initial_after_remove）。
+                self.initial.setdefault(fname("department", i), employee.department_id)
+
+            # xlsx 権限管理!B172-175(Rev1.1)「文書管理-文書-保存満了日変更」OFFで保存済み文書の
+            # 保存期間は編集不可（新規保管はまだ「保存済み」でないため対象外）。
+            if edit_mode and employee is not None and not can_edit_retention(employee):
+                self.fields[fname("retention_period", i)].disabled = True
+
+            for base, qs in (("group", group_qs), ("category", category_qs)):
+                f = self.fields[fname(base, i)]
+                f.queryset = qs
+                f.widget.queryset = qs
+
+            # per_file_mode では同一idのwidgetが複数出るため添字化する。retention_period の
+            # onchange は保存満了日プレビュー（storage2.html の calculateExpiryDate(idx)）と連動。
+            if self.per_file_mode:
+                rp_attrs = self.fields[f"retention_period_{i}"].widget.attrs
+                rp_attrs["id"] = f"storage-period-{i}"
+                rp_attrs["onchange"] = f"calculateExpiryDate({i})"
+                self.fields[f"year_{i}"].widget.attrs["id"] = f"storage-year-{i}"
+
         initial_titles = initial_titles or []
         for i in range(file_count):
             initial = initial_titles[i] if i < len(initial_titles) else ""
@@ -151,8 +196,24 @@ class UploadStep2Form(forms.Form):
                 label=f"文書タイトル({i + 1})", initial=initial, max_length=255
             )
 
-    def titles(self, file_count):
-        return [self.cleaned_data[f"title_{i}"] for i in range(file_count)]
+    def file_data(self, i):
+        """i番目のファイルとして保存するクリーン値の辞書（キーは PER_FILE_FIELDS ＋ "title"）。
+        per_file_mode なら `{name}_{i}` を、編集モードなら無添字を引く（ビューの保存ループを
+        モードで分岐させないため）。"""
+        suffix = f"_{i}" if self.per_file_mode else ""
+        data = {name: self.cleaned_data[f"{name}{suffix}"] for name in self.PER_FILE_FIELDS}
+        data["title"] = self.cleaned_data[f"title_{i}"]
+        return data
+
+    def first_error_file_index(self):
+        """最初に入力エラーを持つファイルの添字（無ければ0）。per_file_mode でのみ意味を持つ。"""
+        if not self.per_file_mode:
+            return 0
+        for i in range(self.file_count):
+            keys = {f"{name}_{i}" for name in self.PER_FILE_FIELDS} | {f"title_{i}"}
+            if keys & set(self.errors):
+                return i
+        return 0
 
 
 class SearchForm(forms.Form):

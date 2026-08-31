@@ -167,61 +167,6 @@ class BaseUploadStep1View(View):
         }
 
 
-class BaseUploadStep2RemoveView(View):
-    """保管画面２（登録）の「削除」ボタン共通実装。ページャーで表示中の1ファイルだけを
-    セッションの保留一覧から外し（実体も削除）、他のファイルはそのまま登録フローを続行させる
-    （2026-08-27ユーザー確定。xlsx 保管!B197-198「誤ってアップロードした文書、不要な文書を
-    削除する。(本登録から除外する)」に対応）。まだDBレコードは生成されていないため論理削除
-    （EditDeleteView）とは別物で、監査ログの対象にもしない（logger.infoのみ）。
-
-    documents側はLoginRequiredMixin、contracts側はRequiresContractEditMixinと要求する認可が
-    異なるため、認証・認可ミックスインはベースに含めず継承側で組み合わせる
-    （BaseUploadStep1Viewと同じ方針）。`pending_session_key`/`step1_url_name`/`step2_url_name`/
-    `entity_label`をクラス変数で指定して継承する。
-    """
-
-    pending_session_key = None
-    step1_url_name = None
-    step2_url_name = None
-    entity_label = None
-
-    def post(self, request):
-        try:
-            index = int(request.POST.get("index", ""))
-        except (TypeError, ValueError):
-            # indexはstorage2.htmlのJS（activeDocIndex）が埋めるhidden値で通常は正しい整数。
-            # 壊れたリクエスト・改ざんの兆候としてログに残し、そのまま保管画面２へ戻す。
-            logger.warning(
-                "アップロード取り消しに不正なindexが送られました: employee_no=%s value=%r",
-                request.user.employee_no,
-                request.POST.get("index"),
-            )
-            return redirect(self.step2_url_name)
-
-        removed = upload_services.remove_pending_file(
-            request.session, self.pending_session_key, index
-        )
-        if removed is None:
-            # 範囲外（多重送信等で既に件数が変わっている）。エラー表示はせず現状の一覧を再表示する。
-            return redirect(self.step2_url_name)
-
-        logger.info(
-            "保管画面２ アップロード取り消し: employee_no=%s file=%s",
-            request.user.employee_no,
-            removed["original_name"],
-        )
-
-        remaining = upload_services.get_pending_files(request.session, self.pending_session_key)
-        if not remaining:
-            messages.info(
-                request,
-                f"アップロードを取り消しました。{self.entity_label}を選択し直してください。",
-            )
-            return redirect(self.step1_url_name)
-        messages.info(request, f"「{removed['original_name']}」のアップロードを取り消しました。")
-        return redirect(self.step2_url_name)
-
-
 def file_rows(form, pending):
     """テンプレート側で`{{ item.original_name }}`と対応する`title_N`入力欄を並べて表示するための
     (pendingの要素, BoundField)組を作る。title_Nはファイル数に応じて動的に追加されるフィールドの
@@ -230,6 +175,48 @@ def file_rows(form, pending):
     集約した（品質レビューで発見、2026-08-25修正）。
     """
     return [(item, form[f"title_{i}"]) for i, item in enumerate(pending)]
+
+
+def remap_step2_initial_after_remove(post_data, *, removed_index, new_count, per_file_fields):
+    """保管画面２で「削除」（表示中ファイルのアップロード取り消し）を押したとき、残った
+    ファイルに入力済みだった値を詰め直して `UploadStep2Form(initial=...)` に渡せる辞書にする
+    （2026-08-31ユーザー要望：削除しても他ファイルの入力を保持する）。
+
+    削除位置より後ろのファイルの値を1つ前の添字へずらす。空文字・未送信キーは入れず、
+    フォーム側の既定値・プレースホルダ（部署＝自部署、年＝当年、タイトル＝ファイル名等）に任せる。
+    ファイル入力（contracts の `related_files_N`）はブラウザ仕様で値を復元できないため対象外。
+    """
+    initial = {}
+    src = 0
+    for dst in range(new_count):
+        if src == removed_index:
+            src += 1
+        for name in list(per_file_fields) + ["title"]:
+            key_src = f"title_{src}" if name == "title" else f"{name}_{src}"
+            key_dst = f"title_{dst}" if name == "title" else f"{name}_{dst}"
+            value = post_data.get(key_src)
+            if value not in (None, ""):
+                initial[key_dst] = value
+        src += 1
+    return initial
+
+
+def file_field_sets(form, pending, field_names):
+    """保管画面２（新規保管）でメタデータをファイルごとに個別入力するための、ファイル単位の
+    フィールド束をテンプレートへ渡す。`form.per_file_mode`（documents/contracts.forms.
+    UploadStep2Form、2026-08-31ユーザー確定）なら`{name}_{i}`を、そうでなければ無添字を引く。
+
+    各要素は `{"item": pendingの要素, "index": i, "fields": {name: BoundField, ..., "title": BoundField}}`。
+    テンプレートは `{{ fs.fields.department }}` のようにドット参照する。
+    """
+    per_file = getattr(form, "per_file_mode", False)
+    sets = []
+    for i, item in enumerate(pending):
+        suffix = f"_{i}" if per_file else ""
+        fields = {name: form[f"{name}{suffix}"] for name in field_names}
+        fields["title"] = form[f"title_{i}"]
+        sets.append({"item": item, "index": i, "fields": fields})
+    return sets
 
 
 def build_pending_preview_context(request, pending, *, kind, preview_url_name):

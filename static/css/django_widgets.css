@@ -55,3 +55,26 @@ a.sort-link {
   color: inherit;
   text-decoration: none;
 }
+
+/*
+ * 保管画面２／編集画面のメタ入力行（.form-row）はflexで1行に詰めるため、Djangoの
+ * フィールドエラー（分類・カテゴリー等の必須未入力メッセージ）を素の<div>で出すと、
+ * 入力欄や「選択」ボタンの右隣に横並びで表示されてしまう。エラーは対象の入力欄の
+ * 真下に出るのが自然なため、専用クラス.field-errorを付けて行内で折り返し
+ * （flex-basis:100%）、ラベル幅（.form-row label = 100px）ぶん字下げして入力欄の
+ * 下辺に揃える。
+ *
+ * flex-wrapは「エラーを含む行だけ」に:has()で限定する。全.form-rowにflex-wrapを付けると、
+ * 契約書保管画面の「契約期間 [from] ～ [to]」のように元々1行に収める前提で幅がはみ出す
+ * 行まで折り返してしまうため（2026-08-31、ユーザー報告で判明）。
+ */
+.form-row:has(.field-error) {
+  flex-wrap: wrap;
+}
+.form-row .field-error {
+  flex-basis: 100%;
+  margin-left: 100px;
+  margin-top: 2px;
+  color: #c0392b;
+  font-size: 12px;
+}
