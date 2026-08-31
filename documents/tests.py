@@ -319,6 +319,24 @@ class SearchQuerysetTests(TestCase):
         )
         self.assertEqual(list(qs), [self.doc_apple_only])
 
+    def test_list_queryset_defers_heavy_text_columns(self):
+        """一覧クエリは表示しない重いTextField（extracted_text等）を取得しない
+        （core.search_services.LIST_DEFERRED_TEXT_FIELDS）。数千件規模で1ページ100行分の
+        OCR全文を毎回転送していた無駄を避けるための最適化のリグレッションガード。
+        deferされた列へ触れると追加クエリ（DeferredAttributeの遅延ロード）が飛ぶことで検証する。
+        """
+        from documents.models import Document
+
+        Document.objects.filter(pk=self.doc_apple_only.pk).update(
+            extracted_text="本文" * 100, extracted_text_normalized="ほんぶん" * 100
+        )
+        form = SearchForm(data={})
+        obj = next(o for o in build_queryset(form, employee=self.employee) if o.pk == self.doc_apple_only.pk)
+        with self.assertNumQueries(0):
+            _ = obj.title  # 通常フィールドは取得済みで追加クエリ無し
+        with self.assertNumQueries(1):
+            _ = obj.extracted_text  # deferされているので遅延ロードで1クエリ
+
 
 class SearchFormRadioDefaultsInitialAccessTests(TestCase):
     """core.forms.apply_radio_defaults / core.widgets.InlineRadioSelectの「初回アクセス時

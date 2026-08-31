@@ -149,6 +149,23 @@ class SearchQuerysetTests(TestCase):
         )
         self.assertEqual(list(qs), [self.contract_apple_only])
 
+    def test_list_queryset_defers_heavy_text_columns(self):
+        """documents.tests.SearchQuerysetTests.test_list_queryset_defers_heavy_text_columnsと
+        同じ理由（core.search_services.LIST_DEFERRED_TEXT_FIELDS）。"""
+        from contracts.models import Contract
+
+        Contract.objects.filter(pk=self.contract_apple_only.pk).update(
+            extracted_text="本文" * 100, extracted_text_normalized="ほんぶん" * 100
+        )
+        form = SearchForm(data={})
+        obj = next(
+            o for o in build_queryset(form, employee=self.employee) if o.pk == self.contract_apple_only.pk
+        )
+        with self.assertNumQueries(0):
+            _ = obj.title
+        with self.assertNumQueries(1):
+            _ = obj.extracted_text
+
 
 class SearchFormDepartmentScopeQueryTests(TestCase):
     """SearchForm.__init__の部署スコープ計算（contract_searchable_department_ids）。

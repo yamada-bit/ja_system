@@ -10,6 +10,21 @@ from core.text_normalization import normalize_for_search
 # build_search_audit_messageで単独の「項目：値」として列挙すると意味が通らないため除外する。
 _SEARCH_AUDIT_EXCLUDED_FIELDS = frozenset({"title_match", "freeword_match", "save_day_kbn"})
 
+# screen-search一覧クエリ（documents/contracts.search_services.build_queryset）で
+# .defer()する重いTextFieldカラム。OCR全文（extracted_text）とその正規化シャドウ、
+# タイトル/メモの正規化シャドウは一覧テーブルに一切表示しないのに、defer無しだと
+# 1ページ100行分すべて取得してしまう（スキャン文書のextracted_textは1件数KB〜数十KBに
+# なり得るため、100行で数MBをPostgres→Pythonモデルインスタンスへ毎回転送・保持していた）。
+# *_normalizedはfilter()の絞り込みでは使うが、それはDB側で評価されるためdeferしても
+# 検索は正しく効く（取得列から外れるだけ）。詳細ポップアップ(core.api)・編集画面は
+# build_querysetを通らない別クエリのため影響しない。
+LIST_DEFERRED_TEXT_FIELDS = (
+    "extracted_text",
+    "extracted_text_normalized",
+    "title_normalized",
+    "memo_normalized",
+)
+
 
 def apply_sort(qs, sort_key, direction, sort_fields):
     """screen-searchの検索結果一覧ソート処理。documents.search_services.apply_sort/

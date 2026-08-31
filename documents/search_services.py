@@ -49,6 +49,9 @@ def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort
     else:
         qs = Document.objects.filter(is_deleted=False)
     qs = qs.select_related("department", "group", "category", "retention_period", "uploader")
+    # 一覧に表示しない重いTextFieldカラムは取得しない（core.search_services.
+    # LIST_DEFERRED_TEXT_FIELDS docstring参照）。
+    qs = qs.defer(*search_services.LIST_DEFERRED_TEXT_FIELDS)
 
     if not can_select_department(employee):
         # xlsx 検索・閲覧・変更!B48(Rev1.1)「閲覧部署範囲テーブルを参照し、部署の統合/分割時の

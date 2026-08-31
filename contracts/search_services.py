@@ -41,6 +41,9 @@ def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort
     else:
         qs = Contract.objects.filter(is_deleted=False)
     qs = qs.select_related("department", "group", "category", "uploader")
+    # 一覧に表示しない重いTextFieldカラムは取得しない（core.search_services.
+    # LIST_DEFERRED_TEXT_FIELDS docstring参照）。
+    qs = qs.defer(*search_services.LIST_DEFERRED_TEXT_FIELDS)
 
     # 管理者は無制限（None）。非管理者は自部署＋閲覧部署範囲テーブル（部署統合・分割）＋
     # 権限管理「契約書-部門間閲覧設定」で追加された部署に絞る
