@@ -64,6 +64,10 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                # base.html の検索結果詳細ポップアップが PDF.js プレビューの要否を知る必要が
+                # あり、当ポップアップは全画面共通のため各ビューの get_context_data ではなく
+                # コンテキストプロセッサで pdf_js_preview_enabled を全テンプレートへ渡す。
+                "core.context_processors.preview_settings",
             ],
         },
     },
@@ -224,6 +228,19 @@ POPPLER_PATH = env("POPPLER_PATH", default="")
 # レコードは、このフラグがTrueでも埋め込み対象から除外する
 # （core.management.commands.extract_pending_pdf_text.Command._should_embed参照、2026-08-19追加）。
 OCR_EMBED_TEXT_TO_PDF = env.bool("OCR_EMBED_TEXT_TO_PDF", default=False)
+
+# 保管画面２・編集画面・検索結果詳細ポップアップ・検索/閲覧画面「文書イメージ」欄の
+# PDF プレビュー描画方式。
+# True（既定）: PDF.js（static/vendor/pdfjs）で各ページを「プレビュー枠の幅ぴったり」の
+#   <canvas> に自前描画する（static/js/pdf-preview.js）。縦長・横長を問わず枠にフィットし、
+#   IntersectionObserver による遅延描画で数百ページの PDF でも同時描画は数ページに留まる。
+# False: 従来どおりブラウザ内蔵 PDF ビューアの <iframe>。狭い枠（実質約340px）ではツールバーが
+#   見切れて水平スクロールバーが出る／横長ページが小さく右が欠ける、という既知の問題がある。
+# 2026-08-31 ユーザー依頼で PDF.js 化。PDF.js 側に問題が出た場合は .env で
+# PDF_JS_PREVIEW_ENABLED=False にすれば即座に旧 <iframe> 方式へ戻せる（テンプレート・JS とも
+# この値で分岐しており、pdfjs のアセットが読み込まれることも無くなる）。
+# 画像ファイル（<img> プレビュー）とモック文言表示はこのフラグの影響を受けない。
+PDF_JS_PREVIEW_ENABLED = env.bool("PDF_JS_PREVIEW_ENABLED", default=True)
 
 # ログ出力先。MEDIA_ROOTと同様にコード（ja_pj）と分離し、ja_system/storage/logs に格納する。
 LOG_DIR = Path(env("LOG_DIR", default=str(BASE_DIR.parent / "storage" / "logs")))

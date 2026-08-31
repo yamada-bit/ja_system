@@ -106,6 +106,30 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   エラー `<div>` を `class="field-error"` へ統一。実プレビューで分類・カテゴリーのエラーが
   入力欄直下に出ることを実測確認。詳細はアーカイブ
   「保管画面２／編集画面のフィールドエラー表示位置を入力欄の下へ」節参照。
+- 保管画面２・詳細ポップアップ・編集画面の右側（情報表示・入力エリア）が原本より約10px狭い
+  問題を修正（2026-08-31、ユーザー指摘）：ドラッグスクロール用に追加した `.pdf-scroll-area`
+  （幅1140px・flex-shrink:0）の固定幅が左列 `.pdf-preview-container` の flex 自動最小サイズ
+  として染み出し、`.storage-layout` の収縮時に左列がほぼ縮まず右列 `.meta-input-form-wrapper`
+  （35%）が原本より狭くなっていた。`style.css` の `.pdf-preview-container` に `min-width:0` を
+  追加し本来の 65/35 に復帰（実プレビュー実測：詳細ポップアップ右列 398.3→408.0px＝原本一致、
+  編集画面 446.x→456.75px＝原本一致）。ドラッグスクロール／ズームは影響なし。詳細はアーカイブ
+  「保管画面２・詳細・編集画面の右側エリアが原本より狭い問題の修正」節参照。
+- PDFプレビューを PDF.js 自前描画へ（2026-08-31、ユーザー依頼）：実プレビュー（2026-08-12追加）の
+  PDF を、狭い枠で問題の出るブラウザ内蔵PDFビューア `<iframe>`（ツールバー見切れ→水平スクロール
+  バー、横長ページの右欠け）から、PDF.js（`static/vendor/pdfjs` 3.11.174 legacy、CDN不使用）で
+  各ページを枠幅ぴったりの `<canvas>` に描画する方式へ変更。`IntersectionObserver` ではなく
+  スクロール連動の遅延描画で数百ページPDFでも軽い。`settings.PDF_JS_PREVIEW_ENABLED`（`.env`、
+  既定True）を False にすれば旧 `<iframe>` へ完全復帰（アセットも読み込まれない）。画像プレビュー
+  （`<img>`）・モック文言は不変。新規：`static/js/pdf-preview.js`・`core/context_processors.py`。
+  `manage.py test` 全766件PASS（フラグON/OFF両テスト追加）。詳細はアーカイブ
+  「PDFプレビューを PDF.js 自前描画へ」節参照。
+- ↑の追補（2026-08-31、ユーザー依頼）：当初対象外だった**文書／契約書 検索・閲覧画面の
+  「文書イメージ」欄も PDF.js へ**。お知らせ件数リンク経由と「検索・閲覧・変更」ボタン経由で
+  プレビューの見え方が違うとの指摘（実体はブラウザ内蔵PDFビューアがズーム/ツールバー状態を
+  ブラウザ側で保持する挙動差。アプリ側の差ではない）を機に、`search.html` に
+  `#search-pdfjs-preview` 枠を追加、`common.js showSearchPreview()` を PDF は `PdfPreview.render()`・
+  画像は従来 `<iframe>` に振り分け。`SearchPreviewPaneTests` 追加、`test documents contracts` 342件PASS。
+  詳細はアーカイブ「検索・閲覧画面『文書イメージ』欄も PDF.js へ」節参照。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

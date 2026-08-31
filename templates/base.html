@@ -44,7 +44,11 @@
           <button type="button" onclick="zoomPdf('detail-pdf-page', 0.1)">＋</button>
         </div>
         <div class="pdf-view-box drag-scrollable" style="height:405px;" id="detail-pdf-view-box">
-          <div class="pdf-scroll-area">
+          {# PDF.js プレビュー（settings.PDF_JS_PREVIEW_ENABLED）。PDF かつ can_download の時だけ #}
+          {# renderDetailPopup() が display を戻し PdfPreview.render() を呼ぶ。画像／モック文言は #}
+          {# 従来どおり下の .pdf-scroll-area 側。両者は排他表示。 #}
+          {% if pdf_js_preview_enabled %}<div class="pdfjs-preview" id="detail-pdfjs-preview" style="display:none;"></div>{% endif %}
+          <div class="pdf-scroll-area" id="detail-pdf-scroll-area">
           <div class="pdf-mock-page" id="detail-pdf-page">
             <h3 id="detail-mock-title" style="border-bottom:2px solid #e74c3c; padding-bottom:5px; color:#e74c3c;"></h3>
         {% comment %}
@@ -54,7 +58,7 @@
                data.preview_kind/data.preview_urlを見てJSでdisplay/srcを切り替える。 #}
         {% endcomment %}
             <img id="detail-preview-image" alt="" style="max-width:100%; margin-top:10px; display:none;">
-            <iframe id="detail-preview-frame" title="" style="width:100%; height:320px; margin-top:10px; border:none; display:none;"></iframe>
+            {% if not pdf_js_preview_enabled %}<iframe id="detail-preview-frame" title="" style="width:100%; height:320px; margin-top:10px; border:none; display:none;"></iframe>{% endif %}
             <p id="detail-preview-denied" style="margin-top:20px; font-size:13px; color:#c0392b; display:none;"></p>
             <p id="detail-mock-body" style="margin-top:20px; font-size:12px; color:#755;">閲覧用アーカイブデータ</p>
           </div>
@@ -89,6 +93,17 @@
 {% endblock %}
 
 <script src="{% static 'js/common.js' %}"></script>
+{% if pdf_js_preview_enabled %}
+  {# PDF プレビューを PDF.js で自前描画する（config/settings/base.py PDF_JS_PREVIEW_ENABLED）。 #}
+  {# pdf-preview.js は最初に render() が呼ばれた時だけ pdf.min.js を遅延ロードするため、 #}
+  {# プレビューを開かない画面での実コストは pdf-preview.js（数KB）のみ。 #}
+  <script>
+    window.PDFJS_PREVIEW_ENABLED = true;
+    window.PDFJS_LIB_URL = "{% static 'vendor/pdfjs/pdf.min.js' %}";
+    window.PDFJS_WORKER_URL = "{% static 'vendor/pdfjs/pdf.worker.min.js' %}";
+  </script>
+  <script src="{% static 'js/pdf-preview.js' %}"></script>
+{% endif %}
 {% block extra_script %}{% endblock %}
 </body>
 </html>

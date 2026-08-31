@@ -100,19 +100,41 @@ document.addEventListener("click", (e) => {
  * なっていた。previewUrl自体はテンプレート側で既にnot is_deletedをgatingに加えたが、
  * 権限不足の文言のまま表示すると理由が伝わらないため、削除済みの場合は専用の文言を出す
  * （2026-08-25修正）。
+ *
+ * PDF は PDF.js（pdf-preview.js の window.PdfPreview）で #search-pdfjs-preview 枠に自前描画する
+ * （settings.PDF_JS_PREVIEW_ENABLED が既定 True。テンプレートがこの枠を出力し、base.html が
+ * window.PDFJS_PREVIEW_ENABLED / PdfPreview をロード）。狭い枠だとブラウザ内蔵 PDF ビューアの
+ * <iframe> はツールバーが見切れ・横長 PDF の右端が欠けるため（2026-08-31、保管画面2・編集画面・
+ * 検索結果詳細ポップアップと同じ理由。当初この検索プレビューだけ <iframe> のまま取り残されていた）。
+ * 画像は従来どおり <iframe>（ブラウザが画像を素直に表示する）。PDF_JS_PREVIEW_ENABLED=False の
+ * 時は PDF も <iframe> に戻る。行クリックのたびに前回の PDF.js 描画を clear() で破棄する。
  */
 function showSearchPreview(title, previewUrl, kind, previewKind, isDeleted) {
   const frame = document.getElementById("search-preview-frame");
   const placeholder = document.getElementById("search-preview-placeholder");
   const titleEl = document.getElementById("search-preview-title");
+  const pdfjsEl = document.getElementById("search-pdfjs-preview");
+  const usePdfJs = window.PDFJS_PREVIEW_ENABLED && pdfjsEl && window.PdfPreview;
   const label = kind === "contract" ? "契約書" : "文書";
-  if (previewUrl && (previewKind === "image" || previewKind === "pdf")) {
+
+  // まず全表示要素をリセット（前回のプレビューを確実に破棄してから出し直す）。
+  frame.style.display = "none";
+  frame.removeAttribute("src");
+  if (pdfjsEl) {
+    pdfjsEl.style.display = "none";
+    if (window.PdfPreview) window.PdfPreview.clear(pdfjsEl);
+  }
+
+  if (previewUrl && previewKind === "pdf" && usePdfJs) {
+    placeholder.style.display = "none";
+    pdfjsEl.style.display = "";
+    window.PdfPreview.render(pdfjsEl, previewUrl);
+  } else if (previewUrl && (previewKind === "image" || previewKind === "pdf")) {
+    // 画像、または PDF_JS_PREVIEW_ENABLED=False 時の PDF はブラウザ内蔵ビューア（<iframe>）。
     frame.src = previewUrl;
     frame.style.display = "";
     placeholder.style.display = "none";
   } else {
-    frame.style.display = "none";
-    frame.removeAttribute("src");
     placeholder.style.display = "";
     if (isDeleted) {
       setSearchPreviewMessage(titleEl, title, `本${label}は削除されているため、プレビューを表示できません。`);
@@ -507,6 +529,20 @@ function centerPdfScroll(box) {
 }
 
 function zoomPdf(pageId, amount) {
+  // PDF.js プレビュー（settings.PDF_JS_PREVIEW_ENABLED）が表示中なら、紙モックの
+  // transform 拡大ではなく PdfPreview 側の再描画ズームへ委譲する（pdf-preview.js）。
+  const zp = document.getElementById(pageId);
+  let zbox = zp && zp.closest(".pdf-view-box, .pdf-view-box2");
+  if (!zbox) {
+    // 編集画面の PDF.js 単独描画は #...-pdf-page が無い。pageId から枠 id を導く。
+    zbox = document.getElementById(pageId.replace(/-pdf-page$/, "-pdf-view-box"));
+  }
+  const pdfjsEl = zbox && zbox.querySelector(".pdfjs-preview");
+  if (pdfjsEl && pdfjsEl.style.display !== "none" && window.PdfPreview) {
+    window.PdfPreview.zoom(pdfjsEl, amount > 0 ? 1.15 : 1 / 1.15);
+    return;
+  }
+
   currentPdfScale += amount;
   if (currentPdfScale < 0.5) currentPdfScale = 0.5;
   if (currentPdfScale > 3.0) currentPdfScale = 3.0;
@@ -588,6 +624,9 @@ function openDetailPopup(apiUrl, kind) {
 
 function closeDetailPopup() {
   document.getElementById("popup-detail").style.display = "none";
+  // PDF.js プレビューを開いていたら破棄してメモリを解放する（pdf-preview.js）。
+  const pdfjsEl = document.getElementById("detail-pdfjs-preview");
+  if (pdfjsEl && window.PdfPreview) window.PdfPreview.clear(pdfjsEl);
 }
 
 function renderDetailPopup(data, kind) {
@@ -628,23 +667,43 @@ function renderDetailPopup(data, kind) {
   // 同じ考え方で、data.preview_kind（"image"/"pdf"/null、can_download権限が無ければnull）と
   // data.preview_urlの両方が揃った時だけモック文言の代わりに実データを表示する。
   const previewImg = document.getElementById("detail-preview-image");
+  // PDF.js 有効時（settings.PDF_JS_PREVIEW_ENABLED）は #detail-preview-frame をテンプレートが
+  // 出力しないため null。無効時は従来の <iframe>。
   const previewFrame = document.getElementById("detail-preview-frame");
   const previewDenied = document.getElementById("detail-preview-denied");
   const mockBody = document.getElementById("detail-mock-body");
+  const pdfjsEl = document.getElementById("detail-pdfjs-preview");
+  const scrollArea = document.getElementById("detail-pdf-scroll-area");
+  const usePdfJs = window.PDFJS_PREVIEW_ENABLED && pdfjsEl && window.PdfPreview;
+
   previewImg.style.display = "none";
   previewImg.removeAttribute("src");
-  previewFrame.style.display = "none";
-  previewFrame.removeAttribute("src");
+  if (previewFrame) {
+    previewFrame.style.display = "none";
+    previewFrame.removeAttribute("src");
+  }
   previewDenied.style.display = "none";
   mockBody.style.display = "";
+  if (pdfjsEl) {
+    pdfjsEl.style.display = "none";
+    if (window.PdfPreview) window.PdfPreview.clear(pdfjsEl);
+  }
+  if (scrollArea) scrollArea.style.display = "";
+
   if (data.preview_kind === "image" && data.preview_url) {
     previewImg.src = data.preview_url;
     previewImg.style.display = "block";
     mockBody.style.display = "none";
   } else if (data.preview_kind === "pdf" && data.preview_url) {
-    previewFrame.src = data.preview_url;
-    previewFrame.style.display = "block";
-    mockBody.style.display = "none";
+    if (usePdfJs) {
+      if (scrollArea) scrollArea.style.display = "none";
+      pdfjsEl.style.display = "";
+      window.PdfPreview.render(pdfjsEl, data.preview_url);
+    } else if (previewFrame) {
+      previewFrame.src = data.preview_url;
+      previewFrame.style.display = "block";
+      mockBody.style.display = "none";
+    }
   } else if (data.preview_kind === "image" || data.preview_kind === "pdf") {
     // 画像／PDFだが権限不足でpreview_urlが渡っていない（documents/contracts.api.DetailAPIView
     // 参照）。documents/edit.html・storage2.htmlと同じ理由（2026-08-13ユーザー報告対応）。

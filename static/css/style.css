@@ -303,6 +303,13 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* min-width:0 が無いと、内側の .pdf-scroll-area（幅1140px・flex-shrink:0。ドラッグ
+     スクロール用に拡大後サイズ分を先取り確保するラッパー）の固定幅が flex アイテムの
+     自動最小サイズ（min-width:auto=min-content）としてこの列に染み出し、storage-layout
+     の flex 収縮時に左列がほとんど縮まなくなる。その結果、右の情報表示・入力エリア
+     （.meta-input-form-wrapper 35%）が原本より約10px 狭くなっていた。原本HTMLには
+     .pdf-scroll-area が無いため顕在化しなかった問題。min-width:0 で本来の 65/35 に戻す。 */
+  min-width: 0;
 }
 .pdf-view-box {
   border: 1px solid var(--border-color);
@@ -357,6 +364,42 @@ button:disabled {
      左右どちらのはみ出しにもドラッグスクロールで到達できるようにする。 */
   width: 1140px;
   flex-shrink: 0;
+}
+
+/* PDF.js プレビュー（settings.PDF_JS_PREVIEW_ENABLED、static/js/pdf-preview.js）。
+   .pdf-view-box{,2} の直下に置き、枠いっぱいを縦スクロール領域にする（各ページ canvas を
+   枠幅にフィットさせて縦に並べる）。ブラウザ内蔵PDFビューアの<iframe>を置き換えるもので、
+   .pdf-scroll-area / .pdf-mock-page（画像・モック文言用）とは排他表示。 */
+.pdfjs-preview {
+  align-self: stretch;   /* .pdf-view-box{,2} の align-items:flex-start を上書きして高さいっぱいに */
+  width: 100%;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: auto;      /* ＋ズームでページが枠より広くなった時の横スクロール用 */
+  background: #525659;   /* 内蔵PDFビューアのビューポート色に寄せる */
+  padding: 8px 0;
+  box-sizing: border-box;
+}
+.pdfjs-page {
+  /* 幅は pdf-preview.js が実測 px で設定（枠幅−16px × ズーム倍率）。 */
+  margin: 0 auto 8px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.pdfjs-page:last-child {
+  margin-bottom: 0;
+}
+.pdfjs-page canvas {
+  display: block;
+}
+.pdfjs-message {
+  color: #eee;
+  font-size: 13px;
+  text-align: center;
+  padding: 24px 12px;
+}
+.pdfjs-message--error {
+  color: #ffb4a8;
 }
 .zoom-controls {
   display: flex;

@@ -2747,3 +2747,147 @@ R-7（論理削除のたびに正規化カラム再計算）。
 - 実プレビュー：3ファイルに別々のタイトル・メモ・分類・年を入力 → 3件目を「削除」→ 2件が
   値保持（分類は表示ラベルも解決）。続けて1件目を「削除」→ 残り1件が `_0` へ詰め直されて表示。
   最後の1件を「削除」→ step1 へ redirect。通常の「登録」（action 空）は従来どおり動作。
+
+## 保管画面２・詳細・編集画面の右側エリアが原本より狭い問題の修正（2026-08-31、ユーザー指摘）
+
+### 症状
+
+保管画面２・検索結果詳細ポップアップ（`popup-detail`）・編集画面（documents/contracts の
+`edit`）で、右側の「情報表示・入力エリア」（`.meta-input-form-wrapper`、原本レイアウトでは
+`.storage-layout` の 35%）が原本HTMLより約10px 狭く、左のPDFプレビュー（`.pdf-preview-container`
+65%）が約10px 広くなっていた。
+
+### 原因
+
+これらの画面は原本の左右分割レイアウト（`.storage-layout` flex ＝ 左 `.pdf-preview-container`
+`width:65%` ＋ 右 `.meta-input-form-wrapper` `width:35%`、`flex-shrink:1`）を共有している。
+`.storage-layout` の合計幅では 65%+35%+gap がコンテナをオーバーするため、本来は両列が
+flex-basis 比で少しずつ収縮して原本の 757.8 / 408.0px（詳細ポップアップ・幅1360時）に落ち着く。
+
+ところが ja_pj では、ユーザー依頼（2026-08-12）で追加した実プレビューのドラッグスクロール／
+ズーム用に、PDF枠の内側へ `.pdf-scroll-area`（`width:1140px; flex-shrink:0`。拡大後の最大
+はみ出し幅を先取り確保するラッパー）を挟んでいる。この固定1140px幅が、`overflow:hidden` の
+PDF枠を貫通して左列 `.pdf-preview-container`（`overflow:visible`・`min-width:auto`）の
+**flex アイテム自動最小サイズ（min-width:auto = min-content）** として染み出し、左列が
+`.storage-layout` の収縮時にほとんど縮まなくなっていた（実測：左列が本来より約10px 広いまま
+＝収縮ぶんが全部右列に寄る）。原本HTMLには `.pdf-scroll-area` が無いため顕在化しなかった。
+
+### 修正
+
+`static/css/style.css` の `.pdf-preview-container` に **`min-width: 0`** を追加（理由コメント付き）。
+flexbox で「コンテンツ幅を下回る収縮」を許可する定石。これで左右が原本どおり flex-basis 比で
+収縮し、65/35 に復帰する。`.pdf-view-box{2}` の `overflow:hidden` と `.pdf-scroll-area` の
+1140px はそのままなので、ドラッグスクロール／ズーム（`common.js` の `initDragScroll` /
+`centerScrollArea` / `zoomPdf`）は影響なし。
+
+### 検証
+
+実プレビュー（Django dev、viewport 1360、`seed_test_data` の職員番号1でログイン）で
+`getBoundingClientRect().width` を実測し、同条件の原本HTML（html5、簡易HTTPサーバ）と突き合わせ：
+
+| 画面 | 箇所 | 修正前 | 修正後 | 原本 |
+|------|------|--------|--------|------|
+| 詳細ポップアップ | 右列 `.meta-input-form-wrapper` | 398.29 | **408.02** | 408.02 |
+| 詳細ポップアップ | 左列 `.pdf-preview-container` | 767.51 | **757.78** | 757.78 |
+| 詳細ポップアップ | `#detail-properties-view` | 366.69 | **376.43** | 376.43 |
+| 編集画面（documents/edit） | 右列 | 446.x | **456.75** | 456.75 |
+
+PDFプレビュー枠は幅848px・スクロール領域1140pxのままでドラッグスクロール可能を確認。
+
+## PDFプレビューを PDF.js 自前描画へ（2026-08-31、ユーザー依頼）
+
+### 経緯
+
+保管画面２・編集画面・検索結果詳細ポップアップの実プレビュー（2026-08-12 追加）で、PDF を
+ブラウザ内蔵 PDF ビューアの `<iframe>` に読み込ませていたが、原本の紙モック枠（`.pdf-mock-page`
+380px＝実質 iframe 340px）が Chrome 内蔵ビューアの実用最小幅（約 460〜500px）を下回るため、
+①ツールバーが右で見切れて水平スクロールバーが出る ②横長 PDF が過大描画で右が欠ける、という
+問題があった。`#toolbar=0` 等の URL パラメータは現行 Chrome の `<iframe>` では無効。枠を広げる案・
+先頭ページのみ画像化案（複数ページの下スクロールが失われる）・全ページ画像化案（500 ページ級で
+非現実的）を検討の上、ユーザーが **PDF.js で各ページを枠幅ぴったりの canvas に自前描画** する
+方針（①）を選択。「元に戻せるように」との指示で settings フラグ方式にした。
+
+### 実装
+
+- **`static/vendor/pdfjs/`**：PDF.js 3.11.174 の legacy(UMD) ビルド（`pdf.min.js` /
+  `pdf.worker.min.js`、Apache-2.0、`LICENSE`＋取得手順を `README.md` に記載）。CDN 不使用・
+  オフライン可。legacy ビルドを選んだのは庁内端末のブラウザ世代が不明なため。
+- **`settings.PDF_JS_PREVIEW_ENABLED`**（`config/settings/base.py`、`env.bool`、既定 `True`、
+  `.env.example` にも記載）。`False` で従来の `<iframe>` へ完全復帰し、PDF.js アセットも読み込まれ
+  なくなる（テンプレート・JS 双方でこの値で分岐）。画像プレビュー（`<img>`）とモック文言は不変。
+- **`core/context_processors.preview_settings`**（新規、`TEMPLATES` に登録）：全画面共通の
+  base.html 詳細ポップアップへ `pdf_js_preview_enabled` を渡すため。
+- **`static/js/pdf-preview.js`**（新規、`window.PdfPreview`）：`render(el,url)` / `clear(el)` /
+  `zoom(el,factor)`。最初の `render()` 時のみ `pdf.min.js` を動的 `<script>` で遅延ロード。
+  各ページの空プレースホルダ `<div>` を並べ、枠の `scroll` イベント（＋初回・`ResizeObserver`）で
+  「表示付近のページだけ」canvas 描画、離れたら canvas 破棄 → 数百ページでも同時描画は数枚。
+  `FileResponse` の Range 対応で必要バイトのみ転送。IntersectionObserver はタブ非表示時に
+  発火しないため主機構にしない。レイアウトの要（`align-self:stretch` / `width:100%` /
+  `overflow` / スクロール）は CSS の読み込み順・キャッシュに依存しないよう inline でも当てる。
+- **`static/css/style.css`**：`.pdfjs-preview` / `.pdfjs-page` / `.pdfjs-message`（背景色・影・
+  余白などの装飾のみ。幅・高さは JS が実測 px で設定）。
+- **`static/js/common.js`**：`zoomPdf()` は枠内に表示中の `.pdfjs-preview` があれば
+  `PdfPreview.zoom()` へ委譲（＋/− ボタン共有）。`renderDetailPopup()` / `closeDetailPopup()` に
+  PDF.js の表示切替・破棄を追加。
+- **テンプレート**：`base.html`（詳細ポップアップに `#detail-pdfjs-preview`、`<iframe>` を
+  `{% if not pdf_js_preview_enabled %}` でガード、`window.PDFJS_LIB_URL`/`WORKER_URL`/
+  `PDFJS_PREVIEW_ENABLED` を埋め込み `pdf-preview.js` を読み込み）、`{documents,contracts}/edit.html`
+  （PDF＋can_download かつフラグ ON なら `.pdfjs-preview[data-pdf-url]` を直接出力、else 従来の
+  `.pdf-scroll-area`＞`.pdf-mock-page`）、`{documents,contracts}/storage2.html`（`#pdf-preview-pdfjs`
+  枠を追加、`setupActiveDoc()` がページャーのファイル種別で `.pdfjs-preview` / `.pdf-scroll-area`
+  を排他表示）。
+
+### 検証
+
+- `manage.py test` **全766件PASS**（`ImagePreviewTests` にフラグ ON/OFF 両方のテストを追加）。
+- `collectstatic`（prod, `CompressedManifestStaticFilesStorage`）で pdfjs アセットのハッシュ化・
+  gzip 生成がエラー無く完了。
+- 実プレビュー（Django dev, viewport 1440, 職員番号1）：
+  - 編集画面（縦長 PDF）：枠幅約830pxの canvas、水平スクロールバー無し、ツールバー無し。
+  - 保管画面２（横長A4 3ページ）：各ページ 831×587 で枠幅にフィット、右端の欠け無し、
+    下スクロールで2・3ページ目も描画、水平スクロールバー無し。
+  - 詳細ポップアップ（縦長 PDF）：枠幅約787pxで描画、縦スクロールで全体、水平バー無し。
+  - ＋/− ボタン：`PdfPreview.zoom` に委譲。起点は「今表示している枠の中央」（変更前に中央に
+    あった文書上の点を縦横の割合で覚え、リサイズ後に同じ点が中央へ来るよう scroll 復元。
+    原本 zoomPdf の transform-origin:top center 固定と違い、拡大した箇所を見続けられる）。
+    拡大でページが枠より広くなると横スクロール可。
+  - 移動操作：縦スクロールバー／マウスホイールに加え、**枠内をマウスドラッグでパン**できる
+    （縦＝複数ページ、横＝ズームで枠より広い時。原本 `.pdf-view-box` の initDragScroll と同じ操作感。
+    はみ出している軸だけ動く、ネイティブのスクロールバー上のドラッグはブラウザに委ねる、
+    カーソルは grab/grabbing）。
+  - `PDF_JS_PREVIEW_ENABLED=False`：edit/storage2 とも `<iframe>` に戻り pdfjs アセット未読込を確認。
+
+### 検索・閲覧画面「文書イメージ」欄も PDF.js へ（2026-08-31 追補、ユーザー依頼）
+
+上記の PDF.js 化は保管画面2・編集画面・検索結果詳細ポップアップの3か所のみを対象とし、
+**文書／契約書 検索・閲覧画面（screen-search）の「文書イメージ」欄はブラウザ内蔵 PDF ビューアの
+`<iframe>`（`#search-preview-frame`）のまま取り残されていた**。ユーザーから「メイン画面お知らせの
+件数リンク経由と『検索・閲覧・変更』ボタン経由でプレビューの見え方が違う」と指摘があり調査した
+結果、画面・iframe・PDF バイト列・サーバー応答はすべて同一で、差はブラウザ内蔵 PDF ビューアが
+ズーム倍率・ツールバー表示をブラウザ側で保持し前回値を引き継ぐことによる（`notice` パラメータや
+アプリ側の差ではない）ものと判明。狭い枠でのツールバー見切れ・横長 PDF の右端欠けという当初の
+動機がこの欄にもそのまま当てはまるため、他3か所と同じ方式に揃えた。
+
+- **`templates/{documents,contracts}/search.html`**：`.pdf-view-box`（`height:320px`）内に
+  `{% if pdf_js_preview_enabled %}<div class="pdfjs-preview" id="search-pdfjs-preview" style="display:none;">`
+  を追加。枠に `id="search-pdf-view-box"` を付与（命名を `detail-`/`storage-` に合わせる。現状
+  ズームボタンは無いため参照はされないが、他3枠との一貫性のため）。既存の `#search-preview-frame`
+  は画像フォールバック用・`PDF_JS_PREVIEW_ENABLED=False` 時の PDF 用に残す。
+- **`static/js/common.js` `showSearchPreview()`**：行クリック時、`previewKind === "pdf"` かつ
+  `window.PDFJS_PREVIEW_ENABLED` なら `#search-pdfjs-preview` を表示して `window.PdfPreview.render()`。
+  画像、または PDF.js 無効時の PDF は従来どおり `<iframe>`。毎回まず `PdfPreview.clear()` で前回
+  描画を破棄してから出し直す（`renderDetailPopup()` / `setupActiveDoc()` と同じ構造）。権限不足・
+  非対応形式・削除済みの案内文言は不変。
+- ズームボタン（`＋`/`−`）は原本の screen-search「文書イメージ」欄に無く、フィデリティ監査済みの
+  ため今回も追加しない（edit/detail/storage2 は原本モックにボタンがあるため保持しているのと逆）。
+- **`{documents,contracts}/tests.py`**：`SearchPreviewPaneTests`（既定でPDF.js枠を出力／
+  `PDF_JS_PREVIEW_ENABLED=False` で非出力＋`#search-preview-frame` 残置）。
+
+検証（Django dev, 職員番号9005, viewport 1280）：
+
+- お知らせ「有効期限切れまで1ヶ月以内」経由（`?notice=expiring_soon`）と「検索・閲覧・変更＞文書」
+  経由の両方で、同じ PDF（Book1・pk21）行クリック時に PDF.js が枠幅フィットで描画。ツールバー無し・
+  水平スクロールバー無し。両ルートで見え方が一致することを確認。
+- 複数ページ PDF（画面イメージ・pk24、6ページ）：全ページ縦積みで描画、下スクロールで各ページ canvas 化。
+- 別行へ連続クリック：`clear()`→`render()` で canvas がリークせず入れ替わる（6→6、二重描画無し）。
+- コンソールエラー無し。`manage.py test documents contracts` **全342件PASS**。

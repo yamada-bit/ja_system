@@ -910,6 +910,37 @@ class BulkButtonsHiddenForRecentlyDeletedNoticeTests(TestCase):
         self.assertContains(response, "一括選択")
 
 
+class SearchPreviewPaneTests(TestCase):
+    """screen-search「文書イメージ」欄のプレビュー描画方式（2026-08-31）。行クリック時に
+    common.js showSearchPreview() が PDF は PDF.js 枠、画像はブラウザ内蔵ビューアの <iframe>
+    に振り分ける。テンプレートは settings.PDF_JS_PREVIEW_ENABLED で PDF.js 枠の出力を切り替える
+    （保管画面2・編集画面・検索結果詳細ポップアップと同じ扱い。ImagePreviewTests 参照）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_pdfjs_preview_frame_rendered_by_default(self):
+        response = self.client.get("/documents/search/")
+        self.assertContains(response, 'class="pdfjs-preview" id="search-pdfjs-preview"')
+        # 旧方式のブラウザ内蔵PDFビューア用 <iframe> は画像フォールバック用に残す。
+        self.assertContains(response, 'id="search-preview-frame"')
+
+    @override_settings(PDF_JS_PREVIEW_ENABLED=False)
+    def test_pdfjs_preview_frame_absent_when_disabled(self):
+        response = self.client.get("/documents/search/")
+        self.assertNotContains(response, 'id="search-pdfjs-preview"')
+        self.assertContains(response, 'id="search-preview-frame"')
+
+
 class BulkDownloadViewTests(TestCase):
     """screen-search「一括ダウンロード」（xlsx 検索・閲覧・変更!B264-265、要再確認No.20）。"""
 
@@ -1638,9 +1669,8 @@ class ImagePreviewTests(TestCase):
         self.assertEqual(response.context["preview_kind"], "image")
         self.assertTrue(response.context["can_download"])
         self.assertContains(response, f'src="/documents/{document.pk}/preview/"')
-        # base.htmlのpopup-detail用<iframe id="detail-preview-frame">は全ページ共通で常に
-        # 出力される（空src・display:none）ため、"<iframe"の有無ではなく編集画面自身の
-        # プレビュー用iframe（該当pkをsrcに持つもの）が無いことをピンポイントで確認する。
+        # 画像プレビューは <img>。編集画面自身のプレビュー用 <iframe>（該当pkをsrcに持つもの）が
+        # 無いことをピンポイントで確認する（PDF_JS_PREVIEW_ENABLED の値に関わらず画像は <img>）。
         self.assertNotContains(response, f'<iframe src="/documents/{document.pk}/preview/"')
 
     def test_edit_screen_shows_pdf_preview_only_with_permission_and_pdf_file(self):
@@ -1662,10 +1692,34 @@ class ImagePreviewTests(TestCase):
         PermissionProfile.objects.create(
             employee=self.employee, role=PermissionRole.STAFF, doc_download=True
         )
+        # 既定（PDF_JS_PREVIEW_ENABLED=True）は PDF.js プレビュー枠を出す。ブラウザ内蔵PDF
+        # ビューアの <iframe> は使わない（2026-08-31、狭い枠のツールバー見切れ・横長クリップ対策）。
         response = self.client.get(f"/documents/{document.pk}/edit/")
         self.assertEqual(response.context["preview_kind"], "pdf")
         self.assertTrue(response.context["can_download"])
+        self.assertContains(
+            response, f'class="pdfjs-preview" data-pdf-url="/documents/{document.pk}/preview/"'
+        )
+        self.assertNotContains(response, f'<iframe src="/documents/{document.pk}/preview/"')
+
+    @override_settings(PDF_JS_PREVIEW_ENABLED=False)
+    def test_edit_screen_pdf_preview_falls_back_to_iframe_when_pdfjs_disabled(self):
+        """PDF_JS_PREVIEW_ENABLED=False で従来のブラウザ内蔵PDFビューア <iframe> に戻る。"""
+        from documents.models import Document
+
+        document = Document(
+            title="PDF文書", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1),
+        )
+        document.file.save("doc.pdf", ContentFile(b"%PDF-1.4"), save=False)
+        document.save()
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        response = self.client.get(f"/documents/{document.pk}/edit/")
         self.assertContains(response, f'<iframe src="/documents/{document.pk}/preview/"')
+        self.assertNotContains(response, 'class="pdfjs-preview"')
 
     def test_edit_screen_unsupported_extension_keeps_mock_even_with_permission(self):
         from documents.models import Document

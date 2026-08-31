@@ -40,6 +40,12 @@
           <button type="button" onclick="zoomPdf('storage-pdf-page', 0.1)">＋</button>
         </div>
         <div class="pdf-view-box2 drag-scrollable" id="storage-pdf-view-box">
+          {% if pdf_js_preview_enabled and preview_kind == "pdf" and can_download %}
+            {# PDF.js 描画（settings.PDF_JS_PREVIEW_ENABLED）。pdf-preview.js が data-pdf-url を #}
+            {# DOMContentLoaded で拾い各ページを枠幅ぴったりの canvas に描く。ブラウザ内蔵PDF #}
+            {# ビューアの <iframe>（狭い枠でツールバー見切れ・横長クリップ）は使わない。 #}
+            <div class="pdfjs-preview" data-pdf-url="{% url 'documents:preview' document.pk %}" aria-label="{{ document.display_name }}"></div>
+          {% else %}
           <div class="pdf-scroll-area">
           <div class="pdf-mock-page" id="storage-pdf-page">
             <h3 id="pdf-mock-title" style="border-bottom:2px solid #333; padding-bottom:5px;">{{ document.display_name }}</h3>
@@ -51,6 +57,7 @@
               {% endcomment %}
               <img src="{% url 'documents:preview' document.pk %}" alt="{{ document.display_name }}" style="max-width:100%; margin-top:10px; display:block;">
             {% elif preview_kind == "pdf" and can_download %}
+              {# PDF_JS_PREVIEW_ENABLED=False の時だけここに来る（内蔵PDFビューア）。 #}
               <iframe src="{% url 'documents:preview' document.pk %}" title="{{ document.display_name }}" style="width:100%; height:440px; margin-top:10px; border:none;"></iframe>
             {% elif preview_kind %}
               {% comment %}
@@ -64,6 +71,7 @@
             {% endif %}
           </div>
           </div>
+          {% endif %}
         </div>
       </div>
 

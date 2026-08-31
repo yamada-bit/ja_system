@@ -371,6 +371,33 @@ class BulkButtonsHiddenForRecentlyDeletedNoticeTests(TestCase):
         self.assertContains(response, "一括選択")
 
 
+class SearchPreviewPaneTests(TestCase):
+    """documents.tests.SearchPreviewPaneTests と同じ（screen-search「文書イメージ」欄の
+    PDF.js 描画枠、2026-08-31）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_pdfjs_preview_frame_rendered_by_default(self):
+        response = self.client.get("/contracts/search/")
+        self.assertContains(response, 'class="pdfjs-preview" id="search-pdfjs-preview"')
+        self.assertContains(response, 'id="search-preview-frame"')
+
+    @override_settings(PDF_JS_PREVIEW_ENABLED=False)
+    def test_pdfjs_preview_frame_absent_when_disabled(self):
+        response = self.client.get("/contracts/search/")
+        self.assertNotContains(response, 'id="search-pdfjs-preview"')
+        self.assertContains(response, 'id="search-preview-frame"')
+
+
 class DeleteViewAjaxTests(TestCase):
     """documents.tests.DeleteViewAjaxTestsと同じ理由（原本フィデリティ監査で発見・修正）。"""
 
@@ -1580,11 +1607,30 @@ class ImagePreviewTests(TestCase):
         self.assertFalse(response.context["can_download"])
         self.assertContains(response, "契約書-ダウンロード」権限が必要です")
 
+        # 既定（PDF_JS_PREVIEW_ENABLED=True）は PDF.js プレビュー枠（documents 側と同じ）。
         self._grant_contract_download()
         response = self.client.get(f"/contracts/{contract.pk}/edit/")
         self.assertEqual(response.context["preview_kind"], "pdf")
         self.assertTrue(response.context["can_download"])
+        self.assertContains(
+            response, f'class="pdfjs-preview" data-pdf-url="/contracts/{contract.pk}/preview/"'
+        )
+        self.assertNotContains(response, f'<iframe src="/contracts/{contract.pk}/preview/"')
+
+    @override_settings(PDF_JS_PREVIEW_ENABLED=False)
+    def test_edit_screen_pdf_preview_falls_back_to_iframe_when_pdfjs_disabled(self):
+        from contracts.models import Contract
+
+        contract = Contract(
+            title="PDF契約書", department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+        )
+        contract.file.save("doc.pdf", ContentFile(b"%PDF-1.4"), save=False)
+        contract.save()
+        self._grant_contract_download()
+        response = self.client.get(f"/contracts/{contract.pk}/edit/")
         self.assertContains(response, f'<iframe src="/contracts/{contract.pk}/preview/"')
+        self.assertNotContains(response, 'class="pdfjs-preview"')
 
 
 class ContractEditScreenAmountDisplayTests(TestCase):

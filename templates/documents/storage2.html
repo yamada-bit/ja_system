@@ -41,18 +41,22 @@
           <button type="button" onclick="zoomPdf('storage-pdf-page', 0.1)">＋</button>
         </div>
         <div class="pdf-view-box2 drag-scrollable" id="storage-pdf-view-box">
-          <div class="pdf-scroll-area">
+          {# PDF.js プレビュー枠（settings.PDF_JS_PREVIEW_ENABLED）。ページャーで表示中ファイルが #}
+          {# PDF の時だけ setupActiveDoc() が display を戻し PdfPreview.render() を呼ぶ。画像／ #}
+          {# モック文言は従来どおり下の .pdf-scroll-area 側。排他表示。 #}
+          {% if pdf_js_preview_enabled %}<div class="pdfjs-preview" id="pdf-preview-pdfjs" style="display:none;"></div>{% endif %}
+          <div class="pdf-scroll-area" id="pdf-scroll-area-wrap">
           <div class="pdf-mock-page" id="storage-pdf-page">
             <h3 id="pdf-mock-title" style="border-bottom:2px solid #333; padding-bottom:5px;">{{ file_rows.0.0.original_name }}</h3>
         {% comment %}
             {# ユーザー依頼（2026-08-12）で追加した実プレビュー（画像／PDF）。原本index.htmlは
                固定モックのみ。複数文書を切り替えながら登録するため、対象ごとの表示切替はJS側
-               （下のsetupActiveDoc）で行う。img/iframe/mock文言のどれを見せるかはpreview_kinds/
-               preview_urls（documents.views._pending_preview_context、can_download権限＋
-               拡張子判定）から埋め込む。 #}
+               （下のsetupActiveDoc）で行う。img/iframe(またはPDF.js)/mock文言のどれを見せるかは
+               preview_kinds/preview_urls（documents.views._pending_preview_context、can_download
+               権限＋拡張子判定）から埋め込む。 #}
         {% endcomment %}
             <img id="pdf-preview-image" alt="" style="max-width:100%; margin-top:10px; display:none;">
-            <iframe id="pdf-preview-frame" title="" style="width:100%; height:440px; margin-top:10px; border:none; display:none;"></iframe>
+            {% if not pdf_js_preview_enabled %}<iframe id="pdf-preview-frame" title="" style="width:100%; height:440px; margin-top:10px; border:none; display:none;"></iframe>{% endif %}
             <p id="pdf-preview-denied" style="margin-top:20px; font-size:13px; color:#c0392b; display:none;">プレビューを表示するには「文書-ダウンロード」権限が必要です。権限管理画面でご確認ください。</p>
             <div id="pdf-mock-body">
               <p style="margin-top:20px; font-size:12px; color:#555;">これはデモ用の擬似PDFプレビュー画面です。右側の切り替えボタンと連動して内容が切り替わります。</p>
@@ -185,25 +189,44 @@
       document.getElementById('pdf-mock-title').textContent = fileNames[activeDocIndex];
 
       const previewImg = document.getElementById('pdf-preview-image');
+      // PDF.js 有効時（settings.PDF_JS_PREVIEW_ENABLED）は #pdf-preview-frame は出力されず null。
       const previewFrame = document.getElementById('pdf-preview-frame');
       const previewDenied = document.getElementById('pdf-preview-denied');
       const mockBody = document.getElementById('pdf-mock-body');
+      const pdfjsEl = document.getElementById('pdf-preview-pdfjs');
+      const scrollWrap = document.getElementById('pdf-scroll-area-wrap');
+      const usePdfJs = window.PDFJS_PREVIEW_ENABLED && pdfjsEl && window.PdfPreview;
       const url = previewUrls[activeDocIndex];
       const kind = previewKinds[activeDocIndex];
+
       previewImg.style.display = 'none';
       previewImg.removeAttribute('src');
-      previewFrame.style.display = 'none';
-      previewFrame.removeAttribute('src');
+      if (previewFrame) {
+        previewFrame.style.display = 'none';
+        previewFrame.removeAttribute('src');
+      }
       previewDenied.style.display = 'none';
       mockBody.style.display = '';
+      if (pdfjsEl) {
+        pdfjsEl.style.display = 'none';
+        if (window.PdfPreview) window.PdfPreview.clear(pdfjsEl);
+      }
+      if (scrollWrap) scrollWrap.style.display = '';
+
       if (kind === 'image' && url) {
         previewImg.src = url;
         previewImg.style.display = 'block';
         mockBody.style.display = 'none';
       } else if (kind === 'pdf' && url) {
-        previewFrame.src = url;
-        previewFrame.style.display = 'block';
-        mockBody.style.display = 'none';
+        if (usePdfJs) {
+          if (scrollWrap) scrollWrap.style.display = 'none';
+          pdfjsEl.style.display = '';
+          window.PdfPreview.render(pdfjsEl, url);
+        } else if (previewFrame) {
+          previewFrame.src = url;
+          previewFrame.style.display = 'block';
+          mockBody.style.display = 'none';
+        }
       } else if (kind === 'image' || kind === 'pdf') {
         // 画像／PDFだが権限不足でurlが渡っていない（documents.views._pending_preview_context
         // 参照）。何も表示されず「動いていない」と誤解されないよう理由を明示する

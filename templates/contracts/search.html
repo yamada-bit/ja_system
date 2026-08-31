@@ -148,7 +148,17 @@
 
       <div>
         <div style="font-weight:bold;">文書イメージ</div>
-        <div class="pdf-view-box" style="height:320px; position:relative;">
+        <div class="pdf-view-box" style="height:320px; position:relative;" id="search-pdf-view-box">
+          {% comment %}
+            行クリック時に common.js の showSearchPreview() が、表示中ファイルの種別で
+            「PDF.js 枠（#search-pdfjs-preview）／ブラウザ内蔵ビューアの iframe（画像、または
+            PDF_JS_PREVIEW_ENABLED=False 時の PDF）／プレースホルダ」を排他表示する。
+            PDF を PDF.js で自前描画するのは、狭い枠だとブラウザ内蔵 PDF ビューアのツールバーが
+            見切れ・横長 PDF の右端が欠ける問題があるため（2026-08-31、保管画面2・編集画面・
+            検索結果詳細ポップアップと同じ理由。詳細は HTML_REIMPL_CHECKLIST_ARCHIVE.md
+            「PDFプレビューを PDF.js 自前描画へ」参照）。
+          {% endcomment %}
+          {% if pdf_js_preview_enabled %}<div class="pdfjs-preview" id="search-pdfjs-preview" style="display:none;"></div>{% endif %}
           <iframe id="search-preview-frame" style="width:100%; height:100%; border:none; display:none;"></iframe>
           <div id="search-preview-placeholder" style="text-align:center; color:#999; padding:20px;">
             <p style="font-size:24px; margin-bottom:10px;">📄</p>

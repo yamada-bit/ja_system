@@ -51,7 +51,9 @@ HTML（html4）側の改訂を伴わない指示書のみの改訂〈Rev1.2：�
 - 認証はDjangoカスタムユーザー（`accounts.Employee`、`employee_no`でログイン、Argon2ハッシュ）
 - フロントエンドはDjangoテンプレート＋素のJS（`static/js/common.js`、フレームワーク不使用）。
   原本HTMLのJS挙動（`popup-select`/`popup-detail`のドラッグ・リサイズ、各種トグル等）を
-  `base.html`＋`common.js`に集約して全画面で共有している
+  `base.html`＋`common.js`に集約して全画面で共有している。唯一の例外はPDFプレビュー描画で、
+  PDF.js（`static/vendor/pdfjs`、CDN不使用の自己ホスト、`static/js/pdf-preview.js`が制御。
+  `settings.PDF_JS_PREVIEW_ENABLED`で旧`<iframe>`方式へ戻せる。2026-08-31ユーザー依頼）を使う
 - REST API等は無し（画面内AJAX専用の`api.py`が`JsonResponse`を直接返す、DRF不使用）
 
 ### ディレクトリ構成（8アプリ）
@@ -170,8 +172,9 @@ DBレコード・ファイル実体ごと完全削除する」手動機能が202
   ユーザー指示を優先する。実装の詳細経緯（対象ファイル・関数名・設計判断の理由）は
   `HTML_REIMPL_CHECKLIST_ARCHIVE.md`の該当セクションに記録している（実プレビュー化・
   チャンク分割アップロード・OCR全文検索抽出・保管画面２の複数件登録メタデータのファイルごと
-  個別入力〈原本の`startRegisterMock()`はバッチ共通、2026-08-31ユーザー依頼〉など。詳細は
-  アーカイブ内の各節を参照）。
+  個別入力〈原本の`startRegisterMock()`はバッチ共通、2026-08-31ユーザー依頼〉・PDFプレビューの
+  PDF.js化〈`static/vendor/pdfjs`、`settings.PDF_JS_PREVIEW_ENABLED`で旧`<iframe>`へ戻せる、
+  2026-08-31ユーザー依頼〉など。詳細はアーカイブ内の各節を参照）。
 - ユーザー指示で意図的に見送った原本との差異（確認ダイアログの有無、文言の細かな違い等）は、
   実装せず理由付きで`HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録する。
 
