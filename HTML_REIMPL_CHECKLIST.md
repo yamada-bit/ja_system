@@ -130,6 +130,18 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   `#search-pdfjs-preview` 枠を追加、`common.js showSearchPreview()` を PDF は `PdfPreview.render()`・
   画像は従来 `<iframe>` に振り分け。`SearchPreviewPaneTests` 追加、`test documents contracts` 342件PASS。
   詳細はアーカイブ「検索・閲覧画面『文書イメージ』欄も PDF.js へ」節参照。
+- 職員マスタ編集のパスワード欄ヒント文言を欄外（右側）へ配置変更（2026-09-01、ユーザー依頼）：
+  `.password-note-aside`（`password-wrapper` 基準の絶対配置）。詳細はアーカイブ該当節参照。
+- 登録・編集フォームの送信ボタンが必須エラー後に押せなくなる不具合を修正（2026-09-01、ユーザー報告）：
+  二重送信防止の `onclick` が、クライアント側必須バリデーションで送信がブロックされた場合でも
+  `setTimeout` でボタンを `disabled` にしていた。`onclick` 先頭に
+  `if (!this.form.reportValidity()) return false;` を追加（登録/編集/削除フォーム16ファイル一括）。
+  `test accounts masters organizations` 211件PASS。詳細はアーカイブ「登録・編集フォームの
+  『登録/更新』ボタンが必須エラー後に押せなくなる不具合の修正」節参照。
+- 職員マスタ登録・編集：部課が1つだけの本支所で部課が表示・選択できない不具合を修正
+  （2026-09-01、ユーザー報告）：`updateSections()` の部課select無効化判定を「本支所コードが000か」
+  から「実在する部課（section_code 非空）を持つか」に変更（`staff_regist.html`/`staff_edit.html`）。
+  `test accounts` 77件PASS。詳細はアーカイブ該当節参照。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

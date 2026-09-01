@@ -54,7 +54,7 @@
         </table>
         <div style="margin-top:20px;">
           <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'masters:class_list' %}'">キャンセル</button>
-          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+          <button type="submit" class="btn-primary" onclick="if (!this.form.reportValidity()) return false; if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
         </div>
       </form>
     </div>

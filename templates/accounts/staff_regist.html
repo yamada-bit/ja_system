@@ -91,7 +91,7 @@
         </table>
         <div style="margin-top:20px;">
           <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'accounts:staff_list' %}'">キャンセル</button>
-          <button type="submit" class="btn-primary" onclick="if (!confirm('登録してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">登録</button>
+          <button type="submit" class="btn-primary" onclick="if (!this.form.reportValidity()) return false; if (!confirm('登録してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">登録</button>
         </div>
       </form>
     </div>
@@ -130,29 +130,29 @@
     sectionSelect.innerHTML = '<option value="">(選択してください)</option>';
     document.getElementById('code-dept-regist').textContent = '';
     departmentInput.value = '';
-    // 原本index.html:2156-2165のupdateCode()と同じ業務ルール：部課区分を持つのは本店(000)
-    // のみのため、本店または未選択のときだけ部課selectを有効化し、それ以外の支所を選ぶと
-    // 部課select自体を無効化する（選択肢の絞り込みだけでは原本の見た目と食い違うため、
-    // 原本フィデリティ監査で追加）。
-    if (branchCode && branchCode !== '000') {
+
+    const branchDepts = departments.filter(function (d) { return d.branch_code === branchCode; });
+    // 実在する部課（部課コードが空でない）を持つ本支所は必ず選択肢を出す。
+    // 部課区分を持たない本支所（物流センター等）は「本支所コード＋空の部課コード」の
+    // Departmentレコードが1件だけ存在する。その場合のみ部課selectを無効化し、そのレコードの
+    // pkを直接hidden inputへ入れる（departmentが必須エラーになるのを防ぐ）。
+    // 以前は原本モックに倣い branchCode === '000'（本店）の時だけ選択肢を出しており、
+    // 部課が1つだけの支所（例: 011,100,101）で部課が表示・選択できない不具合があった
+    // （2026-09-01ユーザー報告）。
+    const realSections = branchDepts.filter(function (d) { return d.section_code; });
+    if (branchCode && realSections.length === 0) {
       sectionSelect.disabled = true;
-      // 部課を持たない本支所（物流センター等）は「本支所コード＋空の部課コード」の
-      // Departmentレコードが1件だけ存在する。部課select自体を無効化するため、
-      // そのレコードのpkを直接hidden inputに設定しないとdepartmentが必須エラーになる。
-      const soleDept = departments.find(function (d) { return d.branch_code === branchCode; });
-      if (soleDept) departmentInput.value = soleDept.id;
+      if (branchDepts[0]) departmentInput.value = branchDepts[0].id;
       return;
     }
     sectionSelect.disabled = false;
-    departments
-      .filter(function (d) { return d.branch_code === branchCode; })
-      .forEach(function (d) {
-        const opt = document.createElement('option');
-        opt.value = d.id;
-        opt.textContent = d.section_name || '－';
-        opt.dataset.sectionCode = d.section_code;
-        sectionSelect.appendChild(opt);
-      });
+    realSections.forEach(function (d) {
+      const opt = document.createElement('option');
+      opt.value = d.id;
+      opt.textContent = d.section_name || '－';
+      opt.dataset.sectionCode = d.section_code;
+      sectionSelect.appendChild(opt);
+    });
   }
 
   branchSelect.addEventListener('change', updateSections);

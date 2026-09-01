@@ -39,7 +39,7 @@
         <input type="hidden" name="token" value="{{ token }}">
         <div style="margin-top:20px;">
           <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'masters:retention_list' %}?kbn={{ period.kbn }}&doc_name={{ period.doc_name }}'">キャンセル</button>
-          <button type="submit" class="btn-primary" onclick="if (!confirm('削除してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">削除</button>
+          <button type="submit" class="btn-primary" onclick="if (!this.form.reportValidity()) return false; if (!confirm('削除してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">削除</button>
         </div>
       </form>
     </div>

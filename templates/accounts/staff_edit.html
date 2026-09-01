@@ -52,7 +52,12 @@
               {{ form.password }}
               <span class="password-toggle2" id="pass-toggle-icon2">👁️</span>
               <input class="btn-secondary" type="button" value="リセット" onclick="resetPassword();">
-              <div style="font-size:12px; color:#666;">空欄のまま更新すると変更されません。</div>
+              {% comment %}
+                原本に無い追加要素（ハッシュ化のため平文プリフィルできず「空欄＝変更なし」挙動の
+                案内が要る）。セル内に縦積みすると行高が変わり他行と不揃いになるため、
+                セル右外の欄外（右側）に絶対配置する。
+              {% endcomment %}
+              <span class="password-note-aside">空欄のまま更新すると変更されません。</span>
             </td>
           </tr>
           <tr>
@@ -97,7 +102,7 @@
         </table>
         <div style="margin-top:20px;">
           <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'accounts:staff_list' %}'">キャンセル</button>
-          <button type="submit" class="btn-primary" onclick="if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+          <button type="submit" class="btn-primary" onclick="if (!this.form.reportValidity()) return false; if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
         </div>
       </form>
     </div>
@@ -153,30 +158,29 @@
     const branchCode = branchSelect.value;
     document.getElementById('code-branch-edit').textContent = branchCode;
     sectionSelect.innerHTML = '<option value="">(選択してください)</option>';
-    // 原本index.html:2156-2165のupdateCode()と同じ業務ルール（staff_regist.htmlと同一理由）。
-    // 本店(000)または未選択のときのみ部課selectを有効化する。
-    if (branchCode && branchCode !== '000') {
+
+    // staff_regist.html の updateSections() と同一ルール（詳細はそちらのコメント参照）。
+    // 実在する部課を持つ本支所は選択肢を出す。部課区分を持たない本支所（「本支所コード＋
+    // 空の部課コード」のレコードが1件だけ）の時のみ部課selectを無効化する。
+    // 以前は branchCode === '000' の時だけ選択肢を出しており、部課が1つだけの支所で
+    // 部課が表示・選択できない不具合があった（2026-09-01ユーザー報告）。
+    const branchDepts = departments.filter(function (d) { return d.branch_code === branchCode; });
+    const realSections = branchDepts.filter(function (d) { return d.section_code; });
+    if (branchCode && realSections.length === 0) {
       sectionSelect.disabled = true;
       document.getElementById('code-dept-edit').textContent = '';
-      departmentInput.value = '';
-      // 部課を持たない本支所（物流センター等）は「本支所コード＋空の部課コード」の
-      // Departmentレコードが1件だけ存在する。部課select自体を無効化するため、
-      // そのレコードのpkを直接hidden inputに設定しないとdepartmentが必須エラーになる。
-      const soleDept = departments.find(function (d) { return d.branch_code === branchCode; });
-      if (soleDept) departmentInput.value = soleDept.id;
+      departmentInput.value = branchDepts[0] ? branchDepts[0].id : '';
       return;
     }
     sectionSelect.disabled = false;
-    departments
-      .filter(function (d) { return d.branch_code === branchCode; })
-      .forEach(function (d) {
-        const opt = document.createElement('option');
-        opt.value = d.id;
-        opt.textContent = d.section_name || '－';
-        opt.dataset.sectionCode = d.section_code;
-        if (preselectId && String(d.id) === String(preselectId)) opt.selected = true;
-        sectionSelect.appendChild(opt);
-      });
+    realSections.forEach(function (d) {
+      const opt = document.createElement('option');
+      opt.value = d.id;
+      opt.textContent = d.section_name || '－';
+      opt.dataset.sectionCode = d.section_code;
+      if (preselectId && String(d.id) === String(preselectId)) opt.selected = true;
+      sectionSelect.appendChild(opt);
+    });
     const selectedOpt = sectionSelect.options[sectionSelect.selectedIndex];
     document.getElementById('code-dept-edit').textContent = selectedOpt ? (selectedOpt.dataset.sectionCode || '') : '';
     departmentInput.value = sectionSelect.value;
