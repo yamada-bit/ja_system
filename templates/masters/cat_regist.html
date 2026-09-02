@@ -57,8 +57,20 @@
               {% for error in form.name.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
             </td>
           </tr>
-          <tr><th>分類</th><td>{{ form.group }}</td></tr>
-          <tr><th>書類管理区分</th><td>{{ form.doc_kbn }}</td></tr>
+          <tr>
+            <th>分類</th>
+            <td>
+              {{ form.group }}
+              {% for error in form.group.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <th>書類管理区分</th>
+            <td>
+              {{ form.doc_kbn }}
+              {% for error in form.doc_kbn.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
+          </tr>
         </table>
         <div style="margin-top:20px;">
           <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'masters:cat_list' %}'">キャンセル</button>

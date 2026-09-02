@@ -1459,3 +1459,55 @@ class DepartmentScopingTests(TestCase):
         self._login_as(self.dept_a, PermissionRole.ADMIN)
         response = self.client.get(f"/masters/class/{self.group_a.pk}/delete/")
         self.assertContains(response, "総務部")
+
+
+class CategoryFormFieldErrorRenderingTests(TestCase):
+    """CategoryForm.clean()が書類管理区分の不整合を`add_error("group", ...)`で
+    groupフィールドに付けるが、cat_regist.html/cat_edit.htmlの「分類」行が
+    ウィジェットのみ描画しエラーループを持たなかったため、メッセージが画面に
+    一切表示されず握りつぶされていた（フォームは弾かれるがユーザーには無反応に見える）
+    バグの回帰テスト（2026-09-03ユーザー報告）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+        # 文書管理の分類に対して、契約書管理のカテゴリーを紐付けようとする不整合な組み合わせ。
+        self.doc_group = Group.objects.create(code="100", name="文書分類", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="既存カテゴリー", group=self.doc_group, doc_kbn=DocKbn.DOCUMENT
+        )
+
+    def _mismatch_payload(self, token):
+        return {
+            "token": token, "code": "900", "name": "不整合カテゴリー",
+            "group": self.doc_group.pk, "doc_kbn": DocKbn.CONTRACT,
+            "department": self.department.pk,
+        }
+
+    def test_regist_shows_doc_kbn_mismatch_message(self):
+        response = self.client.get("/masters/cat/regist/")
+        response = self.client.post(
+            "/masters/cat/regist/", self._mismatch_payload(response.context["token"])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "書類管理区分")
+        self.assertContains(response, "一致しません")
+        self.assertFalse(Category.objects.filter(code="900").exists())
+
+    def test_edit_shows_doc_kbn_mismatch_message(self):
+        response = self.client.get(f"/masters/cat/{self.category.pk}/edit/")
+        payload = self._mismatch_payload(response.context["token"])
+        payload["code"] = "001"
+        response = self.client.post(f"/masters/cat/{self.category.pk}/edit/", payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "一致しません")
+        self.category.refresh_from_db()
+        self.assertEqual(self.category.doc_kbn, DocKbn.DOCUMENT)
