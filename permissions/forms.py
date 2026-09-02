@@ -108,7 +108,13 @@ class AuthorityEditForm(forms.ModelForm):
             self.fields[name].required = False
         if not show_contract_visible_departments:
             del self.fields["contract_visible_departments"]
-        if editable_roles is not None:
-            self.fields["role"].choices = [
-                choice for choice in PermissionRole.choices if choice[0] in editable_roles
-            ]
+        # Django の ModelForm は blank=True でない CharField(choices) でも、default も initial も
+        # 無い場合に空選択肢 ("", "---------") を自動付与する（Field.formfield の include_blank）。
+        # xlsx 権限管理!B113-115 はシステム権限を「1:管理者/2:所属長/3:職員 から選択」と定めており
+        # 空欄は選択肢に無いため、editable_roles 未指定（管理者が編集）でも必ず PermissionRole の
+        # 3値のみに絞る。以前は editable_roles 指定時（所属長が編集）しか choices を上書きしておらず、
+        # 管理者編集時のプルダウンに `---------` が出ていた（2026-09-02 ユーザー報告）。
+        allowed_roles = editable_roles if editable_roles is not None else {c[0] for c in PermissionRole.choices}
+        self.fields["role"].choices = [
+            choice for choice in PermissionRole.choices if choice[0] in allowed_roles
+        ]

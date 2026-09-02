@@ -367,6 +367,18 @@ class AuthorityEditFormTests(TestCase):
         form = AuthorityEditForm()
         self.assertEqual(expected_fields, set(form.fields.keys()))
 
+    def test_role_field_has_no_blank_choice_for_admin_editor(self):
+        """xlsx 権限管理!B113-115「システム権限は 1:管理者/2:所属長/3:職員 から選択」。
+        管理者が編集する場合（editable_roles未指定）でも空選択肢 `---------` を出さないこと
+        （Django ModelFormの自動付与を__init__で打ち消している。2026-09-02ユーザー報告）。
+        """
+        form = AuthorityEditForm()
+        self.assertEqual(
+            [c[0] for c in form.fields["role"].choices],
+            [PermissionRole.ADMIN, PermissionRole.MANAGER, PermissionRole.STAFF],
+        )
+        self.assertNotIn("", [c[0] for c in form.fields["role"].choices])
+
     def test_multi_select_display_fields_render_as_textarea(self):
         """簡易設計指示書 Rev1.3（権限管理!AI89「画面変更」）で、文書管理-分類-表示／
         契約書-部門間閲覧設定／契約書-分類-表示の3欄の表示用要素が1行inputから複数行textareaに

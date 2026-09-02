@@ -142,6 +142,12 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   （2026-09-01、ユーザー報告）：`updateSections()` の部課select無効化判定を「本支所コードが000か」
   から「実在する部課（section_code 非空）を持つか」に変更（`staff_regist.html`/`staff_edit.html`）。
   `test accounts` 77件PASS。詳細はアーカイブ該当節参照。
+- 権限管理編集「システム権限」プルダウンに空選択肢 `---------` が出る不具合を修正
+  （2026-09-02、ユーザー報告）：`PermissionProfile.role` が blank/default なしの `CharField(choices)`
+  のため Django ModelForm が空選択肢を自動付与していた。`AuthorityEditForm.__init__` で
+  `editable_roles` 未指定（管理者編集）時も `role.choices` を `PermissionRole` の3値のみに絞る
+  よう変更（xlsx 権限管理!B113-115）。`test permissions` 65件PASS。「権限管理」シートは
+  Rev1.4まで本件以外に仕様乖離なしを行単位監査で確認済み。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加
