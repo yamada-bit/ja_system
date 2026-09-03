@@ -805,6 +805,16 @@ class OtherSettingsRoutingTests(TestCase):
             {"new_password": "abc12!", "new_password_confirm": "abc12!", "token": token},
         )
         self.assertContains(response3, "半角英数6桁以上")
+
+        # 全角文字が含まれるケース（B152「全角文字が含まれる場合は…エラー」）。
+        response = self.client.get("/settings/other/")
+        token = response.context["token"]
+        response4 = self.client.post(
+            "/settings/other/",
+            {"new_password": "ａｂｃ１２３", "new_password_confirm": "ａｂｃ１２３", "token": token},
+        )
+        self.assertContains(response4, "半角英数6桁以上")
+
         self.employee.refresh_from_db()
         self.assertTrue(self.employee.check_password("pass1234"))
 
