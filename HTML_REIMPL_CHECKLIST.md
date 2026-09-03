@@ -168,6 +168,28 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   未実行だったため、`retention_edit.html`/`retention_regist.html` に `DOMContentLoaded` で
   `handlePermanent(#id_period_unit)` を1回呼ぶ初期化を追加。実プレビューで「永年」→数値欄
   disabled、単位変更で enable/disable 追従、非永年は enable を実測確認。回帰テスト1件追加。
+- 「操作履歴ログ」シートの行単位全数監査（2026-09-03、ユーザー依頼）：シートは Rev1.1 で確定・
+  Rev1.3→Rev1.4 無改訂（セルテキスト・埋め込み画像1枚ともハッシュ一致）。職員番号完全一致／
+  職員名フルネーム検索／イベントメッセージAND検索／個人情報書類絞り込み／初期ソート（操作日時
+  降順）／内部スクロール／ページャー100件／総件数表示／CSV出力／イベントメッセージ連結形式
+  （B68-76）はすべて実装済み。**唯一の乖離＝B66「操作内容は『画面名＋□(全角スペース)＋ボタン名』」
+  に対し `action` 引数の全リテラルが半角スペース区切り**だった（`models.py` の help_text・
+  `services.py` の docstring 自身は「全角スペース」と記載＝コードのみ不一致。2026-08-27 監査は
+  連結形式のみ検証し区切り文字幅は対象外だった）ため修正：`action` の画面名／ボタン名境界を
+  全角スペースへ統一（views/master_views/record_views/services/csv_import_services/
+  purge_expired_deleted_records の約40リテラル＋テスト assertion、20ファイル）。`manage.py test`
+  全780件PASS。区切り修正後、モックのサンプルデータとは画面名の粒度が異なる（モック「文書　検索」
+  ↔実装「文書検索　検索」等）が、これは再実装時に実画面名を採用した既存の意図的差異で今回は
+  不変。詳細はアーカイブ「『操作履歴ログ』シートの行単位全数監査」節参照。
+- 操作履歴ログの最大保存件数／CSV出力最大件数（B51-52）の実装（2026-09-03、ユーザー依頼）：
+  それまで「2026-08-19 ユーザー確認済みで実装見送り」だった項目をユーザー指示で実装。「3ヵ月分」を
+  `settings.AUDIT_LOG_RETENTION_MONTHS`（`.env` 経由、既定3ヵ月）で表現。未使用のまま残っていた
+  `masters.SystemSetting.audit_log_retention_months` は削除し `.env` 経由へ一本化（`SystemSetting`
+  で実使用は `session_idle_timeout_minutes` のみに）。`audit.services.retention_cutoff_date()` を
+  一覧・CSV共通の絞り込みに適用（保持下限より古いログは表示・出力しない）＋
+  `purge_expired_audit_logs` 管理コマンド（日次バッチ、`.bat` 付き）で物理削除。`manage.py test`
+  全785件PASS（新規5件）。詳細はアーカイブ「操作履歴ログの最大保存件数／CSV出力最大件数（B51-52）
+  の実装」節参照。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

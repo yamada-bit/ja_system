@@ -217,7 +217,7 @@ class ResetPermissionProfileTests(TestCase):
             retired_changed=False,
             actor=self.employee,
         )
-        entry = AuditLog.objects.get(action="権限管理 自動リセット")
+        entry = AuditLog.objects.get(action="権限管理　自動リセット")
         self.assertEqual(entry.employee_no, self.employee.employee_no)
         self.assertIn(self.employee.name, entry.event_message)
 
@@ -266,7 +266,7 @@ class ResetPermissionProfileTests(TestCase):
         )
         self.assertFalse(PermissionProfile.objects.filter(employee=other).exists())
         # プロファイルが無くリセット自体が発生しないため、監査ログも記録されないこと。
-        self.assertFalse(AuditLog.objects.filter(action="権限管理 自動リセット").exists())
+        self.assertFalse(AuditLog.objects.filter(action="権限管理　自動リセット").exists())
 
 
 class FilterStaffQuerysetTests(TestCase):
@@ -414,7 +414,7 @@ class StaffCsvExportViewTests(TestCase):
         personal_info_flag=Trueで操作履歴ログへ記録すること（コード監査で発見された記録漏れの修正）。
         """
         self.client.get("/accounts/staff/csv/")
-        entry = AuditLog.objects.get(action="職員マスタ CSV出力")
+        entry = AuditLog.objects.get(action="職員マスタ　CSV出力")
         self.assertEqual(entry.employee_no, "1111")
         self.assertTrue(entry.personal_info_flag)
 
@@ -561,7 +561,7 @@ class StaffRegistEditAuditLogTests(TestCase):
                 "position": Position.KACHO,
             },
         )
-        entry = AuditLog.objects.get(action="職員マスタ 新規登録")
+        entry = AuditLog.objects.get(action="職員マスタ　新規登録")
         self.assertEqual(entry.employee_no, "1")
         self.assertIn("2020", entry.event_message)
 
@@ -581,7 +581,7 @@ class StaffRegistEditAuditLogTests(TestCase):
                 "position": Position.KACHO,
             },
         )
-        entry = AuditLog.objects.get(action="職員マスタ 更新")
+        entry = AuditLog.objects.get(action="職員マスタ　更新")
         self.assertEqual(entry.employee_no, "1")
         self.assertIn("3030", entry.event_message)
 
@@ -606,7 +606,7 @@ class StaffRegistEditAuditLogTests(TestCase):
                 "position": Position.KACHO,
             },
         )
-        entry = AuditLog.objects.get(action="職員マスタ 更新", employee_no="1")
+        entry = AuditLog.objects.get(action="職員マスタ　更新", employee_no="1")
         self.assertEqual(
             entry.event_message,
             "職員：差分太郎改(3031),氏名：差分太郎 -> 差分太郎改,職階：考査役 -> 調査役",
@@ -629,12 +629,12 @@ class StaffRegistEditAuditLogTests(TestCase):
                 "position": Position.KACHO,
             },
         )
-        entry = AuditLog.objects.get(action="職員マスタ 更新", employee_no="1")
+        entry = AuditLog.objects.get(action="職員マスタ　更新", employee_no="1")
         self.assertEqual(entry.event_message, "職員：無変更太郎(3032)")
 
     def test_edit_password_change_records_marker_without_actual_value(self):
         """CLAUDE.mdのパスワードマスキング方針により、パスワード自体の値はログに残さない
-        （core.views.OtherSettingsView.postの「パスワード 更新」と同じ判断）。
+        （core.views.OtherSettingsView.postの「パスワード　更新」と同じ判断）。
         """
         target = Employee.objects.create_user(
             employee_no="3033", name="鍵太郎", password="x",
@@ -652,7 +652,7 @@ class StaffRegistEditAuditLogTests(TestCase):
                 "password": "shinpasuwaado",
             },
         )
-        entry = AuditLog.objects.get(action="職員マスタ 更新", employee_no="1")
+        entry = AuditLog.objects.get(action="職員マスタ　更新", employee_no="1")
         self.assertNotIn("shinpasuwaado", entry.event_message)
         self.assertEqual(entry.event_message, "職員：鍵太郎(3033),パスワード：(変更あり) -> (変更あり)")
 
@@ -720,7 +720,7 @@ class StaffEditViewResetPermissionIntegrationTests(TestCase):
         profile.refresh_from_db()
         self.assertEqual(profile.role, PermissionRole.STAFF)
         self.assertFalse(profile.doc_download)
-        self.assertTrue(AuditLog.objects.filter(action="権限管理 自動リセット").exists())
+        self.assertTrue(AuditLog.objects.filter(action="権限管理　自動リセット").exists())
 
     def test_no_change_via_post_does_not_reset_permission_profile(self):
         """比較対象として、実際に値を変えないPOSTではリセットされないことも合わせて確認する。"""
@@ -1054,7 +1054,7 @@ class ImportStaffCsvServiceTests(TestCase):
         PermissionProfile.objects.create(employee=employee, role=PermissionRole.STAFF)
         upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役,1"])
         import_staff_csv(upload, actor=self.actor)
-        entry = AuditLog.objects.get(action="職員マスタ CSV取込 所属長昇格")
+        entry = AuditLog.objects.get(action="職員マスタ　CSV取込 所属長昇格")
         self.assertIn("0832", entry.event_message)
 
 

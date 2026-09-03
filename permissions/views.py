@@ -109,7 +109,7 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # （原本フィデリティ再監査で発見：記録漏れ）。
         audit_services.log(
             employee=request.user,
-            action="権限管理 CSV出力",
+            action="権限管理　CSV出力",
             event_message=f"権限管理一覧CSV出力,件数：{count}件",
             personal_info_flag=True,
         )
@@ -225,7 +225,7 @@ class AuthorityEditView(LoginRequiredMixin, View):
         # （フラグ数が多く全項目の差分表示は本監査の範囲を超えるため、対象の追跡可能性を優先）。
         audit_services.log(
             employee=request.user,
-            action="権限管理 更新",
+            action="権限管理　更新",
             event_message=f"職員：{employee.name}({employee.employee_no})",
         )
         messages.success(request, f"「{employee.name}」の権限設定を更新しました。")

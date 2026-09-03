@@ -136,7 +136,7 @@ class OtherSettingsView(LoginRequiredMixin, View):
         update_session_auth_hash(request, request.user)
         # 原本index.html:3225の操作履歴ログサンプルに「パスワード　更新」行があるが、
         # 実際のパスワード値（旧→新）はハッシュ化前提の規約上ログに残さない。
-        audit_services.log(employee=request.user, action="パスワード 更新", event_message="パスワードを更新しました。")
+        audit_services.log(employee=request.user, action="パスワード　更新", event_message="パスワードを更新しました。")
         messages.success(request, "パスワードを更新しました。")
         return redirect("core:other_settings")
 
@@ -225,7 +225,7 @@ class OtherMainEditView(LoginRequiredMixin, View):
         logger.info("メイン画面項目設定を更新しました: department_id=%s", department.pk)
         audit_services.log(
             employee=request.user,
-            action="メイン画面項目設定 更新",
+            action="メイン画面項目設定　更新",
             event_message=f"部署：{department}",
         )
         messages.success(request, f"「{department}」のメイン画面項目を更新しました。")
@@ -273,7 +273,7 @@ class OtherLogoutEditView(LoginRequiredMixin, View):
         logger.info("自動ログアウト時間を更新しました: %s分", setting.session_idle_timeout_minutes)
         audit_services.log(
             employee=request.user,
-            action="自動ログアウト時間設定 更新",
+            action="自動ログアウト時間設定　更新",
             event_message=f"時間(分)：{setting.session_idle_timeout_minutes}",
         )
         messages.success(request, "自動ログアウト時間を更新しました。")

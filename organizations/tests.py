@@ -245,7 +245,7 @@ class DeptRegistEditAuditLogTests(TestCase):
             "/organizations/regist/",
             {"token": token, "branch_code": "999", "branch_name": "新支店", "section_code": "01", "section_name": "総務部"},
         )
-        entry = AuditLog.objects.get(action="部署管理 新規登録")
+        entry = AuditLog.objects.get(action="部署管理　新規登録")
         self.assertEqual(entry.employee_no, "1")
         self.assertIn("999", entry.event_message)
 
@@ -258,7 +258,7 @@ class DeptRegistEditAuditLogTests(TestCase):
             f"/organizations/{target.pk}/edit/",
             {"token": token, "branch_name": "テスト支店(新)", "section_name": "経理部(新)", "dept_action": "none"},
         )
-        entry = AuditLog.objects.get(action="部署管理 更新")
+        entry = AuditLog.objects.get(action="部署管理　更新")
         self.assertEqual(entry.employee_no, "1")
         self.assertIn("777", entry.event_message)
 
@@ -394,7 +394,7 @@ class DeptEditIntegrityErrorTests(TestCase):
                 viewer_department=self.dept_x, visible_department=self.dept_y
             ).exists()
         )
-        self.assertFalse(AuditLog.objects.filter(action="部署管理 統合").exists())
+        self.assertFalse(AuditLog.objects.filter(action="部署管理　統合").exists())
 
 
 class ApplyDeptActionTests(TestCase):
@@ -504,7 +504,7 @@ class DeptEditViewMergeSplitTests(TestCase):
                 viewer_department=self.dept_x, visible_department=self.dept_y
             ).exists()
         )
-        self.assertTrue(AuditLog.objects.filter(action="部署管理 統合").exists())
+        self.assertTrue(AuditLog.objects.filter(action="部署管理　統合").exists())
         # 部署マスタからの削除は行わない（Rev1.1で論理削除から閲覧部署範囲テーブル更新へ変更）。
         self.assertTrue(Department.objects.filter(pk=self.dept_y.pk).exists())
 

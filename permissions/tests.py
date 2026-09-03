@@ -506,7 +506,7 @@ class AuthorityEditViewTests(TestCase):
         get_response = self.client.get(f"/permissions/{self.other_employee.pk}/edit/")
         token = get_response.context["token"]
         self.client.post(f"/permissions/{self.other_employee.pk}/edit/", {"role": PermissionRole.STAFF, "token": token})
-        self.assertTrue(AuditLog.objects.filter(action="権限管理 更新").exists())
+        self.assertTrue(AuditLog.objects.filter(action="権限管理　更新").exists())
 
 
 class ContractVisibleDepartmentsAdminOnlyTests(TestCase):
@@ -611,7 +611,7 @@ class AuthorityCsvExportViewTests(TestCase):
         from audit.models import AuditLog
 
         self.client.get("/permissions/csv/")
-        entry = AuditLog.objects.get(action="権限管理 CSV出力")
+        entry = AuditLog.objects.get(action="権限管理　CSV出力")
         self.assertEqual(entry.employee_no, "1")
         self.assertTrue(entry.personal_info_flag)
 

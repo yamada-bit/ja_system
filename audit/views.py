@@ -75,7 +75,7 @@ class AuditLogCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # 出力するイベントのため、監査ログにも記録する。
         audit_services.log(
             employee=request.user,
-            action="操作履歴ログ CSV出力",
+            action="操作履歴ログ　CSV出力",
             event_message=f"操作履歴ログ一覧CSV出力,件数：{count}件",
             personal_info_flag=True,
         )

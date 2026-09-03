@@ -881,20 +881,20 @@ class SearchAuditLogTests(TestCase):
 
     def test_bare_screen_open_does_not_create_audit_log(self):
         self.client.get("/contracts/search/")
-        self.assertFalse(AuditLog.objects.filter(action="契約書検索 検索").exists())
+        self.assertFalse(AuditLog.objects.filter(action="契約書検索　検索").exists())
 
     def test_search_submission_creates_audit_log_with_filled_fields_only(self):
         response = self.client.get("/contracts/search/", {"title": "覚書", "title_match": "or"})
         self.assertEqual(response.status_code, 200)
-        entry = AuditLog.objects.get(action="契約書検索 検索")
+        entry = AuditLog.objects.get(action="契約書検索　検索")
         self.assertEqual(entry.employee_no, "1")
         self.assertEqual(entry.event_message, "契約書タイトル：覚書")
 
     def test_pagination_click_does_not_create_duplicate_audit_log(self):
         self.client.get("/contracts/search/", {"title": "覚書"})
-        self.assertEqual(AuditLog.objects.filter(action="契約書検索 検索").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="契約書検索　検索").count(), 1)
         self.client.get("/contracts/search/", {"title": "覚書", "page": "1"})
-        self.assertEqual(AuditLog.objects.filter(action="契約書検索 検索").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="契約書検索　検索").count(), 1)
 
 
 class DownloadViewTests(TestCase):
@@ -930,7 +930,7 @@ class DownloadViewTests(TestCase):
         )
         response = self.client.get(f"/contracts/{self.contract.pk}/download/")
         self.assertEqual(response.status_code, 200)
-        entry = AuditLog.objects.get(action="契約書検索 ダウンロード")
+        entry = AuditLog.objects.get(action="契約書検索　ダウンロード")
         self.assertEqual(entry.employee_no, "1")
         # 原本index.html:3310の操作履歴ログサンプル「ファイル名：契約書_001」形式
         # （タイトルではなく実ファイル名）。
@@ -939,7 +939,7 @@ class DownloadViewTests(TestCase):
     def test_denied_download_does_not_create_audit_log(self):
         response = self.client.get(f"/contracts/{self.contract.pk}/download/")
         self.assertEqual(response.status_code, 403)
-        self.assertFalse(AuditLog.objects.filter(action="契約書検索 ダウンロード").exists())
+        self.assertFalse(AuditLog.objects.filter(action="契約書検索　ダウンロード").exists())
 
     def test_display_name_strips_uuid_prefix(self):
         """core.models.UuidPrefixedFilenameMixin.display_name。RelatedFile側（付属資料）は
@@ -1018,7 +1018,7 @@ class BulkDownloadViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         zf = zipfile.ZipFile(BytesIO(response.content))
         self.assertEqual(len(zf.namelist()), 1)
-        entry = AuditLog.objects.get(action="契約書検索 一括ダウンロード")
+        entry = AuditLog.objects.get(action="契約書検索　一括ダウンロード")
         self.assertIn("1件", entry.event_message)
 
     def test_invalid_pks_values_are_ignored_not_crashing(self):
@@ -1184,7 +1184,7 @@ class BulkEditViewTests(TestCase):
         cs[0].refresh_from_db(); cs[1].refresh_from_db()
         self.assertEqual(cs[0].title, "c0-new")
         self.assertEqual(cs[1].title, "c1")
-        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２　更新").count(), 1)
         self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
 
     def test_delete_mark_and_commit_logical_deletes(self):
@@ -1200,7 +1200,7 @@ class BulkEditViewTests(TestCase):
         cs[0].refresh_from_db()
         self.assertTrue(cs[0].is_deleted)
         self.assertEqual(resp.context["complete"]["counts"]["deleted"], 1)
-        self.assertTrue(AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="c0").exists())
+        self.assertTrue(AuditLog.objects.filter(action="保管画面２　削除", event_message__contains="c0").exists())
 
     def test_delete_mark_locks_all_contract_fields(self):
         """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 M-3）で発見：
@@ -1447,7 +1447,7 @@ class PreviewViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("inline", response["Content-Disposition"])
         self.assertNotIn("attachment", response["Content-Disposition"])
-        self.assertTrue(AuditLog.objects.filter(action="契約書検索 プレビュー").exists())
+        self.assertTrue(AuditLog.objects.filter(action="契約書検索　プレビュー").exists())
 
     def test_missing_file_returns_404(self):
         PermissionProfile.objects.create(
@@ -3016,7 +3016,7 @@ class EditDeleteViewTests(TestCase):
         self.assertTrue(contract.is_deleted)
         self.assertTrue(Contract.objects.filter(pk=contract.pk).exists())
         self.assertTrue(
-            AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="単独削除対象").exists()
+            AuditLog.objects.filter(action="保管画面２　削除", event_message__contains="単独削除対象").exists()
         )
 
     def test_delete_without_contract_edit_permission_is_rejected(self):

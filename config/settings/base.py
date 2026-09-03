@@ -199,6 +199,16 @@ CONTRACT_RETENTION_YEARS = env.int("CONTRACT_RETENTION_YEARS", default=10)
 # （2026-08-27フィデリティ監査で発見・修正）。
 RETENTION_PERMANENT_YEARS = env.int("RETENTION_PERMANENT_YEARS", default=50)
 
+# 操作履歴ログ(audit.AuditLog)の最大保存期間(ヵ月)。既定3ヵ月。
+# xlsx 操作履歴ログ!B51-52「操作履歴ログの最大保存件数(=CSV出力最大件数)設定値は、初期値を
+# 3ヵ月分とし、設定ファイル等で定義し、先方より変更依頼を受けた際に容易に変更できること」。
+# 「3ヵ月分」を月数で表現する。この期間より古いログは core.management.commands.
+# purge_expired_audit_logs（日次バッチ想定）で物理削除し、一覧表示・CSV出力の対象からも外す
+# （audit.services.retention_cutoff_date）。CONTRACT_RETENTION_YEARS/RETENTION_PERMANENT_YEARS
+# と同じ理由でDB(masters.SystemSetting)ではなく.env経由の設定値にしている（値を変更する経路が
+# 実質DB直接操作しか無く「設定ファイル等で容易に変更できる」要件を満たせていなかったため）。
+AUDIT_LOG_RETENTION_MONTHS = env.int("AUDIT_LOG_RETENTION_MONTHS", default=3)
+
 # スキャンPDF（画像PDF）のOCR（Google Cloud Vision）を有効化するかどうか。ja_pj_oldでは
 # コンプライアンス部門の未承認事項として既定Falseだったが、新ja_pjでは承認済みの前提のため
 # 既定True（2026-08-10ユーザー指示）。Falseにすると、テキスト層の無いPDFはextracted_textが

@@ -754,7 +754,7 @@ class SearchAuditLogTests(TestCase):
         """クエリパラメータが1つも無い初回アクセスは「検索開始」ボタンの送信ではないため
         記録しない（is_search_form_submissionのdocstring参照）。"""
         self.client.get("/documents/search/")
-        self.assertFalse(AuditLog.objects.filter(action="文書検索 検索").exists())
+        self.assertFalse(AuditLog.objects.filter(action="文書検索　検索").exists())
 
     def test_search_submission_creates_audit_log_with_filled_fields_only(self):
         response = self.client.get(
@@ -762,7 +762,7 @@ class SearchAuditLogTests(TestCase):
             {"title": "規定", "freeword": "テスト 資料", "title_match": "or", "freeword_match": "or"},
         )
         self.assertEqual(response.status_code, 200)
-        entry = AuditLog.objects.get(action="文書検索 検索")
+        entry = AuditLog.objects.get(action="文書検索　検索")
         self.assertEqual(entry.employee_no, "1")
         self.assertEqual(entry.event_message, "文書タイトル：規定,フリーワード：テスト 資料")
 
@@ -771,16 +771,16 @@ class SearchAuditLogTests(TestCase):
         個別項目が無いため定型文言にする。"""
         response = self.client.get("/documents/search/", {"title": "", "freeword": ""})
         self.assertEqual(response.status_code, 200)
-        entry = AuditLog.objects.get(action="文書検索 検索")
+        entry = AuditLog.objects.get(action="文書検索　検索")
         self.assertEqual(entry.event_message, "(条件指定なし)")
 
     def test_pagination_click_does_not_create_duplicate_audit_log(self):
         """ページャー/ソートの再アクセスは新たな検索操作ではないため対象外にする
         （is_search_form_submissionのdocstring参照）。"""
         self.client.get("/documents/search/", {"title": "規定"})
-        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="文書検索　検索").count(), 1)
         self.client.get("/documents/search/", {"title": "規定", "page": "1"})
-        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="文書検索　検索").count(), 1)
 
     def test_search_submission_with_department_multiselect_field(self):
         """department/group/category/yearはModelMultipleChoiceField/MultipleChoiceFieldで
@@ -791,14 +791,14 @@ class SearchAuditLogTests(TestCase):
         """
         response = self.client.get("/documents/search/", {"department": str(self.department.pk)})
         self.assertEqual(response.status_code, 200)
-        entry = AuditLog.objects.get(action="文書検索 検索")
+        entry = AuditLog.objects.get(action="文書検索　検索")
         self.assertEqual(entry.event_message, f"部署：{self.department}")
 
     def test_sort_click_does_not_create_duplicate_audit_log(self):
         self.client.get("/documents/search/", {"title": "規定"})
-        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="文書検索　検索").count(), 1)
         self.client.get("/documents/search/", {"title": "規定", "sort": "title", "dir": "asc"})
-        self.assertEqual(AuditLog.objects.filter(action="文書検索 検索").count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="文書検索　検索").count(), 1)
 
 
 class DownloadViewTests(TestCase):
@@ -839,7 +839,7 @@ class DownloadViewTests(TestCase):
         )
         response = self.client.get(f"/documents/{self.document.pk}/download/")
         self.assertEqual(response.status_code, 200)
-        entry = AuditLog.objects.get(action="文書検索 ダウンロード")
+        entry = AuditLog.objects.get(action="文書検索　ダウンロード")
         self.assertEqual(entry.employee_no, "1")
         # 原本index.html:3310の操作履歴ログサンプル「ファイル名：契約書_001」形式
         # （タイトルではなく実ファイル名）。
@@ -848,7 +848,7 @@ class DownloadViewTests(TestCase):
     def test_denied_download_does_not_create_audit_log(self):
         response = self.client.get(f"/documents/{self.document.pk}/download/")
         self.assertEqual(response.status_code, 403)
-        self.assertFalse(AuditLog.objects.filter(action="文書検索 ダウンロード").exists())
+        self.assertFalse(AuditLog.objects.filter(action="文書検索　ダウンロード").exists())
 
     def test_download_audit_log_records_document_privacy_flag_value(self):
         """core.record_views.BaseFileServeView.audit_extra_kwargs()（documents側の
@@ -863,7 +863,7 @@ class DownloadViewTests(TestCase):
         self.document.privacy_flag = False
         self.document.save(update_fields=["privacy_flag"])
         self.client.get(f"/documents/{self.document.pk}/download/")
-        entry = AuditLog.objects.get(action="文書検索 ダウンロード")
+        entry = AuditLog.objects.get(action="文書検索　ダウンロード")
         self.assertFalse(entry.personal_info_flag)
 
     def test_display_name_strips_uuid_prefix(self):
@@ -1013,7 +1013,7 @@ class BulkDownloadViewTests(TestCase):
         self.assertEqual(len(names), 2)
         self.assertTrue(any("test1" in n for n in names))
         self.assertTrue(any("test2" in n for n in names))
-        entry = AuditLog.objects.get(action="文書検索 一括ダウンロード")
+        entry = AuditLog.objects.get(action="文書検索　一括ダウンロード")
         self.assertIn("2件", entry.event_message)
 
     def test_no_selection_redirects_with_message(self):
@@ -1245,7 +1245,7 @@ class BulkEditViewTests(TestCase):
         # DBは一切変わっていない
         doc1.refresh_from_db()
         self.assertEqual(doc1.title, "doc1")
-        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 0)
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２　更新").count(), 0)
 
     def test_update_commits_only_changed_pages_and_lists_all_with_status(self):
         docs = [self._create_document(f"d{i}") for i in range(5)]
@@ -1272,7 +1272,7 @@ class BulkEditViewTests(TestCase):
         self.assertEqual(docs[0].title, "d0-new")
         self.assertEqual(docs[2].title, "d2-new")
         self.assertEqual(docs[4].title, "d4")
-        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 2)
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２　更新").count(), 2)
         self.assertIsNone(self.client.session.get("documents_bulk_edit"))
 
     def test_visiting_pages_without_changes_does_not_update_anything(self):
@@ -1283,7 +1283,7 @@ class BulkEditViewTests(TestCase):
         resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[2]))
 
         self.assertEqual(resp.context["complete"]["counts"], {"updated": 0, "unchanged": 3, "deleted": 0})
-        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 更新").count(), 0)
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２　更新").count(), 0)
 
     def test_delete_mark_locks_fields_and_toggles_label(self):
         docs = [self._create_document(f"d{i}") for i in range(2)]
@@ -1320,7 +1320,7 @@ class BulkEditViewTests(TestCase):
         self.assertIsNotNone(docs[1].deleted_at)
         self.assertEqual(resp.context["complete"]["counts"]["deleted"], 1)
         self.assertTrue(
-            AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="d1").exists()
+            AuditLog.objects.filter(action="保管画面２　削除", event_message__contains="d1").exists()
         )
 
     def _age_document(self, doc, *, days):
@@ -1528,7 +1528,7 @@ class PreviewViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("inline", response["Content-Disposition"])
         self.assertNotIn("attachment", response["Content-Disposition"])
-        self.assertTrue(AuditLog.objects.filter(action="文書検索 プレビュー").exists())
+        self.assertTrue(AuditLog.objects.filter(action="文書検索　プレビュー").exists())
 
     def test_missing_file_returns_404(self):
         PermissionProfile.objects.create(
@@ -2810,7 +2810,7 @@ class UploadStep2PerFileMetadataTests(TestCase):
         )
         # 保存満了日は各ファイルの保存期間で個別に計算される。
         self.assertNotEqual(a.expiry_date, b.expiry_date)
-        self.assertEqual(AuditLog.objects.filter(action="保管画面２ 登録").count(), 2)
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２　登録").count(), 2)
 
     def test_second_file_invalid_blocks_all_and_reports_index(self):
         from django.contrib.messages import get_messages
@@ -3291,7 +3291,7 @@ class EditDeleteViewTests(TestCase):
         self.assertIsNotNone(doc.deleted_at)
         self.assertTrue(Document.objects.filter(pk=doc.pk).exists())
         self.assertTrue(
-            AuditLog.objects.filter(action="保管画面２ 削除", event_message__contains="単独削除対象").exists()
+            AuditLog.objects.filter(action="保管画面２　削除", event_message__contains="単独削除対象").exists()
         )
 
     def test_delete_rejected_after_window_even_via_direct_post(self):

@@ -94,7 +94,7 @@ def import_staff_csv(file_obj, *, actor):
     )
     audit_services.log(
         employee=actor,
-        action="職員マスタ CSV取込",
+        action="職員マスタ　CSV取込",
         event_message=f"職員マスタCSV取込,{summary}",
     )
     return summary
@@ -250,6 +250,6 @@ def _apply_manager_flag(employee, manager_flag, actor):
         # 以前はlogger.infoのみで、CSV取込経由の所属長昇格が/audit/画面から追跡できなかった）。
         audit_services.log(
             employee=actor,
-            action="職員マスタ CSV取込 所属長昇格",
+            action="職員マスタ　CSV取込 所属長昇格",
             event_message=f"職員：{employee.name}({employee.employee_no}),所属長フラグにより権限を所属長へ更新しました",
         )

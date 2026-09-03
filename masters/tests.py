@@ -1027,7 +1027,7 @@ class MasterAuditLogContentTests(TestCase):
                 "department": other_department.pk,
             },
         )
-        entry = AuditLog.objects.get(action="分類管理 更新")
+        entry = AuditLog.objects.get(action="分類管理　更新")
         self.assertEqual(
             entry.event_message,
             f"No.1,分類名：分類Ａ改,分類名：分類Ａ -> 分類Ａ改,部署：{self.department} -> {other_department}",
@@ -1040,7 +1040,7 @@ class MasterAuditLogContentTests(TestCase):
         group = Group.objects.create(code="2", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=self.department)
         token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
         self.client.post(f"/masters/class/{group.pk}/delete/", {"token": token})
-        entry = AuditLog.objects.get(action="分類管理 削除")
+        entry = AuditLog.objects.get(action="分類管理　削除")
         self.assertIn("No.2", entry.event_message)
         self.assertIn("分類Ｂ", entry.event_message)
 
@@ -1056,7 +1056,7 @@ class MasterAuditLogContentTests(TestCase):
                 "doc_kbn": DocKbn.DOCUMENT, "department": self.department.pk,
             },
         )
-        entry = AuditLog.objects.get(action="カテゴリー管理 新規登録")
+        entry = AuditLog.objects.get(action="カテゴリー管理　新規登録")
         self.assertIn("新カテゴリー", entry.event_message)
         self.assertIn("分類Ａ", entry.event_message)
         self.assertIn(str(self.department), entry.event_message)
@@ -1076,7 +1076,7 @@ class MasterAuditLogContentTests(TestCase):
                 "doc_kbn": DocKbn.DOCUMENT, "department": self.department.pk,
             },
         )
-        entry = AuditLog.objects.get(action="カテゴリー管理 更新")
+        entry = AuditLog.objects.get(action="カテゴリー管理　更新")
         self.assertIn("カテゴリーＡ改", entry.event_message)
 
     def test_category_delete_creates_audit_log_with_content(self):
@@ -1088,7 +1088,7 @@ class MasterAuditLogContentTests(TestCase):
         )
         token = self.client.get(f"/masters/cat/{category.pk}/delete/").context["token"]
         self.client.post(f"/masters/cat/{category.pk}/delete/", {"token": token})
-        entry = AuditLog.objects.get(action="カテゴリー管理 削除")
+        entry = AuditLog.objects.get(action="カテゴリー管理　削除")
         self.assertIn("No.002", entry.event_message)
         self.assertIn("カテゴリーＢ", entry.event_message)
 
@@ -1103,7 +1103,7 @@ class MasterAuditLogContentTests(TestCase):
                 "period_value": "5", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
             },
         )
-        entry = AuditLog.objects.get(action="保存期間設定 新規登録")
+        entry = AuditLog.objects.get(action="保存期間設定　新規登録")
         self.assertIn("文書", entry.event_message)
         self.assertIn("5年", entry.event_message)
 
@@ -1121,7 +1121,7 @@ class MasterAuditLogContentTests(TestCase):
                 "period_value": "7", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
             },
         )
-        entry = AuditLog.objects.get(action="保存期間設定 更新")
+        entry = AuditLog.objects.get(action="保存期間設定　更新")
         self.assertIn("7年", entry.event_message)
 
     def test_retention_delete_creates_audit_log_with_content(self):
@@ -1132,7 +1132,7 @@ class MasterAuditLogContentTests(TestCase):
         )
         token = self.client.get(f"/masters/retention/{period.pk}/delete/").context["token"]
         self.client.post(f"/masters/retention/{period.pk}/delete/", {"token": token})
-        entry = AuditLog.objects.get(action="保存期間設定 削除")
+        entry = AuditLog.objects.get(action="保存期間設定　削除")
         self.assertIn("3年", entry.event_message)
 
 
@@ -1443,7 +1443,7 @@ class DepartmentScopingTests(TestCase):
                 "department": self.dept_b.pk,
             },
         )
-        entry = AuditLog.objects.get(action="分類管理 新規登録")
+        entry = AuditLog.objects.get(action="分類管理　新規登録")
         self.assertIn(str(self.dept_b), entry.event_message)
 
     def test_manager_registered_group_is_auto_assigned_own_department(self):

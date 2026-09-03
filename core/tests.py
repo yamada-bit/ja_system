@@ -624,7 +624,7 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
 
         call_command("purge_expired_deleted_records")
 
-        log = AuditLog.objects.get(action="物理削除バッチ 完全削除", event_message__contains=title)
+        log = AuditLog.objects.get(action="物理削除バッチ　完全削除", event_message__contains=title)
         self.assertIn(title, log.event_message)
 
     def test_contract_purge_creates_audit_log(self):
@@ -633,7 +633,7 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
 
         call_command("purge_expired_deleted_records")
 
-        log = AuditLog.objects.get(action="物理削除バッチ 完全削除", event_message__contains=title)
+        log = AuditLog.objects.get(action="物理削除バッチ　完全削除", event_message__contains=title)
         self.assertIn(title, log.event_message)
 
     def test_document_file_deletion_failure_logs_real_pk(self):
@@ -827,7 +827,7 @@ class OtherSettingsRoutingTests(TestCase):
             "/settings/other/",
             {"new_password": "newpass123", "new_password_confirm": "newpass123", "token": token},
         )
-        self.assertTrue(AuditLog.objects.filter(action="パスワード 更新", employee_no="1").exists())
+        self.assertTrue(AuditLog.objects.filter(action="パスワード　更新", employee_no="1").exists())
 
 
 class OtherMainListPaginationTests(TestCase):
@@ -895,13 +895,13 @@ class OtherMainEditViewTests(TestCase):
         response = self.client.get(f"/settings/other/main/{self.dept_a.pk}/edit/")
         token = response.context["token"]
         self.client.post(f"/settings/other/main/{self.dept_a.pk}/edit/", {"token": token})
-        self.assertTrue(AuditLog.objects.filter(action="メイン画面項目設定 更新").exists())
+        self.assertTrue(AuditLog.objects.filter(action="メイン画面項目設定　更新").exists())
 
     def test_logout_edit_creates_audit_log(self):
         response = self.client.get("/settings/other/logout/edit/")
         token = response.context["token"]
         self.client.post("/settings/other/logout/edit/", {"session_idle_timeout_minutes": "30", "token": token})
-        self.assertTrue(AuditLog.objects.filter(action="自動ログアウト時間設定 更新").exists())
+        self.assertTrue(AuditLog.objects.filter(action="自動ログアウト時間設定　更新").exists())
 
 
 class OtherViewsDoubleSubmitTokenTests(TestCase):
@@ -943,7 +943,7 @@ class OtherViewsDoubleSubmitTokenTests(TestCase):
         )
         messages_list = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("二重に送信された可能性" in m for m in messages_list))
-        self.assertFalse(AuditLog.objects.filter(action="メイン画面項目設定 更新").exists())
+        self.assertFalse(AuditLog.objects.filter(action="メイン画面項目設定　更新").exists())
 
     def test_other_logout_edit_post_with_invalid_token_shows_error_and_does_not_save(self):
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
@@ -954,7 +954,7 @@ class OtherViewsDoubleSubmitTokenTests(TestCase):
         )
         messages_list = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("二重に送信された可能性" in m for m in messages_list))
-        self.assertFalse(AuditLog.objects.filter(action="自動ログアウト時間設定 更新").exists())
+        self.assertFalse(AuditLog.objects.filter(action="自動ログアウト時間設定　更新").exists())
 
 
 class OtherViewsDatabaseWriteFailureTests(TestCase):

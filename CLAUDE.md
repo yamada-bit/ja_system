@@ -62,11 +62,16 @@ HTML（html4）側の改訂を伴わない指示書のみの改訂〈Rev1.2：�
 - `organizations`: 部署マスタ・メイン画面項目設定・閲覧部署範囲（`Department`, `MenuItemSetting`,
   `DepartmentViewScope`）
 - `masters`: 分類・カテゴリー・保存期間設定・システム設定（`Group`, `Category`, `RetentionPeriod`,
-  `SystemSetting`）
+  `SystemSetting`。「設定ファイル等で容易に変更」系の値〈お知らせしきい値・契約書保存期限・「永年」
+  実年数・操作履歴ログ保存期間〉は順次`.env`経由の`settings`へ移行済みで、`SystemSetting`の実使用は
+  `session_idle_timeout_minutes`のみ）
 - `documents` / `contracts`: 文書・契約書の検索・保管・編集・削除（ほぼ並行した構成。契約書は
-  保存期間が選択式ではなく`SystemSetting.contract_retention_years`で固定年数）
+  保存期間が選択式ではなく`settings.CONTRACT_RETENTION_YEARS`〈`.env`、既定10年〉で固定年数）
 - `permissions`: 権限管理（`PermissionProfile`、システム権限は管理者/所属長/一般の3段階）
-- `audit`: 操作履歴ログ（`AuditLog`、非正規化スナップショットで記録）
+- `audit`: 操作履歴ログ（`AuditLog`、非正規化スナップショットで記録。保存期間
+  `settings.AUDIT_LOG_RETENTION_MONTHS`〈`.env`、既定3ヵ月、xlsx 操作履歴ログ!B51-52〉より古い
+  ログは一覧・CSV出力から除外し、日次バッチ`core.management.commands.purge_expired_audit_logs`で
+  物理削除）
 - `core`: 共通基盤（メイン画面・設定メニュー・その他設定・二重送信対策・お知らせ集計・
   popup-select/detail用API基底クラス）
 

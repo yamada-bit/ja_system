@@ -1,9 +1,32 @@
 import logging
 
+from django.conf import settings
+from django.utils import timezone
+
 from audit.models import AuditLog
 from core.text_normalization import filter_by_full_name
 
 logger = logging.getLogger(__name__)
+
+
+def retention_cutoff_date():
+    """操作履歴ログの保持下限日（この日より前のログは一覧・CSV・DB保存の対象外）。
+
+    xlsx 操作履歴ログ!B51-52「操作履歴ログの最大保存件数(=CSV出力最大件数)設定値は、初期値を
+    3ヵ月分とし、設定ファイル等で定義し、先方より変更依頼を受けた際に容易に変更できること」。
+    「3ヵ月分」を`settings.AUDIT_LOG_RETENTION_MONTHS`（.env経由、既定3）ヵ月で表現する。
+
+    core.management.commands.purge_expired_audit_logs がこの日より古いレコードを物理削除するが、
+    バッチ未実行・遅延時でも「最大保存件数＝CSV出力最大件数」を厳密に満たすため、一覧表示・
+    CSV出力の絞り込み（filter_audit_log_queryset）でも同じ下限を適用する。
+
+    月加減算は`core.notice_services.add_months`に集約済み（お知らせしきい値・物理削除バッチと
+    同じロジック）。auditは下位アプリのため、documents/contractsモデルを巻き込む
+    notice_servicesのモジュールロード時結合を避けて関数内importする。
+    """
+    from core.notice_services import add_months
+
+    return add_months(timezone.localdate(), -settings.AUDIT_LOG_RETENTION_MONTHS)
 
 
 def filter_audit_log_queryset(form):
@@ -13,7 +36,9 @@ def filter_audit_log_queryset(form):
     のように必ず実際のQueryDictをバインドすること（`request.GET or None`にすると初回アクセス時に
     未バインド扱いとなり`is_valid()`が常にFalseを返し、下記フィルタが一切効かなくなる）。
     """
-    qs = AuditLog.objects.order_by("-timestamp")
+    # xlsx 操作履歴ログ!B51-52：保持期間を過ぎたログは一覧にもCSVにも出さない（retention_cutoff_date
+    # のdocstring参照）。検索フォームの操作日(開始)がこれより前でも、この下限より過去には遡れない。
+    qs = AuditLog.objects.filter(timestamp__date__gte=retention_cutoff_date()).order_by("-timestamp")
     if form.is_valid():
         if form.cleaned_data.get("date_start"):
             qs = qs.filter(timestamp__date__gte=form.cleaned_data["date_start"])

@@ -157,7 +157,7 @@ class StaffCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # 含む一覧をファイルとして出力するイベントのため、監査ログにも記録する。
         audit_services.log(
             employee=request.user,
-            action="職員マスタ CSV出力",
+            action="職員マスタ　CSV出力",
             event_message=f"職員マスタ一覧CSV出力,件数：{count}件",
             personal_info_flag=True,
         )
@@ -270,7 +270,7 @@ class StaffRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # ログイン記録漏れが見つかった際と同種の抜け漏れとして追加）。
         audit_services.log(
             employee=request.user,
-            action="職員マスタ 新規登録",
+            action="職員マスタ　新規登録",
             event_message=f"職員番号：{employee.employee_no},氏名：{employee.name}",
         )
         messages.success(request, f"職員「{employee.name}」を登録しました。")
@@ -354,7 +354,7 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # 変わったか一切記録していなかった）。
         audit_services.log(
             employee=request.user,
-            action="職員マスタ 更新",
+            action="職員マスタ　更新",
             event_message=build_staff_edit_diff_message(
                 employee,
                 before_name=before_name,

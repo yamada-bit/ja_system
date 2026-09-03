@@ -192,7 +192,7 @@ class BaseDeleteView(View):
     model = None
     scoped_lookup = None
     entity_label = None
-    audit_action = "検索・閲覧画面 削除"
+    audit_action = "検索・閲覧画面　削除"
     search_url_name = None
 
     def extra_permission_check(self, request, obj):

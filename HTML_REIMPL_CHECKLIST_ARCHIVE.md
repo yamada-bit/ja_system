@@ -2957,3 +2957,105 @@ PDFプレビュー枠は幅848px・スクロール領域1140pxのままでドラ
 - 編集：本支所 101 / 部課 04「業務4課」の職員 → 初期表示で部課selectに「業務4課」が選択済みで
   表示される（従来は無効・空）。本店へ切替→3部課表示、101へ戻す→「業務4課」表示。
 - `manage.py test accounts` 77件PASS。
+
+## 「操作履歴ログ」シートの行単位全数監査（2026-09-03、ユーザー依頼）
+
+### 監査範囲・方法
+xlsx「操作履歴ログ」シート（Rev1.4）を openpyxl で全セル抽出し、B6〜B76 の全行＋Rev1.1改訂注記
+4箇所（AI8「画面変更」、AI40/AI43「仕様変更」、AI62「表示件数変更」）＋埋め込み画像1枚
+（screen-log-list モック、row6 アンカー）を1行ずつ、`audit` アプリおよび各アプリの
+`audit_services.log()` / `log_raw()` 呼び出し全箇所（約40リテラル）、テンプレート
+`templates/audit/log_list.html`、原本 `index.html:3323-3399` の screen-log-list（サンプル
+データ行含む）と突き合わせた。Rev1.3→Rev1.4 でこのシートは無改訂（セルテキスト・画像とも
+ハッシュ一致）。シート本体は Rev1.1 で確定済み。
+
+### 実装済み・仕様通りと確認した項目
+- 職員番号の完全一致検索（B36-37）、職員名の全角スペース区切りフルネーム検索
+  （B39-40、`core.text_normalization.filter_by_full_name`）、イベントメッセージの部分一致＋
+  スペース区切りAND検索（B42-43）、個人情報書類チェックボックス絞り込み（B45-46）。
+- 初期ソート＝操作日時 降順（B57-58、`order_by("-timestamp")`）、明細部の内部スクロール（B60）、
+  ページャー1ページ100件（B62、Rev1.1で50→100）、一覧右上の総件数表示（B64）。
+- CSV出力（B49-50、原本 alert() を超えるユーザー依頼実装、既記録）。
+- イベントメッセージ連結形式（B68-76）：職員マスタ更新の差分形式（B69-70、
+  `audit.services.build_diff_message`）、検索の項目列挙（B72-73、
+  `core.search_services.build_search_audit_message`）、閲覧・DL 等の「ファイル名：…」（B75-76）。
+- イベント記録の網羅性（ログイン/ログアウト/ログイン失敗、職員・部署・分類・カテゴリー・
+  保存期間・権限・メイン画面項目・自動ログアウト設定の各登録/更新/削除、パスワード更新、
+  CSV出力/取込、検索、DL/プレビュー、保管画面２の登録/更新/削除、権限自動リセット、
+  物理削除バッチ）はすべて `audit_services.log()` / `log_raw()` 経由で記録済み。
+
+### 発見・修正した乖離1件：操作内容の区切りが半角スペース（B66）
+B66「操作内容は『画面名 ＋ □(全角スペース) ＋ ボタン名』とする」に対し、`action` 引数の全リテラル
+（"分類管理 新規登録" 等）が**半角スペース(U+0020)区切り**だった。原本モックのサンプルデータは
+一貫して全角（"カテゴリー管理　新規登録"、"文書　ダウンロード" 等）で、`audit/models.py` の
+`help_text`・`audit/services.py` の docstring 自身も「全角スペース」と記載しており、コードだけが
+不一致だった。2026-08-27 の行単位監査はイベントメッセージ連結形式（B68-76）を検証したが B66 の
+区切り文字幅は突き合わせ対象外だった。
+
+**修正**：`action` の「画面名／ボタン名」境界の区切りを全角スペースへ統一（`views.py`・
+`master_views.py`・`record_views.py`・`services.py`・`csv_import_services.py`・
+`purge_expired_deleted_records.py` の計約40リテラル＋対応するテスト assertion、20ファイル
+125行）。`職員マスタ　CSV取込 所属長昇格` の内側の半角スペースは画面名境界ではなく
+複合ラベル内の区切りのため据え置き（B66 が求めるのは画面名の後の1つ）。
+`検索・閲覧画面 完全削除`（2026-08-24廃止の旧 DeleteView action 名を説明する core/tests.py の
+docstring）は歴史的記述のため対象外。`manage.py test` 全780件PASS。`makemigrations --check`
+差分なし。
+
+### 原本モック 操作内容カラムとの差分監査（区切り修正後）
+区切り修正後、B66 の書式（画面名＋全角スペース＋ボタン名）とは一致。ただし**画面名の粒度**が
+モックのサンプルデータと異なる（既存の意図的差異、今回は変更せず）：
+- モックは検索・閲覧・DL・編集・削除・アップロードいずれも画面名を素の「文書」「契約書」と
+  しているが、実装は再実装時に採用した実画面名「文書検索」「契約書検索」「保管画面２」
+  「検索・閲覧画面」を使う（例：モック「文書　検索」↔実装「文書検索　検索」）。
+- モック「文書　閲覧」↔実装「文書検索　プレビュー」（ボタン名も閲覧→プレビュー）。
+- モック「文書　アップロード」↔実装「保管画面２　登録」。
+- モック自体もサンプル行内で不整合（"文書ダウンロード" のみ区切りなし）。
+CLAUDE.md「xlsx/HTML のサンプル文言は手がかりに過ぎず、実装の要否・粒度は原本の実マークアップと
+突き合わせて判断」に従い、正規の書式要件（B66）を満たすことを優先し、画面名は実画面名のまま
+維持した。
+
+### 対応不要（既確認済みの意図的乖離、再確認のみ）
+- パスワード更新イベントの新旧パスワード平文 diff、権限管理更新のフラグ単位 diff：いずれも
+  マスキング方針・記録粒度の既確定判断（`core/views.py`・`permissions/views.py` に理由コメント）。
+
+## 操作履歴ログの最大保存件数／CSV出力最大件数（B51-52）の実装（2026-09-03、ユーザー依頼）
+
+上記行単位監査時点では「2026-08-19 ユーザー確認済みで実装見送り確定」だった B51-52
+「※操作履歴ログの最大保存件数(=CSV出力最大件数)設定値は、初期値を 3ヵ月分 とし、設定ファイル等で
+定義し、先方より変更依頼を受けた際に容易に変更できること」を、ユーザー指示により実装した。
+
+### 方針
+「3ヵ月分」を月数（`settings.AUDIT_LOG_RETENTION_MONTHS`、`.env` 経由、既定3）で表現する。
+`CONTRACT_RETENTION_YEARS`／`RETENTION_PERMANENT_YEARS`（xlsx 保存期間設定!B74、同じ「設定ファイル
+等で定義し容易に変更」文言）が `masters.SystemSetting`（DB）から `.env` 経由の設定値へ移行済み
+だった前例に合わせ、未使用のまま残っていた `SystemSetting.audit_log_retention_months` フィールドは
+**削除**し（`models.py` ＋ `migrations/0001_initial.py` から。開発中のため新規マイグレーションは
+作らず 0001 に畳み込み、`makemigrations --check` クリーンを確認）、`.env` 経由の設定値へ一本化した。
+これで `SystemSetting` で実際に使うのは `session_idle_timeout_minutes` のみ。
+
+### 実装
+- `config/settings/base.py`：`AUDIT_LOG_RETENTION_MONTHS = env.int(..., default=3)` を追加、
+  `.env.example` にも追記。
+- `audit/services.py`：`retention_cutoff_date()` を追加（`core.notice_services.add_months` で
+  今日から −N ヵ月。auditは下位アプリのため documents/contracts モデルを巻き込む
+  notice_services のモジュールロード時結合を避けて関数内 import）。`filter_audit_log_queryset()`
+  の基底 QuerySet に `timestamp__date__gte=retention_cutoff_date()` を追加し、**一覧表示・CSV出力の
+  両方**で保持下限より古いログを除外（＝「最大保存件数＝CSV出力最大件数」をバッチ未実行・遅延時
+  でも厳密に満たす）。検索フォームの操作日(開始)にそれより前を入れてもヒットしない。
+- `core/management/commands/purge_expired_audit_logs.py`（新規）：保持下限より古い `AuditLog` を
+  バルク `delete()`（ファイル実体を伴わず部分失敗要因が無いため 1件ずつにしない）。この物理削除
+  イベント自体は操作履歴ログに記録しない（次回パージ対象になって増えるだけ、かつ「操作」ではなく
+  保守バッチのため。`logger.info` で運用ログには残す）。`ja_system/bat/purge_expired_audit_logs.bat`
+  （新規、`purge_expired_deleted_records.bat` と同じログローテーション付き、日次タスク想定）。
+- `audit/tests.py`：`AuditLogRetentionTests`（一覧除外・設定値変更で下限が動く・パージが期限切れ
+  のみ削除・パージが自己記録しない）＋ CSV除外テスト1件を追加。既存 `test_filter_by_date_range`
+  の固定日付（2026-01）が保持下限より古くなったため、今日基準の相対日付へ書き換え。
+
+### 検証
+`manage.py test` 全**785件PASS**（新規5件）。`makemigrations --check` 差分なし、`manage.py check`
+問題なし。`manage.py purge_expired_audit_logs` を開発DBで実行し `cutoff=2026-06-03 削除=0件` を確認。
+
+### 運用面の申し送り
+本番リリース時、`ja_system/bat/purge_expired_audit_logs.bat` を Windows タスクスケジューラに
+日次で登録する（`purge_expired_deleted_records.bat` と同様）。保持期間の変更依頼を受けた際は
+`.env` の `AUDIT_LOG_RETENTION_MONTHS` を書き換えるだけでよい。

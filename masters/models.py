@@ -188,16 +188,14 @@ class SystemSetting(models.Model):
 
     session_idle_timeout_minutes = models.PositiveIntegerField("自動ログアウト時間(分)", default=60)
     # 「お知らせ」しきい値(notice_threshold_months)・契約書保存期限(contract_retention_years)・
-    # 「永年」の実年数(retention_permanent_years)は、settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/
-    # NOTICE_DELETED_THRESHOLD_MONTHS/CONTRACT_RETENTION_YEARS/RETENTION_PERMANENT_YEARS
-    # （.env経由）へ順次移行し、このモデルから削除した（2026-08-13、retention_permanent_years
-    # のみ2026-08-27フィデリティ監査で発見・追随)。DB編集用の管理画面・Django管理サイトが無く、
-    # 値を変更する経路が実質DB直接操作しか無かったため（config/settings/base.py参照）。
-    audit_log_retention_months = models.PositiveIntegerField(
-        "操作履歴ログ最大保存期間(ヵ月)",
-        default=3,
-        help_text="CSV出力の最大対象期間でもある（xlsx 操作履歴ログ!B48-49）",
-    )
+    # 「永年」の実年数(retention_permanent_years)・操作履歴ログ最大保存期間(audit_log_retention_months)
+    # は、settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/NOTICE_DELETED_THRESHOLD_MONTHS/
+    # CONTRACT_RETENTION_YEARS/RETENTION_PERMANENT_YEARS/AUDIT_LOG_RETENTION_MONTHS（.env経由）へ
+    # 順次移行し、このモデルから削除した（2026-08-13、retention_permanent_yearsのみ2026-08-27・
+    # audit_log_retention_monthsのみ2026-09-03フィデリティ監査で発見・追随)。DB編集用の管理画面・
+    # Django管理サイトが無く、値を変更する経路が実質DB直接操作しか無かったため
+    # （config/settings/base.py参照）。この移行の結果、SystemSettingで実際に使うのは
+    # session_idle_timeout_minutes（screen-other-logout-editで管理者が随時変更）のみ。
 
     class Meta:
         db_table = "m_system_setting"

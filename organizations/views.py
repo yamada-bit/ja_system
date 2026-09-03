@@ -109,7 +109,7 @@ class DeptRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # ログイン記録漏れが見つかった際と同種の抜け漏れとして追加）。
         audit_services.log(
             employee=request.user,
-            action="部署管理 新規登録",
+            action="部署管理　新規登録",
             event_message=f"本支所コード：{department.branch_code},部課コード：{department.section_code},{department}",
         )
         messages.success(request, f"部署「{department}」を登録しました。")
@@ -173,7 +173,7 @@ class DeptEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # 「更新 済み・統合/分割 未反映」という監査ログの不整合は起きない。
         audit_services.log(
             employee=request.user,
-            action="部署管理 更新",
+            action="部署管理　更新",
             event_message=f"本支所コード：{department.branch_code},部課コード：{department.section_code},{department}",
         )
 
@@ -186,7 +186,7 @@ class DeptEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             )
             audit_services.log(
                 employee=request.user,
-                action=f"部署管理 {action_label}",
+                action=f"部署管理　{action_label}",
                 event_message=f"部署：{department},対象部署：{target_names}",
             )
             messages.success(request, f"部署「{department}」を更新し、「{target_names}」との{action_label}を反映しました。")

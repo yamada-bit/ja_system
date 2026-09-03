@@ -118,7 +118,7 @@ class Command(BaseCommand):
                 employee_no=BATCH_ACTOR_LABEL,
                 employee_name=BATCH_ACTOR_LABEL,
                 department_name=BATCH_ACTOR_LABEL,
-                action="物理削除バッチ 完全削除",
+                action="物理削除バッチ　完全削除",
                 event_message=f"{event_label}「{obj.title}」を完全に削除しました。",
                 personal_info_flag=personal_info_flag_fn(obj) if personal_info_flag_fn else False,
             )

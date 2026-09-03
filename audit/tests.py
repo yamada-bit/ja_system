@@ -28,7 +28,7 @@ class AuditLogServiceTests(TestCase):
         """
         audit_log(
             employee=self.employee,
-            action="保管画面２ 登録",
+            action="保管画面２　登録",
             event_message="文書「テスト文書」を保管しました。",
             personal_info_flag=True,
         )
@@ -36,7 +36,7 @@ class AuditLogServiceTests(TestCase):
         self.assertEqual(entry.employee_no, "1")
         self.assertEqual(entry.employee_name, "テスト太郎")
         self.assertEqual(entry.department_name, "総務部")
-        self.assertEqual(entry.action, "保管画面２ 登録")
+        self.assertEqual(entry.action, "保管画面２　登録")
         self.assertTrue(entry.personal_info_flag)
 
     def test_log_failure_does_not_raise(self):
@@ -57,13 +57,13 @@ class AuditLogServiceTests(TestCase):
             employee_no="(自動バッチ)",
             employee_name="(自動バッチ)",
             department_name="(自動バッチ)",
-            action="物理削除バッチ 完全削除",
+            action="物理削除バッチ　完全削除",
             event_message="文書「テスト」を完全に削除しました。",
             personal_info_flag=True,
         )
         entry = AuditLog.objects.get()
         self.assertEqual(entry.employee_no, "(自動バッチ)")
-        self.assertEqual(entry.action, "物理削除バッチ 完全削除")
+        self.assertEqual(entry.action, "物理削除バッチ　完全削除")
         self.assertTrue(entry.personal_info_flag)
 
     def test_log_raw_failure_does_not_raise(self):
@@ -132,7 +132,7 @@ class AuditLogListViewTests(TestCase):
         )
         AuditLog.objects.create(
             employee_no="2", employee_name="山田花子", department_name="本店|総務部",
-            action="文書 ダウンロード", event_message="ファイル名：規定一覧", personal_info_flag=True,
+            action="文書　ダウンロード", event_message="ファイル名：規定一覧", personal_info_flag=True,
         )
 
     def test_no_filter_returns_all_records(self):
@@ -140,36 +140,36 @@ class AuditLogListViewTests(TestCase):
         初回アクセス時にフォームが未バインド扱いになりフィルタが一切効かなくなる」回帰の検知テスト。
         パラメータ無しGETで全件表示されることを確認する。"""
         response = self.client.get("/audit/")
-        self.assertContains(response, "文書 ダウンロード")
+        self.assertContains(response, "文書　ダウンロード")
         self.assertContains(response, "ログイン</td>")
 
     def test_filter_by_employee_name(self):
         response = self.client.get("/audit/", {"employee_name": "山田"})
-        self.assertContains(response, "文書 ダウンロード")
+        self.assertContains(response, "文書　ダウンロード")
         self.assertNotContains(response, "ログイン</td>")
 
     def test_filter_by_full_name_ignores_fullwidth_space(self):
         """xlsx 操作履歴ログ!B39-40(Rev1.1)「姓と名を全角スペース区切りでフルネーム検索可能」。"""
         response = self.client.get("/audit/", {"employee_name": "山田　花子"})
-        self.assertContains(response, "文書 ダウンロード")
+        self.assertContains(response, "文書　ダウンロード")
         self.assertNotContains(response, "ログイン</td>")
 
     def test_filter_by_employee_no_exact_match(self):
         """xlsx 操作履歴ログ!B36-37(Rev1.1)「職員番号の完全一致検索とする」。"""
         response = self.client.get("/audit/", {"employee_no": "2"})
-        self.assertContains(response, "文書 ダウンロード")
+        self.assertContains(response, "文書　ダウンロード")
         self.assertNotContains(response, "ログイン</td>")
         # 部分一致ではないため"1"や"22"では一致しない。
         response_partial = self.client.get("/audit/", {"employee_no": "22"})
-        self.assertNotContains(response_partial, "文書 ダウンロード")
+        self.assertNotContains(response_partial, "文書　ダウンロード")
 
     def test_filter_by_event_message_and_search(self):
         """xlsx 操作履歴ログ!B42-43(Rev1.1)「イベントメッセージの部分一致検索、スペース区切りのAND検索」。"""
         response = self.client.get("/audit/", {"event_message": "ファイル名 規定一覧"})
-        self.assertContains(response, "文書 ダウンロード")
+        self.assertContains(response, "文書　ダウンロード")
         self.assertNotContains(response, "ログイン</td>")
         response_no_match = self.client.get("/audit/", {"event_message": "ファイル名 存在しない語"})
-        self.assertNotContains(response_no_match, "文書 ダウンロード")
+        self.assertNotContains(response_no_match, "文書　ダウンロード")
 
     def test_filter_by_personal_info_flag(self):
         """xlsx 操作履歴ログ!B43「チェックを入れて検索すると、個人情報書類フラグがセットされている
@@ -187,17 +187,30 @@ class AuditLogListViewTests(TestCase):
         どのテストからも一度も指定されておらず未検証だった（テストカバレッジ棚卸しで発見、
         2026-08-26追加）。timestampはauto_now_addのため、作成後にqueryset.update()で
         任意の日時へ書き換える。
+
+        書き換え先の日時は`retention_cutoff_date()`（既定3ヵ月）より新しい範囲に取る
+        （xlsx 操作履歴ログ!B51-52の保持下限より古い日付を指定してもヒットしなくなったため。
+        2026-09-03）。
         """
+        today = timezone.localdate()
+        older = today - datetime.timedelta(days=40)
+        newer = today - datetime.timedelta(days=30)
         login_entry = AuditLog.objects.get(action="ログイン")
-        download_entry = AuditLog.objects.get(action="文書 ダウンロード")
+        download_entry = AuditLog.objects.get(action="文書　ダウンロード")
         AuditLog.objects.filter(pk=login_entry.pk).update(
-            timestamp=timezone.make_aware(datetime.datetime(2026, 1, 10))
+            timestamp=timezone.make_aware(datetime.datetime.combine(older, datetime.time(9, 0)))
         )
         AuditLog.objects.filter(pk=download_entry.pk).update(
-            timestamp=timezone.make_aware(datetime.datetime(2026, 1, 20))
+            timestamp=timezone.make_aware(datetime.datetime.combine(newer, datetime.time(9, 0)))
         )
-        response = self.client.get("/audit/", {"date_start": "2026-01-15", "date_end": "2026-01-25"})
-        self.assertContains(response, "文書 ダウンロード")
+        response = self.client.get(
+            "/audit/",
+            {
+                "date_start": (newer - datetime.timedelta(days=2)).isoformat(),
+                "date_end": (newer + datetime.timedelta(days=2)).isoformat(),
+            },
+        )
+        self.assertContains(response, "文書　ダウンロード")
         self.assertNotContains(response, "ログイン</td>")
 
     def test_pagination_splits_across_pages(self):
@@ -241,7 +254,7 @@ class AuditLogCsvExportViewTests(TestCase):
         )
         AuditLog.objects.create(
             employee_no="2", employee_name="山田花子", department_name="本店|総務部",
-            action="文書 ダウンロード", event_message="ファイル名：規定一覧", personal_info_flag=True,
+            action="文書　ダウンロード", event_message="ファイル名：規定一覧", personal_info_flag=True,
         )
 
     def test_csv_export_with_no_matching_rows_returns_header_only(self):
@@ -266,12 +279,24 @@ class AuditLogCsvExportViewTests(TestCase):
         Excel側にテキストとして扱わせる（2026-08-24追加、core.csv_services.sanitize_csv_row参照）。"""
         AuditLog.objects.create(
             employee_no="3", employee_name="=cmd|'/c calc'!A1", department_name="本店|総務部",
-            action="文書 登録", event_message="文書「テスト」を保管しました。",
+            action="文書　登録", event_message="文書「テスト」を保管しました。",
             personal_info_flag=False,
         )
         response = self.client.get("/audit/csv/")
         content = response.content.decode("utf-8-sig")
         self.assertIn("'=cmd|'/c calc'!A1", content)
+
+    def test_csv_export_excludes_records_older_than_retention(self):
+        """xlsx 操作履歴ログ!B51-52「最大保存件数(=CSV出力最大件数)＝3ヵ月分」。
+        保持下限より古いレコードはCSV出力の対象からも外れる。"""
+        old_entry = AuditLog.objects.get(action="ログイン")
+        AuditLog.objects.filter(pk=old_entry.pk).update(
+            timestamp=timezone.now() - datetime.timedelta(days=200)
+        )
+        response = self.client.get("/audit/csv/")
+        content = response.content.decode("utf-8-sig")
+        self.assertIn("山田花子", content)  # 直近のレコードは出る
+        self.assertNotIn("ログイン,ログイン", content)  # 200日前のログイン行は出ない
 
     def test_csv_export_records_audit_log(self):
         """CSV出力自体も職員名等の個人情報を含む一覧のファイル出力のため、監査ログに記録する。"""
@@ -279,5 +304,70 @@ class AuditLogCsvExportViewTests(TestCase):
         self.client.get("/audit/csv/")
         entry = AuditLog.objects.order_by("-id").first()
         self.assertEqual(AuditLog.objects.count(), before_count + 1)
-        self.assertEqual(entry.action, "操作履歴ログ CSV出力")
+        self.assertEqual(entry.action, "操作履歴ログ　CSV出力")
         self.assertTrue(entry.personal_info_flag)
+
+
+class AuditLogRetentionTests(TestCase):
+    """xlsx 操作履歴ログ!B51-52「操作履歴ログの最大保存件数(=CSV出力最大件数)設定値は、初期値を
+    3ヵ月分とし、設定ファイル等で定義し、先方より変更依頼を受けた際に容易に変更できること」。
+    「3ヵ月分」を settings.AUDIT_LOG_RETENTION_MONTHS（.env経由、既定3）ヵ月で表現し、
+    保持下限より古いログは一覧・CSVから除外＋日次バッチで物理削除する（2026-09-03実装）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def _entry(self, action, days_ago):
+        entry = AuditLog.objects.create(
+            employee_no="1", employee_name="テスト太郎", department_name="本店|総務部",
+            action=action, event_message=action,
+        )
+        AuditLog.objects.filter(pk=entry.pk).update(
+            timestamp=timezone.now() - datetime.timedelta(days=days_ago)
+        )
+        return entry
+
+    def test_list_view_excludes_records_older_than_retention(self):
+        self._entry("古いイベント", days_ago=200)
+        self._entry("新しいイベント", days_ago=10)
+        response = self.client.get("/audit/")
+        self.assertContains(response, "新しいイベント")
+        self.assertNotContains(response, "古いイベント")
+
+    def test_retention_cutoff_is_configurable(self):
+        """先方の変更依頼に応じて .env の1行で保持期間を変えられること（@override_settings で代用）。"""
+        self._entry("120日前イベント", days_ago=120)
+        with self.settings(AUDIT_LOG_RETENTION_MONTHS=6):
+            response = self.client.get("/audit/")
+            self.assertContains(response, "120日前イベント")
+        with self.settings(AUDIT_LOG_RETENTION_MONTHS=3):
+            response = self.client.get("/audit/")
+            self.assertNotContains(response, "120日前イベント")
+
+    def test_purge_command_deletes_only_expired_rows(self):
+        old = self._entry("古いイベント", days_ago=200)
+        recent = self._entry("新しいイベント", days_ago=10)
+        from django.core.management import call_command
+
+        call_command("purge_expired_audit_logs")
+        self.assertFalse(AuditLog.objects.filter(pk=old.pk).exists())
+        self.assertTrue(AuditLog.objects.filter(pk=recent.pk).exists())
+
+    def test_purge_command_does_not_write_its_own_audit_log(self):
+        """パージ自体は「操作」ではなく保守バッチのため操作履歴ログに記録しない
+        （記録すると次回パージ対象になって増えるだけ）。"""
+        self._entry("古いイベント", days_ago=200)
+        from django.core.management import call_command
+
+        call_command("purge_expired_audit_logs")
+        self.assertFalse(AuditLog.objects.filter(action__icontains="パージ").exists())
+        self.assertEqual(AuditLog.objects.count(), 0)

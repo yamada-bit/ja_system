@@ -115,7 +115,7 @@ class GroupRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.
     own_url_name = "masters:class_regist"
     list_url_name = "masters:class_list"
     unique_error_message = "この分類コードは既に登録されています。"
-    audit_action = "分類管理 新規登録"
+    audit_action = "分類管理　新規登録"
     entity_label = "分類"
 
     def audit_event_message(self, obj):
@@ -151,7 +151,7 @@ class GroupEditView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.Ba
     own_url_name = "masters:class_edit"
     list_url_name = "masters:class_list"
     unique_error_message = "この分類コードは既に登録されています。"
-    audit_action = "分類管理 更新"
+    audit_action = "分類管理　更新"
     entity_label = "分類"
 
     def scoped_lookup(self, request, pk):
@@ -192,7 +192,7 @@ class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.
     context_object_name = "group"
     own_url_name = "masters:class_delete"
     list_url_name = "masters:class_list"
-    audit_action = "分類管理 削除"
+    audit_action = "分類管理　削除"
     entity_label = "分類"
 
     def scoped_lookup(self, request, pk):
@@ -298,7 +298,7 @@ class CategoryRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, master_vie
     own_url_name = "masters:cat_regist"
     list_url_name = "masters:cat_list"
     unique_error_message = "このカテゴリーコードは既に登録されています。"
-    audit_action = "カテゴリー管理 新規登録"
+    audit_action = "カテゴリー管理　新規登録"
     entity_label = "カテゴリー"
 
     def extra_form_kwargs(self, request, is_admin):
@@ -333,7 +333,7 @@ class CategoryEditView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views
     own_url_name = "masters:cat_edit"
     list_url_name = "masters:cat_list"
     unique_error_message = "このカテゴリーコードは既に登録されています。"
-    audit_action = "カテゴリー管理 更新"
+    audit_action = "カテゴリー管理　更新"
     entity_label = "カテゴリー"
 
     def scoped_lookup(self, request, pk):
@@ -377,7 +377,7 @@ class CategoryDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, master_vie
     context_object_name = "category"
     own_url_name = "masters:cat_delete"
     list_url_name = "masters:cat_list"
-    audit_action = "カテゴリー管理 削除"
+    audit_action = "カテゴリー管理　削除"
     entity_label = "カテゴリー"
 
     def scoped_lookup(self, request, pk):
@@ -487,7 +487,7 @@ class RetentionRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         logger.info("保存期間設定を新規登録しました: id=%s %s", period.pk, period)
         audit_services.log(
             employee=request.user,
-            action="保存期間設定 新規登録",
+            action="保存期間設定　新規登録",
             event_message=f"区分：{period.get_kbn_display()},保存期間：{period}",
         )
         messages.success(request, "保存期間設定を登録しました。")
@@ -549,7 +549,7 @@ class RetentionEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             changes.append(("表示順", before_display_order, period.display_order))
         audit_services.log(
             employee=request.user,
-            action="保存期間設定 更新",
+            action="保存期間設定　更新",
             event_message=audit_services.build_diff_message(
                 f"区分：{period.get_kbn_display()},保存期間名：{period.doc_name}", changes
             ),
@@ -593,7 +593,7 @@ class RetentionDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         logger.info("保存期間設定を削除しました: id=%s", pk)
         audit_services.log(
             employee=request.user,
-            action="保存期間設定 削除",
+            action="保存期間設定　削除",
             event_message=f"区分：{period.get_kbn_display()},保存期間：{period}",
         )
         messages.success(request, "保存期間設定を削除しました。")

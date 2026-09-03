@@ -264,7 +264,7 @@ class UploadStep2View(RequiresContractEditMixin, View):
                     # （原本フィデリティ監査で発見：以前は原本に無い独自形式だった）。
                     audit_services.log(
                         employee=request.user,
-                        action="保管画面２ 登録",
+                        action="保管画面２　登録",
                         event_message=f"ファイル名：{contract.display_name}",
                     )
                     created.append(contract)
@@ -413,7 +413,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
 
         audit_services.log(
             employee=request.user,
-            action="保管画面２ 更新",
+            action="保管画面２　更新",
             event_message=f"契約書「{contract.title}」を更新しました。",
         )
         # UploadStep2View.postと同じ理由（別テンプレートへの丸ごと差し替えをやめ、edit.htmlを
@@ -690,7 +690,7 @@ class BulkEditView(RequiresContractEditMixin, View):
                         obj.save(update_fields=["is_deleted", "deleted_at"])
                         audit_services.log(
                             employee=request.user,
-                            action="保管画面２ 削除",
+                            action="保管画面２　削除",
                             event_message=f"契約書「{obj.title}」を削除しました。",
                         )
                         status_by_pk[pk] = "削除"
@@ -712,7 +712,7 @@ class BulkEditView(RequiresContractEditMixin, View):
                             )
                             audit_services.log(
                                 employee=request.user,
-                                action="保管画面２ 更新",
+                                action="保管画面２　更新",
                                 event_message=f"契約書「{obj.title}」を更新しました。",
                             )
                             status_by_pk[pk] = "更新"
@@ -866,7 +866,7 @@ class SearchView(LoginRequiredMixin, View):
         if form.is_valid() and search_services.is_search_form_submission(request.GET, form.fields.keys()):
             audit_services.log(
                 employee=request.user,
-                action="契約書検索 検索",
+                action="契約書検索　検索",
                 event_message=search_services.build_search_audit_message(form),
             )
         return render(
@@ -894,7 +894,7 @@ class DownloadView(LoginRequiredMixin, record_views.BaseFileServeView):
     kind = "contract"
     scoped_lookup = staticmethod(scoped_get_object_or_404)
     as_attachment = True
-    audit_action = "契約書検索 ダウンロード"
+    audit_action = "契約書検索　ダウンロード"
     entity_label = "契約書"
 
 
@@ -908,7 +908,7 @@ class PreviewView(LoginRequiredMixin, record_views.BaseFileServeView):
     kind = "contract"
     scoped_lookup = staticmethod(scoped_get_object_or_404)
     as_attachment = False
-    audit_action = "契約書検索 プレビュー"
+    audit_action = "契約書検索　プレビュー"
     entity_label = "契約書"
 
 
@@ -924,7 +924,7 @@ class BulkDownloadView(LoginRequiredMixin, record_views.BaseBulkDownloadView):
     kind = "contract"
     dept_ids_resolver = staticmethod(contract_searchable_department_ids)
     zip_builder = staticmethod(build_zip_archive)
-    audit_action = "契約書検索 一括ダウンロード"
+    audit_action = "契約書検索　一括ダウンロード"
     entity_label = "契約書"
     search_url_name = "contracts:search"
     zip_filename = "contracts.zip"
@@ -971,7 +971,7 @@ class EditDeleteView(DeleteView):
     このビューは通らない。2026-08-27ユーザー確定でメモ欄クリアからレコードの論理削除に変更。
     """
 
-    audit_action = "保管画面２ 削除"
+    audit_action = "保管画面２　削除"
 
 
 def _strip_ext(filename):

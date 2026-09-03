@@ -94,7 +94,7 @@ def reset_permission_profile_if_needed(
     )
     audit_services.log(
         employee=actor,
-        action="権限管理 自動リセット",
+        action="権限管理　自動リセット",
         event_message=(
             f"職員：{employee.name}({employee.employee_no}),"
             "所属/職階/役職変更または退職に伴い権限設定を自動リセットしました"
@@ -113,7 +113,7 @@ def build_staff_edit_diff_message(
     `before_*`は呼び出し側（accounts.views.StaffEditView.post）がform.save()実行前に
     保存しておいた変更前の値。`password_changed`は新しいパスワードが入力されたかどうかの
     真偽値のみを渡すこと（パスワード自体の値はCLAUDE.mdのマスキング方針によりログに残さない、
-    core.views.OtherSettingsView.postの「パスワード 更新」と同じ判断）。
+    core.views.OtherSettingsView.postの「パスワード　更新」と同じ判断）。
     """
     subject = f"職員：{employee.name}({employee.employee_no})"
     changes = []

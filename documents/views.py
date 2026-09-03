@@ -200,7 +200,7 @@ class UploadStep2View(LoginRequiredMixin, View):
                     # （原本フィデリティ監査で発見：以前は原本に無い独自形式だった）。
                     audit_services.log(
                         employee=request.user,
-                        action="保管画面２ 登録",
+                        action="保管画面２　登録",
                         event_message=f"ファイル名：{document.display_name}",
                         personal_info_flag=document.privacy_flag,
                     )
@@ -343,7 +343,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
             return redirect("documents:edit", pk=self.object.pk)
         audit_services.log(
             employee=request.user,
-            action="保管画面２ 更新",
+            action="保管画面２　更新",
             event_message=f"文書「{doc.title}」を更新しました。",
             personal_info_flag=doc.privacy_flag,
         )
@@ -611,7 +611,7 @@ class BulkEditView(LoginRequiredMixin, View):
                         obj.save(update_fields=["is_deleted", "deleted_at"])
                         audit_services.log(
                             employee=request.user,
-                            action="保管画面２ 削除",
+                            action="保管画面２　削除",
                             event_message=f"文書「{obj.title}」を削除しました。",
                             personal_info_flag=obj.privacy_flag,
                         )
@@ -622,7 +622,7 @@ class BulkEditView(LoginRequiredMixin, View):
                             doc = apply_document_edit(obj, f.cleaned_data, request.user)
                             audit_services.log(
                                 employee=request.user,
-                                action="保管画面２ 更新",
+                                action="保管画面２　更新",
                                 event_message=f"文書「{doc.title}」を更新しました。",
                                 personal_info_flag=doc.privacy_flag,
                             )
@@ -789,7 +789,7 @@ class SearchView(LoginRequiredMixin, View):
         if form.is_valid() and search_services.is_search_form_submission(request.GET, form.fields.keys()):
             audit_services.log(
                 employee=request.user,
-                action="文書検索 検索",
+                action="文書検索　検索",
                 event_message=search_services.build_search_audit_message(form),
             )
         return render(
@@ -817,7 +817,7 @@ class DownloadView(LoginRequiredMixin, record_views.BaseFileServeView):
     kind = "document"
     scoped_lookup = staticmethod(scoped_get_object_or_404)
     as_attachment = True
-    audit_action = "文書検索 ダウンロード"
+    audit_action = "文書検索　ダウンロード"
     entity_label = "文書"
 
     def audit_extra_kwargs(self, obj):
@@ -838,7 +838,7 @@ class PreviewView(LoginRequiredMixin, record_views.BaseFileServeView):
     kind = "document"
     scoped_lookup = staticmethod(scoped_get_object_or_404)
     as_attachment = False
-    audit_action = "文書検索 プレビュー"
+    audit_action = "文書検索　プレビュー"
     entity_label = "文書"
 
     def audit_extra_kwargs(self, obj):
@@ -859,7 +859,7 @@ class BulkDownloadView(LoginRequiredMixin, record_views.BaseBulkDownloadView):
     kind = "document"
     dept_ids_resolver = staticmethod(document_searchable_department_ids)
     zip_builder = staticmethod(build_zip_archive)
-    audit_action = "文書検索 一括ダウンロード"
+    audit_action = "文書検索　一括ダウンロード"
     entity_label = "文書"
     search_url_name = "documents:search"
     zip_filename = "documents.zip"
@@ -901,4 +901,4 @@ class EditDeleteView(DeleteView):
     確定する別方式（ステージ型）のためこのビューは通らない。
     """
 
-    audit_action = "保管画面２ 削除"
+    audit_action = "保管画面２　削除"
