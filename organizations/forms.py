@@ -66,7 +66,8 @@ class DeptEditForm(forms.ModelForm):
     （部署管理!B209-212「統合/分割前の部署分も閲覧可能なように、閲覧部署範囲テーブルを更新する」）。
     実際の閲覧部署範囲テーブル更新はorganizations.services.apply_dept_action（view側でform.save()後に
     呼ぶ）が行うため、本フォームは`dept_action`が`merge`/`split`の場合に`dept_action_target`が
-    最低1件選択されていることのみを検証する（対象自体の妥当性チェック）。
+    最低1件選択されていること・編集中の部署自体を含まないことを検証する。統合・分割の対象ポップアップ
+    にも編集中の部署は出さない（__init__参照。2026-09-03ユーザー依頼）。
     """
 
     dept_action = forms.ChoiceField(
@@ -77,8 +78,8 @@ class DeptEditForm(forms.ModelForm):
         widget=forms.RadioSelect,
     )
     # 原本index.html `openPopupPopup(this, 'dept', 'search')`（mode='search'）をそのまま踏襲。
-    # このmodeはJS側でチェックボックス（複数選択）のポップアップになるためMultipleChoiceFieldにする
-    # （統合・分割の実処理自体は下記clean()でブロックしているため、選択結果自体は使用しない）。
+    # このmodeはJS側でチェックボックス（複数選択）のポップアップになるためMultipleChoiceFieldにする。
+    # 選択結果はview側のapply_dept_action（閲覧部署範囲テーブル更新）で実際に使う（Rev1.1で確定）。
     dept_action_target = forms.ModelMultipleChoiceField(
         label="対象部署",
         queryset=Department.objects.all(),
@@ -93,6 +94,21 @@ class DeptEditForm(forms.ModelForm):
         model = Department
         fields = ["branch_name", "section_name"]
         labels = {"branch_name": "本支所名", "section_name": "部課名"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 統合・分割の対象部署ポップアップから「編集中の部署自体」を除外する。統合は存続部署A
+        # の編集画面で吸収される部署Bを選ぶ、分割は分割元の部署Bの編集画面で分割先を選ぶ運用の
+        # ため、いずれも編集中の部署自体は選択肢に出さない（2026-09-03ユーザー依頼）。
+        # clean()の自己参照チェックはAPI直叩き・パラメータ改ざんに対する多重防御として残す。
+        # extra_queryは組み立て済みのapi_urlに`?exclude=<pk>`を付け、ポップアップ本体を描画する
+        # organizations.api.OptionListAPIView側でも同じ部署を除外させる（フォームのqueryset
+        # 差し替えだけではpopup-selectが直接APIを叩くため効かない。permissions側doc_kbnと同じ方式）。
+        if self.instance.pk:
+            self.fields["dept_action_target"].queryset = Department.objects.exclude(
+                pk=self.instance.pk
+            )
+            self.fields["dept_action_target"].widget.extra_query = {"exclude": self.instance.pk}
 
     def clean(self):
         cleaned = super().clean()

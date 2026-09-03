@@ -116,6 +116,21 @@ class DeptEditFormTests(TestCase):
         )
         self.assertFalse(form.is_valid())
 
+    def test_target_queryset_and_popup_exclude_editing_department(self):
+        """統合・分割の対象ポップアップから編集中の部署自体を除外する（2026-09-03ユーザー依頼）。
+        フォームのquerysetからも外し（バリデーション）、ウィジェットのextra_queryでポップアップ
+        本体API（?exclude=<pk>）にも同じ除外を伝える。"""
+        other = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        form = DeptEditForm(instance=self.department)
+        target_qs = form.fields["dept_action_target"].queryset
+        self.assertIn(other, target_qs)
+        self.assertNotIn(self.department, target_qs)
+        self.assertEqual(
+            form.fields["dept_action_target"].widget.extra_query, {"exclude": self.department.pk}
+        )
+
 
 class DeptSettingsMenuAccessControlTests(TestCase):
     """設定メニュー「部署管理」は管理者のみ表示・利用可（xlsx 設定メニュー!B46以降）。
@@ -221,6 +236,23 @@ class OptionListAPIResponseContentTests(TestCase):
         分岐だが、共通実装として未検証だった（本画面はdeptのみ使用するため実害は小さい）。"""
         response = self.client.get("/organizations/api/options/", {"type": "unsupported"})
         self.assertEqual(response.status_code, 400)
+
+    def test_dept_options_excludes_editing_department_when_exclude_param_given(self):
+        """screen-dept-editの統合・分割対象ポップアップは編集中の部署自体を選択肢に出さない
+        （2026-09-03ユーザー依頼。DeptEditForm.__init__がapi_urlに?exclude=<pk>を付ける）。"""
+        response = self.client.get(
+            "/organizations/api/options/", {"type": "dept", "exclude": self.dept_a.pk}
+        )
+        self.assertEqual(
+            response.json(), {"items": [{"value": self.dept_b.pk, "label": str(self.dept_b)}]}
+        )
+
+    def test_dept_options_ignores_non_numeric_exclude(self):
+        """excludeに非数値が来ても500にせず全件返す（改ざん・不正リンクへの防御）。"""
+        response = self.client.get(
+            "/organizations/api/options/", {"type": "dept", "exclude": "abc"}
+        )
+        self.assertEqual(len(response.json()["items"]), 2)
 
 
 class DeptRegistEditAuditLogTests(TestCase):

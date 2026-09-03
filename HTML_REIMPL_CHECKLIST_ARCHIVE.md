@@ -3059,3 +3059,59 @@ CLAUDE.md「xlsx/HTML のサンプル文言は手がかりに過ぎず、実装�
 本番リリース時、`ja_system/bat/purge_expired_audit_logs.bat` を Windows タスクスケジューラに
 日次で登録する（`purge_expired_deleted_records.bat` と同様）。保持期間の変更依頼を受けた際は
 `.env` の `AUDIT_LOG_RETENTION_MONTHS` を書き換えるだけでよい。
+
+## 「部署管理」シートの行単位全数監査・統合分割の設計確定・対象ポップアップからの自部署除外（2026-09-03）
+
+ユーザー依頼で簡易設計指示書 Rev1.4「部署管理」シートを行単位で機械照合し、現行コードとのフル監査を実施した。
+
+### 監査結果
+- **シートは Rev1.1 で確定し、Rev1.1→Rev1.2→Rev1.3→Rev1.4 で無改訂**。セルテキスト・埋め込み画像
+  6枚（image11〜16.png）とも全リビジョンでハッシュ一致。Rev1.0→1.1 の差分＝B210/B212 の統合・分割
+  実処理が「対象部署を部署マスタから論理削除」→「閲覧部署範囲テーブルを更新」に仕様変更、J165・
+  P195 の補足文言削除、AI178 誤記修正（統合→分割）——が最後の実体改訂。
+- 一覧（B39-62）：本支所/部課連動プルダウン（B40/B42、`departments_list()` + `dept_list.html` の
+  `updateSectionOptions()`）、部課プルダウンの退職99除外（B45、`section_choices()` /
+  `departments_list(exclude_retired=True)`）、4列▲▼ソート（B52-56、`SORT_FIELDS`）、内部スクロール
+  （B58）、ページャー無し（B60、`DeptListView` は Paginator 不使用）、総件数表示（B62）——実装済み。
+- 新規登録（B82-88）：全欄空（B82）、本支所コード+部課コード重複エラー（B87、`UniqueConstraint`
+  + `DeptRegistForm.clean` + IntegrityError 捕捉）、B88 の「本支所既存・部課のみ追加」は本支所を
+  正規化しない設計上そのまま成立——実装済み。
+- 編集（B107）：名称のみ可（`DeptEditForm.Meta.fields = ["branch_name","section_name"]`、コードは
+  テンプレート表示のみ）——実装済み。
+- 統合・分割（B109-212）：`DepartmentViewScope`（viewer_department／visible_department／action）＋
+  `apply_dept_action`（merge=viewer:編集対象・visible:選択部署／split=viewer:選択部署・visible:編集
+  対象）。`visible_department_ids(employee)` が「自部署＋自部署がviewerのスコープのvisible部署」を
+  返し、`documents/contracts.search_services`・`core.notice_services`・保管フォームの部署絞り込み、
+  検索フォームの部署欄初期値（検索・閲覧・変更!B46-48、`", ".join` でカンマ区切り自動表示）に反映。
+  部署編集の「更新」ボタンは Employee を触らず、職員異動は職員マスタ CSV 取込
+  （`_import_employee` の `department_changed`）側で行う——実装済み。`organizations` テスト45件PASS。
+
+### 統合・分割の設計方針の確定（ユーザー確認）
+実装是非を検討する過程でユーザーと設計を確認し、以下で確定：
+- **文書に紐付いた部署情報は書き換えない**（付け替え案は不採用）。「閲覧部署範囲テーブル」
+  （＝現行 `DepartmentViewScope`）に「部署Aの職員は部署Bのデータも見れる」を1行持たせる方式を正とする。
+- 部署自体の統合（職員の一斉異動）は職員マスタ CSV 取込で行われ、そのタイミングで部署Bだった
+  職員が部署Aへ異動する。異動後、検索画面の部署欄に「部署A,部署B」が自動表示され両方を検索・
+  閲覧できる（B46-48）。＝現行実装のまま。
+- 次の2点は本方式の想定挙動として**許容**（バグではない）と確認：
+  1. 統合・分割後に部署Bが作る新規文書が部署A・Cから見える（スコープは無期限・部署単位のため）。
+  2. 統合・分割時に部署A・Cへ「移った」旧・部署B文書が部署Bから見える（文書は実際には移動せず
+     `department=B` のままのため）。
+  いずれも標準フロー（CSV取込で部署Bが空になる）では顕在化しない。部署Bが存続し続ける運用に
+  なった場合の締め付け（`Department.is_active` フラグ、文書単位可視性への変更等）は将来課題として
+  ユーザーへ選択肢提示済み。
+
+### 対象部署ポップアップからの「編集中の部署自体」除外（ユーザー依頼）
+統合は存続部署Aの編集画面で吸収部署Bを、分割は分割元Bの編集画面で分割先を選ぶ運用のため、
+どちらも編集中の部署自体を選択肢に出さないようにした。
+- `organizations/forms.py` `DeptEditForm.__init__`（新規）：`self.instance.pk` があるとき
+  `dept_action_target.queryset` を `Department.objects.exclude(pk=self.instance.pk)` に絞り、
+  ウィジェットの `extra_query = {"exclude": self.instance.pk}` をセット。既存の `clean()` の自己参照
+  チェックは API 直叩き・改ざんへの多重防御として残置。
+- `organizations/api.py` `OptionListAPIView._department_items`：`request.GET.get("exclude")` を
+  `int()` 変換して `qs.exclude(pk=...)`。非数値は 500 にせず全件返し `logger.warning`
+  （`PopupSelectWidget` の非数値選択値ログと同じ方針）。
+- 仕組みは permissions 側の `extra_query={"doc_kbn": ...}` と同一（`PopupSelectWidget.render` が
+  `api_url` に `?exclude=<pk>` を付与 → `common.js openPopupPopup` が `&type=dept` を連結）。
+- `organizations/tests.py`：API の exclude 動作・非数値無視、フォームの queryset 除外＋extra_query
+  セットの3件を追加。`manage.py test organizations core permissions` PASS（organizations 48件）。

@@ -48,4 +48,16 @@ class OptionListAPIView(BaseOptionListAPIView):
 
     def _department_items(self, request):
         qs = Department.objects.order_by("branch_code", "section_code")
+        # screen-dept-editの統合・分割対象ポップアップから編集中の部署自体を除外する
+        # （DeptEditForm.__init__がapi_urlに?exclude=<pk>を付与。2026-09-03ユーザー依頼）。
+        exclude_pk = request.GET.get("exclude")
+        if exclude_pk:
+            try:
+                qs = qs.exclude(pk=int(exclude_pk))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "部署統合・分割ポップアップのexcludeに非数値が渡されました（改ざんの可能性）: "
+                    "value=%r employee_no=%s",
+                    exclude_pk, request.user.employee_no,
+                )
         return [{"value": d.pk, "label": str(d)} for d in qs]
