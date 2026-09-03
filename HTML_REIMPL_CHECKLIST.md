@@ -148,6 +148,26 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   `editable_roles` 未指定（管理者編集）時も `role.choices` を `PermissionRole` の3値のみに絞る
   よう変更（xlsx 権限管理!B113-115）。`test permissions` 65件PASS。「権限管理」シートは
   Rev1.4まで本件以外に仕様乖離なしを行単位監査で確認済み。
+- 「保存期間設定」シートの行単位全数監査（2026-09-03、ユーザー依頼）：シートは Rev1.0〜Rev1.4 で
+  無改訂（セルテキスト・埋め込み画像8枚ともハッシュ一致）。一覧/登録/編集/削除の4画面×文書/
+  電子決裁、ラジオ切替・書類名プルダウン・「永年」制御（数値クリア＋入力不可、実年数は
+  `settings.RETENTION_PERMANENT_YEARS`）・論理削除・初期ソート（表示順昇順）・No.連番はすべて実装
+  済み。**唯一の乖離＝B77/B104/B191/B229「保存期間や表示順の重複登録を出来ないように制御」のうち
+  "保存期間そのもの"（period_value+period_unit、「永年」は値なし）の重複が未制御**（表示順のみ実装
+  済みだった）だったため修正：`RetentionPeriod` に `unique_retention_period_value`（kbn,doc_name,
+  period_value,period_unit）＋ `unique_retention_permanent`（period_unit='permanent' 限定の部分
+  ユニーク、「永年」を書類名毎に1件へ）の2制約を追加、`RetentionPeriodForm.clean`
+  に同趣旨のアプリ層チェック、`RetentionRegist/EditView` の重複時フォールバック文言を
+  「保存期間または表示順が…重複」に一般化。`manage.py test` 全779件PASS（新規4件）。
+  開発中のため新規マイグレーションは作らず `masters/migrations/0001_initial.py` の
+  `RetentionPeriod` の `constraints` に直接畳み込み（`makemigrations --check` クリーン、
+  開発DBには手動で部分ユニークインデックス2本を作成＋シードの「永年」重複1行を削除）。
+  ※本番反映前に既存 `m_retention_period` に同一保存期間・複数「永年」の重複行が無いか要確認。
+  追補（2026-09-03、ユーザー報告）：「永年」の設定を編集画面で開くと保存期間の数値が入力できる
+  不具合を修正。原本の `handlePermanent()` は select の `onchange` にしか繋がっておらず初期表示で
+  未実行だったため、`retention_edit.html`/`retention_regist.html` に `DOMContentLoaded` で
+  `handlePermanent(#id_period_unit)` を1回呼ぶ初期化を追加。実プレビューで「永年」→数値欄
+  disabled、単位変更で enable/disable 追従、非永年は enable を実測確認。回帰テスト1件追加。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

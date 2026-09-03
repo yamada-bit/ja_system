@@ -78,5 +78,13 @@
       periodInput.disabled = false;
     }
   }
+
+  // 編集対象が「永年」の設定の場合、画面を開いた時点で保存期間の数値入力を無効化する
+  // （原本index.htmlのhandlePermanent()はselectのonchangeにしか繋がっておらず、
+  // 「永年」の設定を開いても数値が入力できてしまうモックのバグ。xlsx B73「「永年」を
+  // 選択した場合…数値を入力出来ないようにする」に合わせ、初期表示でも同じ制御をかける）。
+  document.addEventListener('DOMContentLoaded', function () {
+    handlePermanent(document.getElementById('id_period_unit'));
+  });
 </script>
 {% endblock %}

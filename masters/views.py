@@ -462,20 +462,25 @@ class RetentionRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             token = issue_token(request.session, self.form_id)
             return render(request, self.template_name, {"form": form, "token": token})
 
-        # RetentionPeriodForm.clean_display_orderのアプリ層チェックも同時送信のTOCTOU競合までは
-        # 防げないため、models.RetentionPeriodのUniqueConstraint(unique_retention_display_order)
-        # 違反時のIntegrityErrorをsave_or_noneで捕捉する（Group/Category系のform.save()と同じ方針）。
+        # RetentionPeriodForm側のアプリ層チェック（clean_display_order/clean）も同時送信の
+        # TOCTOU競合までは防げないため、models.RetentionPeriodのUniqueConstraint
+        # （unique_retention_display_order/period_value/permanent）違反時のIntegrityErrorを
+        # save_or_noneで捕捉する（Group/Category系のform.save()と同じ方針）。
         period = save_or_none(
             form,
-            log_message="保存期間設定の表示順の重複によりDB制約違反が発生しました: kbn=%s doc_name=%s display_order=%s",
+            log_message="保存期間設定の重複によりDB制約違反が発生しました: kbn=%s doc_name=%s period=%s%s display_order=%s",
             log_args=(
-                form.cleaned_data.get("kbn"), form.cleaned_data.get("doc_name"), form.cleaned_data.get("display_order"),
+                form.cleaned_data.get("kbn"), form.cleaned_data.get("doc_name"),
+                form.cleaned_data.get("period_value"), form.cleaned_data.get("period_unit"),
+                form.cleaned_data.get("display_order"),
             ),
         )
         if period is None:
-            # retention_regist.htmlもmessages機構ではなくform.display_order.errors等しか
-            # 描画しないため、GroupRegistView.postと同じ理由でform.add_error()を使う。
-            form.add_error("display_order", "この表示順は既に使用されています。")
+            # retention_regist.htmlはmessages機構ではなくform.non_field_errors/period_value/
+            # display_orderのerrorsしか描画しないため、GroupRegistView.postと同じ理由で
+            # form.add_error()を使う。どちらの一意制約に触れたかはここでは判別しないため非フィールド
+            # エラーにまとめる。
+            form.add_error(None, "保存期間または表示順が他の設定と重複しています。")
             token = issue_token(request.session, self.form_id)
             return render(request, self.template_name, {"form": form, "token": token})
 
@@ -522,13 +527,15 @@ class RetentionEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # RetentionRegistView.postと同じ理由でIntegrityErrorをsave_or_noneで捕捉する。
         if save_or_none(
             form,
-            log_message="保存期間設定の表示順の重複によりDB制約違反が発生しました: kbn=%s doc_name=%s display_order=%s",
+            log_message="保存期間設定の重複によりDB制約違反が発生しました: kbn=%s doc_name=%s period=%s%s display_order=%s",
             log_args=(
-                form.cleaned_data.get("kbn"), form.cleaned_data.get("doc_name"), form.cleaned_data.get("display_order"),
+                form.cleaned_data.get("kbn"), form.cleaned_data.get("doc_name"),
+                form.cleaned_data.get("period_value"), form.cleaned_data.get("period_unit"),
+                form.cleaned_data.get("display_order"),
             ),
         ) is None:
-            # retention_edit.htmlも同様の理由でform.add_error()を使う。
-            form.add_error("display_order", "この表示順は既に使用されています。")
+            # retention_edit.htmlも同様の理由でform.add_error()を使う（RetentionRegistView参照）。
+            form.add_error(None, "保存期間または表示順が他の設定と重複しています。")
             token = issue_token(request.session, self.form_id)
             return render(request, self.template_name, {"form": form, "period": period, "token": token})
 

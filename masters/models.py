@@ -121,9 +121,16 @@ class RetentionPeriodUnit(models.TextChoices):
 class RetentionPeriod(models.Model):
     """保存期間設定（screen-retention-doc/regist-doc/edit-doc/delete）。文書用と電子決裁用
     （稟議書／経費支出伺）を`kbn`/`doc_name`で区別する（screen-retention-docのtbody1〜3に対応）。
-    保存期間や表示順の重複登録は不可（xlsx 保存期間設定!B77,B191、フロント側のバリデーションは
-    HTML上に実装が無いためモデル制約とフォーム側で保証する）。「永年」選択時は保存期間の数値を
-    持たない（xlsx B73、`period_value`をnull許容にしている理由）。
+    保存期間や表示順の重複登録は不可（xlsx 保存期間設定!B77,B104,B191,B229、フロント側の
+    バリデーションはHTML上に実装が無いためモデル制約とフォーム側で保証する）。「や」は表示順と
+    保存期間の2つをそれぞれ一意にする趣旨で、下記3つのUniqueConstraintで担保する:
+    - unique_retention_display_order: (kbn, doc_name, display_order)
+    - unique_retention_period_value: (kbn, doc_name, period_value, period_unit)
+      … 「ヵ月」「年」の重複（例: 「5年」を表示順違いで2件）を防ぐ
+    - unique_retention_permanent: (kbn, doc_name) を period_unit='permanent' の行に限定
+      … 「永年」はperiod_valueがNULLでPostgresが複数行を許容してしまうため、書類名毎に
+      「永年」を1件だけにする専用の部分ユニーク制約が別途必要
+    「永年」選択時は保存期間の数値を持たない（xlsx B73、`period_value`をnull許容にしている理由）。
     削除は論理削除（xlsx B146/B271「保存期間マスタから論理削除とする」、Group/Categoryと同じ
     方針）。documents.Document/contracts.Contractのretention_period外部キーはon_delete=PROTECTの
     ままだが、論理削除は行自体を消さないため参照整合性を壊さず、削除済みでも既存文書・契約書は
@@ -150,6 +157,19 @@ class RetentionPeriod(models.Model):
                 fields=["kbn", "doc_name", "display_order"],
                 condition=Q(is_deleted=False),
                 name="unique_retention_display_order",
+            ),
+            # xlsx B77/B191: 保存期間そのものの重複も不可。period_valueがNULLになる「永年」は
+            # この制約では複数行を許容してしまうため、下のunique_retention_permanentで別途担保する。
+            models.UniqueConstraint(
+                fields=["kbn", "doc_name", "period_value", "period_unit"],
+                condition=Q(is_deleted=False),
+                name="unique_retention_period_value",
+            ),
+            # 「永年」は書類名毎に1件だけ（period_value=NULLのため上の制約が効かない）。
+            models.UniqueConstraint(
+                fields=["kbn", "doc_name"],
+                condition=Q(is_deleted=False, period_unit=RetentionPeriodUnit.PERMANENT),
+                name="unique_retention_permanent",
             ),
         ]
 

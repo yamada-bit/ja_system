@@ -223,8 +223,11 @@ PERIOD_UNIT_CHOICES = RetentionPeriodUnit.choices
 class RetentionPeriodForm(forms.ModelForm):
     """screen-retention-regist-doc/edit-doc。kbn/doc_nameは一覧画面での選択状態からhidden経由で
     引き継ぐ（原本もタイトルのspanをJSで書き換えるだけで実質は遷移元の文脈依存）。
-    xlsx B77/B191「保存期間・表示順の重複登録は不可」はモデルのUniqueConstraint
-    （kbn, doc_name, display_order）で保証。「永年」選択時は数値クリア+readonly
+    xlsx B77/B191「保存期間や表示順の重複登録は出来ないように制御」は、表示順と保存期間の
+    2つをそれぞれ一意にする趣旨。表示順はモデルのUniqueConstraint（kbn, doc_name,
+    display_order）、保存期間（period_value+period_unit、「永年」はperiod_value無し）は
+    unique_retention_period_value/unique_retention_permanentで保証し、フォーム側でも
+    同時にチェックしてユーザーへ案内する。「永年」選択時は数値クリア+readonly
     （B73、handlePermanent()相当のJSをテンプレート側で実装）。
     """
 
@@ -249,10 +252,37 @@ class RetentionPeriodForm(forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
-        if cleaned.get("period_unit") == RetentionPeriodUnit.PERMANENT:
+        period_unit = cleaned.get("period_unit")
+        period_value_ok = True
+        if period_unit == RetentionPeriodUnit.PERMANENT:
             cleaned["period_value"] = None
         elif cleaned.get("period_value") in (None, ""):
             self.add_error("period_value", "「永年」以外を選択した場合は保存期間を入力してください。")
+            period_value_ok = False
+
+        # xlsx B77/B191/B104/B229「保存期間や表示順の重複登録は出来ないように制御」。表示順は
+        # clean_display_orderで、保存期間（period_value+period_unit、「永年」はperiod_value無し）は
+        # ここで同一区分・同一書類名の範囲で重複チェックする。「5年」を表示順違いで2件、あるいは
+        # 「永年」を2件登録すると、文書登録時の保存期間プルダウンに同じ選択肢が重複表示されるため。
+        # 最終的な一意性はモデルのUniqueConstraint（unique_retention_period_value/
+        # unique_retention_permanent）に委ね、ここはTOCTOU競合前の通常系の案内。
+        if period_unit and period_value_ok:
+            period_value = cleaned.get("period_value")
+            qs = RetentionPeriod.objects.filter(
+                kbn=cleaned.get("kbn") or self.instance.kbn,
+                doc_name=cleaned.get("doc_name", self.instance.doc_name),
+                period_unit=period_unit,
+                period_value=period_value,
+                is_deleted=False,
+            )
+            if self.instance.pk:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                if period_unit == RetentionPeriodUnit.PERMANENT:
+                    label = "永年"
+                else:
+                    label = f"{period_value}{dict(PERIOD_UNIT_CHOICES)[period_unit]}"
+                self.add_error("period_value", f"保存期間「{label}」は既に登録されています。")
         return cleaned
 
     def clean_display_order(self):

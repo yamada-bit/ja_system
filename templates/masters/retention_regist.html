@@ -79,5 +79,11 @@
       periodInput.disabled = false;
     }
   }
+
+  // バリデーションエラーで「永年」を選択したまま再描画された場合も、初期表示で
+  // 数値入力を無効化しておく（retention_edit.htmlと同じ理由）。
+  document.addEventListener('DOMContentLoaded', function () {
+    handlePermanent(document.getElementById('id_period_unit'));
+  });
 </script>
 {% endblock %}

@@ -78,7 +78,7 @@ class Migration(migrations.Migration):
                 'verbose_name': '保存期間設定',
                 'verbose_name_plural': '保存期間設定',
                 'db_table': 'm_retention_period',
-                'constraints': [models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('kbn', 'doc_name', 'display_order'), name='unique_retention_display_order')],
+                'constraints': [models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('kbn', 'doc_name', 'display_order'), name='unique_retention_display_order'), models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('kbn', 'doc_name', 'period_value', 'period_unit'), name='unique_retention_period_value'), models.UniqueConstraint(condition=models.Q(('is_deleted', False), ('period_unit', 'permanent')), fields=('kbn', 'doc_name'), name='unique_retention_permanent')],
             },
         ),
         migrations.AddConstraint(

@@ -270,6 +270,45 @@ class RetentionPeriodFormTests(TestCase):
         form = RetentionPeriodForm(data=self._data(period_value="", period_unit=RetentionPeriodUnit.YEAR))
         self.assertFalse(form.is_valid())
 
+    def test_duplicate_period_value_within_same_kbn_rejected(self):
+        """xlsx B77「保存期間や表示順の重複登録は出来ないように制御」の「保存期間」側。
+        表示順が違っても同一区分・同一書類名で「1年」を2件は登録できない。"""
+        form = RetentionPeriodForm(
+            data=self._data(period_value="1", period_unit=RetentionPeriodUnit.YEAR, display_order="9")
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("period_value", form.errors)
+
+    def test_same_period_value_in_different_kbn_allowed(self):
+        """区分・書類名が違えば同じ保存期間を持ってよい。"""
+        form = RetentionPeriodForm(
+            data=self._data(
+                kbn=RetentionKbn.EAPPROVAL, doc_name="ringisho",
+                period_value="1", period_unit=RetentionPeriodUnit.YEAR, display_order="1",
+            )
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_duplicate_permanent_within_same_kbn_rejected(self):
+        """「永年」はperiod_valueがNULLのため、書類名毎に1件だけ登録できる。"""
+        RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=None,
+            period_unit=RetentionPeriodUnit.PERMANENT, display_order=5,
+        )
+        form = RetentionPeriodForm(
+            data=self._data(period_value="", period_unit=RetentionPeriodUnit.PERMANENT, display_order="6")
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("period_value", form.errors)
+
+    def test_editing_same_row_keeps_its_own_period_value(self):
+        """編集時、自分自身の保存期間は重複扱いしない（表示順だけ変更するケース）。"""
+        form = RetentionPeriodForm(
+            data=self._data(period_value="1", period_unit=RetentionPeriodUnit.YEAR, display_order="7"),
+            instance=self.existing,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
     def test_period_unit_has_no_blank_choice(self):
         """原本index.html:3058-3099の「期間単位」selectには空選択肢が無く常に先頭の「ヵ月」が
         暗黙選択された状態（原本フィデリティ監査で発見・修正）。"""
@@ -682,6 +721,20 @@ class RetentionListViewContentTests(TestCase):
         self.assertEqual(list(response.context["keihi_periods"]), [keihi_period])
         self.assertNotIn(deleted_doc_period, list(response.context["doc_periods"]))
 
+    def test_edit_screen_initializes_permanent_input_disabled(self):
+        """「永年」の設定を編集画面で開いたとき、handlePermanent()が初期表示でも呼ばれ
+        保存期間の数値入力を無効化するよう初期化スクリプトが埋め込まれている
+        （xlsx B73。原本のhandlePermanent()はonchange専用でこの制御が抜けていた
+        ＝2026-09-03ユーザー報告の不具合修正の回帰テスト）。"""
+        permanent = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=None,
+            period_unit=RetentionPeriodUnit.PERMANENT, display_order=1,
+        )
+        response = self.client.get(f"/masters/retention/{permanent.pk}/edit/")
+        self.assertContains(response, "handlePermanent(document.getElementById('id_period_unit'))")
+        # 「永年」の設定なのでperiod_valueは空・単位は永年が選択された状態で描画される。
+        self.assertContains(response, 'name="period_unit"')
+
 
 class MasterDoubleSubmitTokenTests(TestCase):
     """二重送信対策トークン不正時の分岐が両アプリの全regist/edit/delete Viewで一貫して
@@ -930,7 +983,7 @@ class MasterIntegrityErrorViewTests(TestCase):
                 },
             )
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "この表示順は既に使用されています。")
+        self.assertContains(response, "保存期間または表示順が他の設定と重複しています。")
         self.assertEqual(
             RetentionPeriod.objects.filter(kbn=RetentionKbn.DOCUMENT, display_order=1).count(), 1
         )
@@ -1168,7 +1221,7 @@ class MasterEditIntegrityErrorViewTests(TestCase):
                 },
             )
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "この表示順は既に使用されています。")
+        self.assertContains(response, "保存期間または表示順が他の設定と重複しています。")
         target.refresh_from_db()
         self.assertEqual(target.display_order, 2)
 

@@ -519,7 +519,7 @@ class SearchSortTests(TestCase):
             kbn=RetentionKbn.DOCUMENT, period_value=5, period_unit=RetentionPeriodUnit.YEAR, display_order=3
         )
         retention_a = RetentionPeriod.objects.create(
-            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=2
+            kbn=RetentionKbn.DOCUMENT, period_value=2, period_unit=RetentionPeriodUnit.YEAR, display_order=2
         )
         # retention_bの方がpk（作成順）は小さいが、display_orderはretention_aの方が小さい
         # ことをテストの前提として明示する。
@@ -2518,7 +2518,7 @@ class DepartmentScopeAccessControlTests(TestCase):
             code="002", name="自部署カテゴリー", group=own_group, doc_kbn=DocKbn.DOCUMENT
         )
         own_retention_period = RetentionPeriod.objects.create(
-            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=2
+            kbn=RetentionKbn.DOCUMENT, period_value=2, period_unit=RetentionPeriodUnit.YEAR, display_order=2
         )
         from documents.models import Document
 
