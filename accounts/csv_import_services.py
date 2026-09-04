@@ -6,10 +6,11 @@ import unicodedata
 from django.db import transaction
 
 from accounts.models import Employee, Position, Rank
-from accounts.services import reset_permission_profile_if_needed
+from accounts.services import LastAdminError, reset_permission_profile_if_needed
 from audit import services as audit_services
 from organizations.models import RETIRED_SECTION_CODE, Department
 from permissions.models import PermissionProfile, PermissionRole
+from permissions.services import would_orphan_admins
 
 logger = logging.getLogger(__name__)
 
@@ -223,13 +224,23 @@ def _import_employee(*, employee_no, name, department, section_code, position_co
 
 def _apply_manager_flag(employee, manager_flag, actor):
     """xlsx B124-125(Rev1.1)「所属長フラグが"1"の場合...後述『権限管理』権限マスタの対象者を
-    『所属長』として権限更新する」。既に管理者ロールの職員は降格させない（CSV取込という
-    間接的な経路で管理者権限を意図せず引き下げる事故を避けるための安全側の判断）。
+    『所属長』として権限更新する」。
 
-    退職扱いになった職員は昇格させない（同じ行でreset_permission_profile_if_neededが安全側に
-    STAFFへリセットした直後にここでMANAGERへ昇格させ直すと、退職者が所属長権限を持ったままに
-    なってしまう。HRエクスポート側で所属長フラグが退職時に再ゼロ化されていない実データが
-    あり得るため、コード側で防御する。コード監査で発見、2026-08-24修正）。
+    - STAFF → MANAGER：従来どおり昇格。
+    - ADMIN → MANAGER：Rev1.5 職員マスタ!B127-128 で降格を許容（以前は「CSV取込という間接経路で
+      管理者権限を意図せず引き下げる事故を避ける」ため据え置いていたが、Rev1.5 が明示的に
+      「システム権限"管理者"が所属長フラグによって"所属長"に変更になった際、管理者が0人に
+      ならないようチェックを設ける」＝降格前提のチェックを要求したため方針転換。
+      ユーザー確認済み 2026-09-04）。ただし would_orphan_admins() が True（他に管理者が居ない）
+      なら、B128「メッセージを表示し、CSV取込による更新を中止する」に従い ValueError を投げる。
+      import_staff_csv() 側でその行のトランザクションがロールバックされ summary.errors に集積される
+      （中止は行単位。1行のミスで取込全体を止めないという本モジュールの方針〈import_staff_csv
+      docstring〉に沿う）。
+    - MANAGER：変更なし。
+
+    退職扱いになった職員は昇格・降格とも行わない（同じ行でreset_permission_profile_if_neededが
+    安全側にSTAFFへリセット済み。HRエクスポート側で所属長フラグが退職時に再ゼロ化されていない
+    実データがあり得るため、コード側で防御する。コード監査で発見、2026-08-24修正）。
     """
     if manager_flag != "1":
         return
@@ -238,18 +249,31 @@ def _apply_manager_flag(employee, manager_flag, actor):
     profile, _ = PermissionProfile.objects.get_or_create(
         employee=employee, defaults={"role": PermissionRole.MANAGER}
     )
-    if profile.role == PermissionRole.STAFF:
-        profile.role = PermissionRole.MANAGER
-        profile.save(update_fields=["role"])
-        logger.info(
-            "CSV取込の所属長フラグにより権限を所属長へ更新しました: employee_no=%s",
-            employee.employee_no,
+    if profile.role == PermissionRole.MANAGER:
+        return
+    if profile.role == PermissionRole.ADMIN and would_orphan_admins(profile, PermissionRole.MANAGER):
+        # reset_permission_profile_if_needed と同じ LastAdminError（ValueError サブクラス）で
+        # 揃える。import_staff_csv の except ValueError が行単位に握って summary.errors へ集積する。
+        raise LastAdminError(
+            "所属長フラグにより管理者を所属長へ変更しようとしましたが、システムの管理者が"
+            "0人になるため、この行の取込を中止しました。先に他の職員を管理者に設定してください。"
         )
-        # reset_permission_profile_if_needed（accounts/services.py）と同種の「権限に関わる操作」
-        # のため、こちらもaudit_services.log()で操作履歴ログへ記録する（コード監査で発見：
-        # 以前はlogger.infoのみで、CSV取込経由の所属長昇格が/audit/画面から追跡できなかった）。
-        audit_services.log(
-            employee=actor,
-            action="職員マスタ　CSV取込 所属長昇格",
-            event_message=f"職員：{employee.name}({employee.employee_no}),所属長フラグにより権限を所属長へ更新しました",
-        )
+    previous_role = profile.role
+    profile.role = PermissionRole.MANAGER
+    profile.save(update_fields=["role"])
+    demotion = previous_role == PermissionRole.ADMIN
+    logger.info(
+        "CSV取込の所属長フラグにより権限を所属長へ更新しました: employee_no=%s %s->manager",
+        employee.employee_no, previous_role,
+    )
+    # reset_permission_profile_if_needed（accounts/services.py）と同種の「権限に関わる操作」
+    # のため、こちらもaudit_services.log()で操作履歴ログへ記録する（コード監査で発見：
+    # 以前はlogger.infoのみで、CSV取込経由の所属長昇格が/audit/画面から追跡できなかった）。
+    audit_services.log(
+        employee=actor,
+        action="職員マスタ　CSV取込 所属長降格" if demotion else "職員マスタ　CSV取込 所属長昇格",
+        event_message=(
+            f"職員：{employee.name}({employee.employee_no}),"
+            f"所属長フラグにより権限を{'管理者から' if demotion else ''}所属長へ更新しました"
+        ),
+    )

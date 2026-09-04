@@ -7,6 +7,7 @@ from core.widgets import PopupSelectWidget
 from masters.models import DocKbn, Group
 from organizations.models import Department
 from permissions.models import FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
+from permissions.services import would_orphan_admins
 
 logger = logging.getLogger(__name__)
 
@@ -118,3 +119,18 @@ class AuthorityEditForm(forms.ModelForm):
         self.fields["role"].choices = [
             choice for choice in PermissionRole.choices if choice[0] in allowed_roles
         ]
+
+    def clean_role(self):
+        """xlsx 権限管理!B222-223「[重要]システム権限の"管理者"が0人にならないようにチェックを掛ける。
+        …他の職員を先に"管理者"に設定する必要がある旨、メッセージを表示し更新を中止する」。
+
+        `self.instance.role` はこの時点ではまだ DB の現在値（_post_clean で cleaned_data が
+        instance へ反映される前）なので、「現在は管理者だが管理者以外へ下げようとしている」判定に使える。
+        """
+        new_role = self.cleaned_data["role"]
+        if self.instance.pk and would_orphan_admins(self.instance, new_role):
+            raise forms.ValidationError(
+                "システム権限「管理者」はシステム全体で1人以上必須です。"
+                "他の職員を先に「管理者」に設定してから変更してください。"
+            )
+        return new_role

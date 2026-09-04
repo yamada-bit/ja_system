@@ -63,7 +63,7 @@
         </table>
         <div style="margin-top:20px;">
           <button type="button" class="btn-secondary" onclick="window.location.href='{% url 'organizations:dept_list' %}'">キャンセル</button>
-          <button type="submit" class="btn-primary" onclick="if (!this.form.reportValidity()) return false; if (!confirm('更新してよろしいですか？')) return false; setTimeout(() => { this.disabled = true; });">更新</button>
+          <button type="submit" class="btn-primary" onclick="if (!this.form.reportValidity()) return false; if (!confirmDeptUpdate()) return false; setTimeout(() => { this.disabled = true; });">更新</button>
         </div>
       </form>
     </div>
@@ -88,5 +88,26 @@
       }
     });
   });
+
+  // Rev1.5 部署管理!B215-219「※更新前に、統合と分割の確認がイメージできるようなメッセージを
+  // 表示すること」。E217『部署A　に　部署Bの権限　が　統合されます。よろしいですか？』／
+  // E219『部署Cの権限　が　部署D、部署E　に　分割されます。よろしいですか？』。
+  // 統合/分割の向きは K126/K127「部署管理一覧から選択した部署（＝編集中の部署）」を主語/目的語に
+  // 置く（統合：編集中の部署 に 選択部署 が／分割：編集中の部署 が 選択部署 に）。
+  // 実処理の viewer/visible の対応は organizations/services.py apply_dept_action と一致。
+  function confirmDeptUpdate() {
+    const editingDept = '{{ department|escapejs }}';
+    const action = document.querySelector('input[name="dept_action"]:checked');
+    const value = action ? action.value : 'none';
+    if (value === 'merge' || value === 'split') {
+      const display = document.getElementById('id_dept_action_target_display');
+      const targets = ((display && display.value) || '').trim();
+      if (value === 'merge') {
+        return confirm(editingDept + '　に　' + targets + 'の権限　が　統合されます。よろしいですか？');
+      }
+      return confirm(editingDept + 'の権限　が　' + targets + '　に　分割されます。よろしいですか？');
+    }
+    return confirm('更新してよろしいですか？');
+  }
 </script>
 {% endblock %}

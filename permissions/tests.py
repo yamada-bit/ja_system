@@ -8,12 +8,14 @@ from organizations.models import Department
 from permissions.forms import AuthorityEditForm, AuthoritySearchForm
 from permissions.models import CSV_EXPORT_FIELDS, FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
 from permissions.services import (
+    admin_count,
     can_download,
     can_edit_contract,
     can_select_department,
     filter_authority_queryset,
     get_role,
     visible_groups,
+    would_orphan_admins,
 )
 
 
@@ -212,6 +214,43 @@ class PermissionServicesTests(TestCase):
         )
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
         self.assertIsNone(department_ids_for_group_scope(self.employee, kind="document"))
+
+    def test_admin_count_and_would_orphan_admins(self):
+        """xlsx 権限管理!B222-223 / 職員マスタ!B127-128「システム全体で管理者が0人に
+        ならないようにチェック」。admin_count / would_orphan_admins（X-1・X-2で共有）。"""
+        p1 = PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        other = Employee.objects.create_user(
+            employee_no="9", name="二人目", password="x",
+            department=self.department, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        p2 = PermissionProfile.objects.create(employee=other, role=PermissionRole.STAFF)
+
+        self.assertEqual(admin_count(), 1)
+        # 唯一の管理者を所属長へ下げようとすると orphan になる。
+        self.assertTrue(would_orphan_admins(p1, PermissionRole.MANAGER))
+        # 管理者のまま（role 据え置き）は影響なし。
+        self.assertFalse(would_orphan_admins(p1, PermissionRole.ADMIN))
+        # 元々管理者でないプロファイルの変更は影響なし。
+        self.assertFalse(would_orphan_admins(p2, PermissionRole.MANAGER))
+        # 2人目を管理者にすれば、1人目を下げても orphan にならない。
+        p2.role = PermissionRole.ADMIN
+        p2.save(update_fields=["role"])
+        self.assertEqual(admin_count(), 2)
+        self.assertFalse(would_orphan_admins(p1, PermissionRole.MANAGER))
+
+    def test_admin_count_excludes_retired(self):
+        """会話ログ2026-09-04の指摘③：ログイン不能な退職管理者は「有効な管理者」に数えない。
+        退職者を管理者化する経路（Django admin・退職後の権限管理編集）で0人ガードをすり抜けない。"""
+        p1 = PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        retired = Employee.objects.create_user(
+            employee_no="9", name="退職管理者", password="x", is_retired=True,
+            department=self.department, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(employee=retired, role=PermissionRole.ADMIN)
+
+        # role=ADMIN は2件だが、在職者は self.employee の1名のみ。
+        self.assertEqual(admin_count(), 1)
+        self.assertTrue(would_orphan_admins(p1, PermissionRole.STAFF))
 
 
 class AuthoritySettingsMenuAccessControlTests(TestCase):
@@ -478,6 +517,48 @@ class AuthorityEditViewTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["form"].is_valid())
+        self.assertEqual(
+            PermissionProfile.objects.get(employee=self.other_employee).role, PermissionRole.STAFF
+        )
+
+    def test_edit_page_wires_role_change_reset(self):
+        """xlsx 権限管理!B114(Rev1.5)「現在の設定以外の権限を選択したタイミングで全ての項目を
+        リセットする。(「一括無許可」処理と同じ)」。クライアント側JS（id_roleのchangeで
+        clearAllAuthoritySettings()）が描画されていること。実挙動はブラウザ依存のため配線のみ検証。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        response = self.client.get(f"/permissions/{self.other_employee.pk}/edit/")
+        self.assertContains(response, "clearAllAuthoritySettings")
+        self.assertContains(response, "initRoleChangeReset")
+        self.assertContains(response, "roleSelect.addEventListener('change'")
+
+    def test_cannot_demote_last_admin(self):
+        """xlsx 権限管理!B222-223「[重要]システム権限の"管理者"が0人にならないようにチェックを
+        掛ける。…メッセージを表示し更新を中止する」。唯一の管理者を降格する更新は弾く。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        get_response = self.client.get(f"/permissions/{self.employee.pk}/edit/")
+        token = get_response.context["token"]
+        response = self.client.post(
+            f"/permissions/{self.employee.pk}/edit/",
+            {"role": PermissionRole.MANAGER, "token": token},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["form"].is_valid())
+        self.assertContains(response, "システム権限「管理者」はシステム全体で1人以上必須です")
+        self.assertEqual(
+            PermissionProfile.objects.get(employee=self.employee).role, PermissionRole.ADMIN
+        )
+
+    def test_can_demote_admin_when_another_admin_exists(self):
+        """他に管理者が居れば、管理者を降格する更新は通る。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        PermissionProfile.objects.create(employee=self.other_employee, role=PermissionRole.ADMIN)
+        get_response = self.client.get(f"/permissions/{self.other_employee.pk}/edit/")
+        token = get_response.context["token"]
+        response = self.client.post(
+            f"/permissions/{self.other_employee.pk}/edit/",
+            {"role": PermissionRole.STAFF, "token": token},
+        )
+        self.assertRedirects(response, "/permissions/")
         self.assertEqual(
             PermissionProfile.objects.get(employee=self.other_employee).role, PermissionRole.STAFF
         )

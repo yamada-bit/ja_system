@@ -6,7 +6,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.views import LoginView as BaseLoginView
 from django.contrib.auth.views import LogoutView as BaseLogoutView
 from django.core.paginator import Paginator
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views import View
@@ -15,7 +15,12 @@ from audit import services as audit_services
 from accounts.csv_import_services import CsvImportError, import_staff_csv
 from accounts.forms import LoginForm, StaffCsvImportForm, StaffEditForm, StaffRegistForm, StaffSearchForm
 from accounts.models import Employee
-from accounts.services import build_staff_edit_diff_message, filter_staff_queryset, reset_permission_profile_if_needed
+from accounts.services import (
+    LastAdminError,
+    build_staff_edit_diff_message,
+    filter_staff_queryset,
+    reset_permission_profile_if_needed,
+)
 from core.csv_services import sanitize_csv_row
 from core.double_submit import consume_token, issue_token
 from organizations.services import departments_list
@@ -126,8 +131,11 @@ class StaffCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         response = HttpResponse(content_type="text/csv; charset=utf-8-sig")
         response["Content-Disposition"] = 'attachment; filename="staff_list.csv"'
         writer = csv.writer(response)
+        # xlsx 職員マスタ!B91（Rev1.5で削除）：以前は「・パスワードはセキュリティ上、空欄で
+        # 出力すること」という指示に沿ってパスワード列を空値で出力していたが、Rev1.5で一覧画面から
+        # パスワード列自体が撤去された（原本html6）のに合わせCSV出力の列も廃止する。
         writer.writerow(
-            ["職員番号", "氏名", "パスワード", "本支所コード", "本支所名", "部課コード", "部課名",
+            ["職員番号", "氏名", "本支所コード", "本支所名", "部課コード", "部課名",
              "職階コード", "職階名", "役職コード", "役職名", "退職"]
         )
         for employee in qs:
@@ -138,7 +146,6 @@ class StaffCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                     [
                         employee.employee_no,
                         employee.name,
-                        "",
                         employee.department.branch_code,
                         employee.department.branch_name,
                         employee.department.section_code,
@@ -322,7 +329,23 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             )
 
         try:
-            employee = form.save()
+            # 職員本体の保存と、それに伴う権限リセットは1トランザクションにまとめる。
+            # reset_permission_profile_if_needed がシステム唯一の管理者を落とすと判断して
+            # LastAdminError を投げた場合、employee.save() ごとロールバックして「一切保存されない」
+            # 状態にする（xlsx 職員マスタ!B127-128「メッセージを表示し更新を中止する」）。
+            with transaction.atomic():
+                employee = form.save()
+                reset_permission_profile_if_needed(
+                    employee,
+                    department_changed=employee.department_id != before_department_id,
+                    rank_changed=employee.rank != before_rank,
+                    position_changed=employee.position != before_position,
+                    # 「退職に設定した場合」なので未退職→退職の遷移のみを対象にする（xlsx B228）。
+                    # 既に退職済みの職員を退職以外の理由で編集しても毎回リセットされないように
+                    # するため、employee.is_retired（現在値）ではなく遷移を渡す（accounts.services参照）。
+                    retired_changed=employee.is_retired and not before_is_retired,
+                    actor=request.user,
+                )
         except IntegrityError:
             # StaffEditFormはemployee_no（unique制約を持つ唯一のフィールド）を編集不可にしているため
             # 現状この分岐に到達する実際の経路は無いが、StaffRegistView.postとの一貫性を保ち、
@@ -335,17 +358,21 @@ class StaffEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 self.template_name,
                 {"form": form, "employee": employee, "token": token, "departments_pulldown": departments_list()},
             )
-        reset_permission_profile_if_needed(
-            employee,
-            department_changed=employee.department_id != before_department_id,
-            rank_changed=employee.rank != before_rank,
-            position_changed=employee.position != before_position,
-            # 「退職に設定した場合」なので未退職→退職の遷移のみを対象にする（xlsx B228）。
-            # 既に退職済みの職員を退職以外の理由で編集しても毎回リセットされないようにするため、
-            # employee.is_retired（現在値）ではなく遷移を渡す（accounts.services参照）。
-            retired_changed=employee.is_retired and not before_is_retired,
-            actor=request.user,
-        )
+        except LastAdminError as exc:
+            # xlsx 職員マスタ!B127-128 / 権限管理!B222-223。トランザクションごとロールバック済み。
+            # form.save() でメモリ上のemployeeは書き換わっているためDBの値へ戻してから再表示する。
+            logger.warning(
+                "職員マスタ編集：システム唯一の管理者の権限リセットになるため更新を中止しました: employee_no=%s",
+                employee.employee_no,
+            )
+            employee.refresh_from_db()
+            messages.error(request, str(exc))
+            token = issue_token(request.session, self.form_id)
+            return render(
+                request,
+                self.template_name,
+                {"form": form, "employee": employee, "token": token, "departments_pulldown": departments_list()},
+            )
         logger.info("職員情報を更新しました: employee_no=%s", employee.employee_no)
         # 職員マスタ登録と同様、更新操作も操作履歴ログに記録する（権限プロファイルの自動
         # リセット自体は別イベントとしてservices.py側で記録する）。イベントメッセージは

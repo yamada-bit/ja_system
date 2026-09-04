@@ -3115,3 +3115,212 @@ CLAUDE.md「xlsx/HTML のサンプル文言は手がかりに過ぎず、実装�
   `api_url` に `?exclude=<pk>` を付与 → `common.js openPopupPopup` が `&type=dept` を連結）。
 - `organizations/tests.py`：API の exclude 動作・非数値無視、フォームの queryset 除外＋extra_query
   セットの3件を追加。`manage.py test organizations core permissions` PASS（organizations 48件）。
+
+## 原本HTML改訂差分の確認（html5→html6）・簡易設計指示書 Rev1.5改訂の反映（2026-09-04）
+
+原本改訂 Rev1.5（`../../HTML/html6/`、`文書管理システム_簡易設計指示書_Rev1_5.xlsx`、
+表紙改訂履歴「1.5 / 2026-09-04 / その他設定 パスワード変更画面修正 他 / 原田」）を受領。
+CLAUDE.md「原本改訂を受け取った時の手順」に従い機械diff→影響画面のみ反映。
+
+**差分の全体像（洗い出しレポート scratchpad/Rev1_5_差分洗い出しレポート.md）**：
+- html6/index.html の差分は 4 ハンクのみ、全て画面固有・パスワード表示の撤去。
+  style.css はバイナリ一致、common.js / base.html への波及なし。
+  - H-1 職員マスタ一覧：パスワード列を丸ごと削除
+  - H-2 職員マスタ詳細：パスワード表示値 `ntarou1975`→`●●●●●●`（ja_pj は既にマスク済み）
+  - H-3 職員マスタ編集：パスワード「目玉アイコン」👁️ と説明を削除
+  - H-4 その他設定：パスワード変更画面の「現在のパスワード」行を削除
+- 指示書のみ改訂（html6 に対応マークアップ無し）：
+  - X-1 権限管理更新：システム権限"管理者"が0人になる更新を中止（B222-223）
+  - X-2 職員CSV取込：所属長フラグでの管理者→所属長降格時の0人チェック（B127-128）
+  - X-3 権限管理編集：システム権限プルダウン変更時に全項目リセット（B114）
+  - X-4 部署統合・分割：更新前に対象部署名入りの確認メッセージ（B215-219）
+  - X-5 部署統合・分割ポップアップから編集中部署を除外（B123）→ commit 727cdaf で実装済み
+  - X-6 管理者はログイン者自身も編集可（B75）→ `can_manage_target` で実装済み
+- 画像差分は4枚（H-1/H-3/H-4 に対応）。srcRect クロップ・白塗り sp 矩形なし。
+- Rev1_3→Rev1_5 / Rev1_2→Rev1_5 クロスチェックで取りこぼし無しを確認。
+
+以下、1件ずつ反映（各項目にテスト・チェックリスト更新まで含む）。
+
+### H-1 職員マスタ一覧：パスワード列の削除（2026-09-04）
+
+- 原本 html5→html6 diff：`<th>パスワード</th>` と全行 `<td>********</td>` を削除（13→12列）。
+  xlsx 職員マスタ AI7「Rev1.5 画面変更」/ AI91「パスワード表示の文言削除」、B91 削除
+  「・パスワードはセキュリティ上、空欄で出力すること。」。画像 image6→image8 で列消滅を確認。
+- `templates/accounts/staff_list.html`：`<th>パスワード</th>`（78行付近）と `<td>********</td>`
+  （96行付近）を削除。
+- `accounts/views.py` `StaffCsvExportView`：削除された B91 は元々「CSV出力は空欄で」という
+  CSV向け指示だったため、列廃止に合わせCSV出力のヘッダ「パスワード」と空値も削除
+  （取込ヘッダ `CSV_HEADER` には元々パスワード列なし＝影響なし）。ユーザー確認済み（CSV出力列も削除）。
+- テスト（`accounts/tests.py`）：
+  - `StaffCsvExportViewTests.test_export_contains_header_and_row_without_password_column`
+    （旧 `_with_blank_password` を改名）：ヘッダに「パスワード」を含まず「職員番号,氏名,本支所コード」で始まること。
+  - `StaffSettingsMenuAccessControlTests.test_staff_list_has_no_password_column`（新規）：
+    一覧レンダリング結果に `<th>パスワード</th>` / `<td>********</td>` が無いこと。
+- `manage.py test accounts` 78件 PASS。
+
+### H-2 職員マスタ詳細：パスワードのマスク文字を `●●●●●●` へ（2026-09-04）
+
+- 原本 html5→html6 diff：職員マスタ詳細のパスワード表示値 `ntarou1975` → `●●●●●●`
+  （原本がマスク表示に変更＝ja_pj のハッシュ運用に追いついた）。編集画面も同時に
+  「目玉アイコン」削除（→ H-3）。
+- ja_pj は元々ハッシュ化必須の規約で `********` マスク表示。**表記だけ原本に合わせ `●●●●●●` に統一**
+  （ユーザー確認済み）。表示位置は `templates/accounts/staff_detail.html`（27-31行）のみ
+  （一覧はH-1で列削除、その他設定「現在のパスワード」行はH-4で削除、staff_edit は入力欄で
+  マスク文字列の表示なし、ログインはプリフィルなし）。`{% comment %}` の逸脱理由も更新。
+- テスト（`accounts/tests.py`）：`StaffDetailViewTests.test_password_is_masked_not_shown_in_plaintext`
+  に `assertContains(response, "●●●●●●")` を追加、docstring 更新。
+- `manage.py test accounts.tests.StaffDetailViewTests accounts.tests.StaffCsvExportViewTests` 7件 PASS。
+- 差異一覧xlsx シート「1_必然的な逸脱」No.2（職員マスタ詳細・編集のパスワード平文表示）は、
+  原本詳細がマスク化されたことで詳細側の逸脱がほぼ解消。→ 末尾の「差異一覧xlsx更新」でまとめて反映。
+
+### H-3 職員マスタ編集：目玉アイコン削除 — ユーザー指示でスキップ（2026-09-04）
+
+原本 html6 は職員マスタ編集画面から `<span class="password-toggle2" id="pass-toggle-icon2">👁️</span>
+とその click ハンドラJS、xlsx の説明文（職員マスタ AI233「Rev1.5 パスワード目玉アイコン説明削除」）を
+削除している。ja_pj への反映はユーザー指示により今回見送り（`templates/accounts/staff_edit.html`
+53行の span と 114-118行のJSは現状のまま）。将来反映する場合は本節を参照。
+
+### H-4 その他設定：パスワード変更画面の「現在のパスワード」行を削除（2026-09-04）
+
+- 原本 html5→html6 diff：`<tr><th>現在のパスワード</th><td>ja1111</td></tr>` を削除。
+  表紙 J29「その他設定 パスワード変更画面修正 他」、その他設定 AI131「Rev1.5 画面変更」、image42 更新。
+- `templates/core/other_pass.html`：`{% comment %}` ＋「現在のパスワード」`<tr>` を削除。
+  「変更後パスワード」「変更後パスワード(確認)」の2行のみに。
+- **サーバー側ロジックは維持**：`core/forms.py` `OtherPassForm.clean_new_password` の
+  「変更後パスワードが現在のものと同一ならエラー」検証（xlsx その他設定!B150、Rev1_5 でも該当セル健在）は
+  そのまま。docstring を「現在のパスワード欄はRev1.5で画面から削除、検証は維持」に更新。
+- テスト（`core/tests.py` `OtherSettingsRoutingTests`）：
+  - `test_password_change_has_no_current_password_row`（新規）：GET 画面に「現在のパスワード」文字列が無いこと。
+  - 既存 `test_password_change_rejects_same_as_current`（B150 検証）はそのまま PASS。
+- `manage.py test core.tests.OtherSettingsRoutingTests` 10件 PASS。
+- 差異一覧xlsx シート「1_必然的な逸脱」No.3（その他設定 現在のパスワードの平文表示逸脱）は、
+  行そのものが原本から消えたため逸脱解消 → 末尾の「差異一覧xlsx更新」でまとめて反映。
+
+### X-1 権限管理 更新：システム権限"管理者"が0人になる更新を中止（2026-09-04）
+
+- 指示書のみ改訂（html6 に対応マークアップ無し）：権限管理 B222「[重要]システム権限の"管理者"が
+  0人にならないように、チェックを掛ける」＋ B223「管理者はシステム全体で1人以上必須の為、
+  他の職員を先に"管理者"に設定する必要がある旨、メッセージを表示し更新を中止する」。AI222「Rev1.5 説明追加」。
+- `permissions/services.py`：
+  - `admin_count(exclude_profile_pk=None)`（新規）：role=ADMIN の PermissionProfile 件数。
+    退職者は職員マスタ編集・CSV取込のどちらでも `reset_permission_profile_if_needed` で
+    STAFF へリセットされるため、role=ADMIN のプロファイル＝現役管理者と一致する。
+  - `would_orphan_admins(profile, new_role)`（新規）：現在 ADMIN の profile を ADMIN 以外へ
+    下げる更新で、他に ADMIN が居なければ True。X-1（権限管理編集）と X-2（CSV取込の所属長降格）で共有。
+- `permissions/forms.py` `AuthorityEditForm.clean_role`（新規）：`self.instance.role`（_post_clean 前＝
+  DB の現在値）で判定し、orphan になるなら `ValidationError`
+  「システム権限「管理者」はシステム全体で1人以上必須です。他の職員を先に「管理者」に設定してから
+  変更してください。」。所属長のロール昇格阻止（既存 choices 絞り込み）とは独立。
+- `templates/permissions/authority_edit.html`：システム権限セルに `{{ form.role.errors }}` の表示を追加
+  （従来 non_field_errors しか出しておらず、role のフィールドエラーが画面に出なかった）。
+- テスト（`permissions/tests.py`）：
+  - `PermissionServicesTests.test_admin_count_and_would_orphan_admins`（新規）
+  - `AuthorityEditViewTests.test_cannot_demote_last_admin` / `test_can_demote_admin_when_another_admin_exists`（新規）
+- `manage.py test permissions` 68件 PASS。
+
+### X-2 職員CSV取込：所属長フラグでの管理者→所属長降格を許容＋0人ガード（2026-09-04）
+
+- 指示書のみ改訂：職員マスタ B127「・システム権限の"管理者"が所属長フラグによって"所属長"に
+  変更になった際、システム側で管理者が0人にならないようにチェックを設ける」＋ B128「管理者が
+  0人になる場合、メッセージを表示し、CSV取込による更新を中止すること」。AI127「Rev1.5 説明追加」。
+- **既存の安全判断からの方針転換（ユーザー確認済み 2026-09-04、選択肢(b)）**：
+  ja_pj は従来「CSV取込という間接経路で管理者権限を意図せず引き下げる事故を避ける」ため
+  `_apply_manager_flag` で ADMIN を据え置いていた。Rev1.5 B127-128 が「降格前提の0人チェック」を
+  明示的に要求したため、管理者→所属長の CSV 降格を許容する方向へ変更。
+- `accounts/csv_import_services.py` `_apply_manager_flag` を書き換え：
+  - STAFF → MANAGER：従来どおり昇格。
+  - MANAGER：変更なし（早期 return）。
+  - ADMIN → MANAGER：`permissions.services.would_orphan_admins(profile, MANAGER)` が True なら
+    `ValueError`「所属長フラグにより管理者を所属長へ変更しようとしましたが、システムの管理者が
+    0人になるため、この行の取込を中止しました。先に他の職員を管理者に設定してください。」を投げる。
+    `import_staff_csv` の行単位 `transaction.atomic()` がロールバックされ `summary.errors` に集積
+    （中止は**行単位**。1行のミスで取込全体を止めないという本モジュールの方針〈import_staff_csv
+    docstring 明記〉に沿った解釈。B128「CSV取込による更新を中止」の粒度は指示書上曖昧なため
+    行単位を採用）。orphan にならなければ降格し、監査ログの action を
+    「職員マスタ　CSV取込 所属長降格」（昇格時は従来どおり「所属長昇格」）で記録。
+  - 退職者は従来どおり昇格・降格とも行わない。
+- `import` に `from permissions.services import would_orphan_admins` を追加（循環 import なし）。
+- テスト（`accounts/tests.py` `ImportStaffCsvServiceTests`）：
+  - `test_manager_flag_does_not_downgrade_admin`（旧・据え置き前提）を削除し、
+    `test_manager_flag_demotes_admin_when_another_admin_exists`（他に管理者が居れば降格成立＋監査ログ）と
+    `test_manager_flag_demotion_blocked_when_last_admin`（唯一の管理者なら行ロールバック・氏名変更も不発）に置換。
+- `manage.py test accounts permissions core audit` 306件 PASS。
+
+### X-3 権限管理編集：システム権限プルダウン変更時に全項目リセット（2026-09-04）
+
+- 指示書のみ改訂（html6 に権限管理の動的制御追加なし、drawing6 画像も未変更）：
+  権限管理 B114「[重要]現在の設定以外の権限を選択したタイミングで全ての項目をリセットする。
+  (後述の「一括無許可」処理と同じ)」。AI114「Rev1.5 説明追加」。
+  ユーザー合意済み（原本HTML未実装だが指示書 [重要] 指示のため実装、2026-09-04）。
+- `templates/permissions/authority_edit.html` の `{% block extra_script %}`：
+  - 「一括無許可」相当のクリア処理を `clearAllAuthoritySettings()` に切り出し
+    （全チェックボックスOFF＋「選択」3項目〈doc_visible_groups / contract_visible_departments /
+    contract_visible_groups〉の hidden・display 値クリア＋トグルボタン文言を「一括許可」へ戻す）。
+    `toggleAllCheckboxesForAuth()` の「一括無許可」分岐はこれを呼ぶだけに簡約。
+  - `initRoleChangeReset()`（IIFE）：`#id_role` の読み込み時の値を `originalRole` として保持し、
+    `change` で値が `originalRole` 以外になったら `clearAllAuthoritySettings()` を実行。
+- クライアント側JSのためユニットテストでは実挙動を検証できない。`permissions/tests.py`
+  `AuthorityEditViewTests.test_edit_page_wires_role_change_reset` で
+  `clearAllAuthoritySettings` / `initRoleChangeReset` / change リスナ登録が描画されることを確認
+  （配線のみ）。実挙動はコードレビューで確認（`hidden.dataset.display` 参照は既存
+  `toggleAllCheckboxesForAuth` と同一パターンで実績あり）。
+- `manage.py test permissions` PASS（AuthorityEditView/Form 16件含む）。
+
+### X-4 部署統合・分割：更新前の確認メッセージ（2026-09-04）
+
+- 指示書のみ改訂（html6 に部署管理の動的制御追加なし、drawing5 画像も未変更）：
+  部署管理 B215「※更新前に、統合と分割の確認がイメージできるようなメッセージを表示すること」、
+  E217『部署A　に　部署Bの権限　が　統合されます。よろしいですか？』／
+  E219『部署Cの権限　が　部署D、部署E　に　分割されます。よろしいですか？』、
+  K126/K127（統合・分割の向きの注意書き）。AI215/AI126/AI127「Rev1.5 説明追加」。
+  ユーザー合意済み（原本HTML未実装だが指示書指示のため実装、2026-09-04）。
+- `templates/organizations/dept_edit.html`：
+  - 「更新」ボタンの onclick を `confirm('更新してよろしいですか？')` から `confirmDeptUpdate()` へ。
+    二重送信ガードの定型（先頭 `if (!this.form.reportValidity()) return false;`、末尾 `setTimeout`）は維持。
+  - `confirmDeptUpdate()`（extra_script）：`dept_action` ラジオが merge/split のとき、編集中の部署名
+    （`{{ department|escapejs }}` = `Department.__str__` ＝ 部課名）と対象部署の表示欄
+    （`#id_dept_action_target_display` のカンマ区切り名称）を埋めた文言で `confirm()`。
+    - merge：『{編集中} に {対象}の権限 が 統合されます。よろしいですか？』
+    - split：『{編集中}の権限 が {対象} に 分割されます。よろしいですか？』
+    向きは K126/K127（一覧で選択した＝編集中の部署を主語/目的語に）に一致。実処理の
+    viewer/visible 対応（organizations/services.py apply_dept_action）とも整合。
+  - 「通常(none)」のときは従来どおり『更新してよろしいですか？』。
+- テスト（`organizations/tests.py` `DeptEditViewMergeSplitTests.test_edit_page_renders_dept_update_confirm_message`）：
+  `confirmDeptUpdate` の定義・「更新」ボタンからの呼び出し・merge/split 文言・display 要素参照が
+  描画されること（クライアントJSのため配線のみ。実挙動はコードレビューで確認）。
+- `manage.py test organizations` 49件 PASS。
+
+### X-1・X-2 追補：「管理者0人」ガードをリセット経路にも適用＋退職者除外（2026-09-04 ユーザー依頼）
+
+Rev1.5 反映後の会話（2026-09-04）で、X-1/X-2 が「明示的なロール変更」2経路（権限管理編集の更新／
+CSV所属長フラグ降格）しか塞いでおらず、**同じ Rev1.5 の 職員マスタ B245-248（Rev1.4 のまま）
+＝本支所〜役職変更・退職に伴う `reset_permission_profile_if_needed`（role→STAFF）** には0人ガードが
+無いことをユーザーへ指摘（①）。加えて `admin_count` が退職者を数えていた（③）。ユーザー依頼で両方修正。
+
+- **① リセット経路のガード**：`accounts.services.reset_permission_profile_if_needed` が、role を STAFF へ
+  落とす前に `permissions.services.would_orphan_admins(profile, STAFF)` を判定し、真なら新例外
+  `accounts.services.LastAdminError`（`ValueError` サブクラス）を送出。これで下記2経路が塞がる：
+  - **職員マスタ手動編集**（`accounts.views.StaffEditView.post`）：`form.save()` ＋
+    `reset_permission_profile_if_needed()` を `transaction.atomic()` でラップし、`LastAdminError` を
+    捕捉 → ロールバック → `employee.refresh_from_db()` → `messages.error` でフォーム再表示（`IntegrityError`
+    分岐と同じ扱い）。「一切保存されない」状態にする。
+  - **CSV取込**（`_import_row` は既に行単位 `transaction.atomic()`）：`import_staff_csv` の
+    `except ValueError` がそのまま握り、当該行をロールバックして `summary.errors` へ集積（X-2 と同じ
+    行単位中止）。`_apply_manager_flag` の所属長フラグ降格ガードも `ValueError` → `LastAdminError` に統一。
+- **③ 退職者除外**：`permissions.services.admin_count` を
+  `PermissionProfile.objects.filter(role=ADMIN, employee__is_retired=False)` に変更。退職者を後から
+  権限管理編集で管理者化する経路（`AuthorityEditView` は is_retired を見ない）や Django admin 直接編集で
+  ログイン不能な管理者が「1人」と数えられ0人ガードをすり抜けるのを防ぐ。
+- Rev1.5 指示書はリセット経路自体のガードを明記していないが、X-1/X-2 と揃えないと「本支所を変えたら
+  管理者が消えた」というサイレントな孤児化が残るため実装（ユーザー合意、2026-09-04）。②（CSV「中止」の
+  粒度＝行単位か全ファイルか）と④（同時自己降格の競合）は現状の割り切りのまま（差異一覧へ記録）。
+- テスト：
+  - `permissions/tests.py`：`test_admin_count_excludes_retired`
+  - `accounts/tests.py`：`ResetPermissionProfileTests.test_reset_blocked_when_it_would_orphan_admins` /
+    `test_retired_keeper_admin_does_not_satisfy_the_guard`、
+    `StaffEditViewResetPermissionIntegrationTests.test_editing_last_admins_own_position_is_blocked` /
+    `_allowed_with_another_admin`、
+    `ImportStaffCsvServiceTests.test_department_change_blocked_when_it_would_orphan_admins`。
+  - 既存の「リセットされること」を検証するテストは、番人役の在職管理者を1名追加してガードに掛からない
+    ようにした（`ResetPermissionProfileTests.setUp` / `test_department_change_resets_permissions`）。
+- `manage.py test` 802件 PASS。

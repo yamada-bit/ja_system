@@ -521,6 +521,17 @@ class DeptEditViewMergeSplitTests(TestCase):
         PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
         self.client.login(username="1", password="pass1234")
 
+    def test_edit_page_renders_dept_update_confirm_message(self):
+        """xlsx 部署管理!B215-219(Rev1.5)「※更新前に、統合と分割の確認がイメージできるような
+        メッセージを表示すること」。統合/分割の向き付き確認文言を組み立てるJS（confirmDeptUpdate）が
+        描画され、「更新」ボタンから呼ばれること。実挙動はブラウザ依存のため配線のみ検証。"""
+        response = self.client.get(f"/organizations/{self.dept_x.pk}/edit/")
+        self.assertContains(response, "function confirmDeptUpdate()")
+        self.assertContains(response, "if (!confirmDeptUpdate()) return false;")
+        self.assertContains(response, "の権限　が　統合されます。よろしいですか？")
+        self.assertContains(response, "　に　分割されます。よろしいですか？")
+        self.assertContains(response, "id_dept_action_target_display")
+
     def test_merge_via_view_creates_scope_and_audit_log(self):
         token = self.client.get(f"/organizations/{self.dept_x.pk}/edit/").context["token"]
         response = self.client.post(

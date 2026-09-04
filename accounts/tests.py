@@ -7,7 +7,7 @@ from django.test import TestCase
 from accounts.csv_import_services import CsvImportError, import_staff_csv
 from accounts.forms import LoginForm, StaffEditForm, StaffRegistForm, StaffSearchForm
 from accounts.models import Employee, Position, Rank
-from accounts.services import filter_staff_queryset, reset_permission_profile_if_needed
+from accounts.services import LastAdminError, filter_staff_queryset, reset_permission_profile_if_needed
 from audit.models import AuditLog
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
@@ -178,6 +178,14 @@ class ResetPermissionProfileTests(TestCase):
             employee=self.employee, role=PermissionRole.ADMIN, doc_download=True,
             doc_retention_edit=True,
         )
+        # リセットで self.employee が管理者から降格しても「管理者が0人」にならないよう、
+        # 別の在職管理者を1名用意しておく（B222-223/B127-128の0人ガードは会話ログ2026-09-04
+        # の指摘①で reset 経路にも適用済み。0人ガード自体の検証は test_reset_blocked_* で行う）。
+        self.keeper_admin = Employee.objects.create_user(
+            employee_no="4445", name="番人 管理者", password="x",
+            department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.keeper_admin, role=PermissionRole.ADMIN)
 
     def test_no_reset_when_nothing_changed(self):
         reset_permission_profile_if_needed(
@@ -267,6 +275,36 @@ class ResetPermissionProfileTests(TestCase):
         self.assertFalse(PermissionProfile.objects.filter(employee=other).exists())
         # プロファイルが無くリセット自体が発生しないため、監査ログも記録されないこと。
         self.assertFalse(AuditLog.objects.filter(action="権限管理　自動リセット").exists())
+
+    def test_reset_blocked_when_it_would_orphan_admins(self):
+        """xlsx 権限管理!B222-223 / 職員マスタ!B127-128（会話ログ2026-09-04の指摘①）：
+        システム唯一の在職管理者を、本支所〜役職変更・退職に伴うリセットでSTAFFへ落とす場合は
+        LastAdminError を送出し、権限を一切変更しない。"""
+        self.keeper_admin.delete()  # self.employee が唯一の管理者になる
+        with self.assertRaises(LastAdminError):
+            reset_permission_profile_if_needed(
+                self.employee,
+                department_changed=True, rank_changed=False, position_changed=False,
+                retired_changed=False, actor=self.employee,
+            )
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.role, PermissionRole.ADMIN)
+        self.assertTrue(self.profile.doc_download)
+        self.assertFalse(AuditLog.objects.filter(action="権限管理　自動リセット").exists())
+
+    def test_retired_keeper_admin_does_not_satisfy_the_guard(self):
+        """admin_count は退職者を除外する（指摘③）。番人役の管理者が退職済みなら、
+        もう一方の管理者のリセットは「0人になる」として弾かれる。"""
+        self.keeper_admin.is_retired = True
+        self.keeper_admin.save(update_fields=["is_retired"])
+        with self.assertRaises(LastAdminError):
+            reset_permission_profile_if_needed(
+                self.employee,
+                department_changed=False, rank_changed=False, position_changed=True,
+                retired_changed=False, actor=self.employee,
+            )
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.role, PermissionRole.ADMIN)
 
 
 class FilterStaffQuerysetTests(TestCase):
@@ -376,8 +414,9 @@ class LoginLogoutAuditLogTests(TestCase):
 
 
 class StaffCsvExportViewTests(TestCase):
-    """xlsx 職員マスタ!B88-91「一覧表に表示されている内容(絞込み結果)をCSV形式で出力する。
-    パスワードはセキュリティ上、空欄で出力すること」。
+    """xlsx 職員マスタ!B88-91「一覧表に表示されている内容(絞込み結果)をCSV形式で出力する」。
+    Rev1.5でパスワード列自体が一覧画面から撤去された（原本html6、旧B91「パスワードは
+    セキュリティ上、空欄で出力すること」も削除）ため、CSV出力の列もパスワード無しに揃える。
     """
 
     def setUp(self):
@@ -391,13 +430,14 @@ class StaffCsvExportViewTests(TestCase):
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
         self.client.login(username="1111", password="pass1234")
 
-    def test_export_contains_header_and_row_with_blank_password(self):
+    def test_export_contains_header_and_row_without_password_column(self):
         response = self.client.get("/accounts/staff/csv/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8-sig")
         content = response.content.decode("utf-8-sig")
-        self.assertIn("職員番号,氏名,パスワード", content)
-        self.assertIn("1111,農協 太郎,,000,本店,01,総務部", content)
+        self.assertIn("職員番号,氏名,本支所コード", content)
+        self.assertNotIn("パスワード", content)
+        self.assertIn("1111,農協 太郎,000,本店,01,総務部", content)
 
     def test_export_respects_search_filter(self):
         Employee.objects.create_user(
@@ -475,6 +515,14 @@ class StaffSettingsMenuAccessControlTests(TestCase):
         response = self.client.get("/accounts/staff/")
         self.assertEqual(response.status_code, 200)
 
+    def test_staff_list_has_no_password_column(self):
+        """Rev1.5（原本html6）で職員マスタ一覧からパスワード列（<th>パスワード</th>と
+        各行の********セル）が撤去された。"""
+        self._login_as(PermissionRole.ADMIN)
+        response = self.client.get("/accounts/staff/")
+        self.assertNotContains(response, "<th>パスワード</th>", html=True)
+        self.assertNotContains(response, "<td>********</td>", html=True)
+
     def test_manager_cannot_access_staff_csv_export(self):
         self._login_as(PermissionRole.MANAGER)
         response = self.client.get("/accounts/staff/csv/")
@@ -523,9 +571,11 @@ class StaffDetailViewTests(TestCase):
         self.assertContains(response, "対象太郎")
 
     def test_password_is_masked_not_shown_in_plaintext(self):
-        """原本は平文表示だが、ハッシュ化必須の規約上マスク表示にする（CLAUDE.md参照）。"""
+        """ハッシュ化必須の規約上マスク表示にする（CLAUDE.md参照）。マスク文字は
+        Rev1.5/html6でマスク化された原本に合わせ ●●●●●●。"""
         response = self.client.get(f"/accounts/staff/{self.target.pk}/")
         self.assertNotContains(response, "secret-pass")
+        self.assertContains(response, "●●●●●●")
 
     def test_nonexistent_pk_returns_404(self):
         response = self.client.get("/accounts/staff/999999/")
@@ -746,6 +796,57 @@ class StaffEditViewResetPermissionIntegrationTests(TestCase):
         self.assertEqual(profile.role, PermissionRole.ADMIN)
         self.assertTrue(profile.doc_download)
 
+    def test_editing_last_admins_own_position_is_blocked(self):
+        """会話ログ2026-09-04の指摘①：職員マスタ手動編集でも、システム唯一の在職管理者の
+        本支所〜役職変更・退職はリセット経由で管理者を0人にしてしまう。
+        LastAdminError をビューが捕捉し、トランザクションごと巻き戻して更新を中止する。"""
+        # self.operator が唯一の管理者。自分の役職を変更しようとする。
+        profile = PermissionProfile.objects.get(employee=self.operator)
+        token = self.client.get(f"/accounts/staff/{self.operator.pk}/edit/").context["token"]
+        response = self.client.post(
+            f"/accounts/staff/{self.operator.pk}/edit/",
+            {
+                "token": token,
+                "name": "操作太郎",
+                "department": self.dept1.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KAKARICHO,  # 課長 -> 係長
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("システム唯一の「管理者」" in m for m in messages))
+        self.operator.refresh_from_db()
+        profile.refresh_from_db()
+        # 役職も権限も変わっていない（トランザクションごとロールバック）。
+        self.assertEqual(self.operator.position, Position.KACHO)
+        self.assertEqual(profile.role, PermissionRole.ADMIN)
+        self.assertFalse(AuditLog.objects.filter(action="権限管理　自動リセット").exists())
+
+    def test_editing_last_admins_own_position_allowed_with_another_admin(self):
+        """他に在職管理者が居れば、同じ操作は通り、権限はリセットされる。"""
+        other_admin = Employee.objects.create_user(
+            employee_no="2", name="副管理者", password="x",
+            department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=other_admin, role=PermissionRole.ADMIN)
+        profile = PermissionProfile.objects.get(employee=self.operator)
+        token = self.client.get(f"/accounts/staff/{self.operator.pk}/edit/").context["token"]
+        self.client.post(
+            f"/accounts/staff/{self.operator.pk}/edit/",
+            {
+                "token": token,
+                "name": "操作太郎",
+                "department": self.dept1.pk,
+                "rank": Rank.KOSAYAKU,
+                "position": Position.KAKARICHO,
+            },
+        )
+        self.operator.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(self.operator.position, Position.KAKARICHO)
+        self.assertEqual(profile.role, PermissionRole.STAFF)
+
     def test_edit_post_with_invalid_token_does_not_save_or_reset(self):
         """二重送信対策トークン不正時（core.double_submit.consume_tokenがFalseを返すケース）の
         分岐が未テストだった（コード監査で発見、2026-08-25追加）。"""
@@ -895,6 +996,14 @@ class ImportStaffCsvServiceTests(TestCase):
             department=old_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
         PermissionProfile.objects.create(employee=employee, role=PermissionRole.ADMIN, doc_download=True)
+        # 降格しても管理者が0人にならないよう別の在職管理者を1名用意（0人ガードは
+        # 会話ログ2026-09-04の指摘①でリセット経路にも適用。ガード自体は
+        # test_department_change_blocked_when_it_would_orphan_admins で検証）。
+        keeper = Employee.objects.create_user(
+            employee_no="0001", name="番人 管理者", password="x",
+            department=self.actor_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=keeper, role=PermissionRole.ADMIN)
 
         upload = _csv_upload(["0832,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,0"])
         summary = import_staff_csv(upload, actor=self.actor)
@@ -904,6 +1013,31 @@ class ImportStaffCsvServiceTests(TestCase):
         self.assertEqual(employee.department.section_code, "09")
         self.assertEqual(employee.permission_profile.role, PermissionRole.STAFF)
         self.assertFalse(employee.permission_profile.doc_download)
+
+    def test_department_change_blocked_when_it_would_orphan_admins(self):
+        """会話ログ2026-09-04の指摘①：所属長フラグ経由でなくても、CSVで最後の在職管理者の
+        部課/役職が変わると reset_permission_profile_if_needed が管理者を0人にしてしまう。
+        LastAdminError（ValueError サブクラス）で当該行をロールバックし summary.errors へ集積する。"""
+        old_department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        employee = Employee.objects.create_user(
+            employee_no="0832", name="農協 太郎", password="x",
+            department=old_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=employee, role=PermissionRole.ADMIN, doc_download=True)
+
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,0"])
+        summary = import_staff_csv(upload, actor=self.actor)
+
+        self.assertEqual(summary.updated, 0)
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("管理者", summary.errors[0])
+        employee.refresh_from_db()
+        # 行全体がロールバックされるので部課変更も権限リセットも反映されない。
+        self.assertEqual(employee.department.section_code, "01")
+        self.assertEqual(employee.permission_profile.role, PermissionRole.ADMIN)
+        self.assertTrue(employee.permission_profile.doc_download)
 
     def test_section_code_99_marks_employee_retired(self):
         """xlsx B114-115「部課コードが"99"の場合...退職扱いとし退職フラグをセットする」。"""
@@ -951,19 +1085,50 @@ class ImportStaffCsvServiceTests(TestCase):
         employee.refresh_from_db()
         self.assertEqual(employee.permission_profile.role, PermissionRole.MANAGER)
 
-    def test_manager_flag_does_not_downgrade_admin(self):
-        department = Department.objects.create(
-            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
-        )
-        employee = Employee.objects.create_user(
+    def test_manager_flag_demotes_admin_when_another_admin_exists(self):
+        """Rev1.5 職員マスタ!B127-128：所属長フラグによる管理者→所属長の降格を許容する
+        （他に管理者が居る場合）。以前はCSV取込では管理者を降格させない安全弁を入れていたが、
+        Rev1.5が降格前提の0人チェックを要求したため方針転換（ユーザー確認 2026-09-04）。"""
+        target = Employee.objects.create_user(
             employee_no="0832", name="農協 太郎", password="x",
-            department=department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+            department=self.actor_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
-        PermissionProfile.objects.create(employee=employee, role=PermissionRole.ADMIN)
-        upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役,1"])
-        import_staff_csv(upload, actor=self.actor)
-        employee.refresh_from_db()
-        self.assertEqual(employee.permission_profile.role, PermissionRole.ADMIN)
+        PermissionProfile.objects.create(employee=target, role=PermissionRole.ADMIN)
+        # 他にもう1人管理者が居るので降格しても0人にはならない。
+        keeper = Employee.objects.create_user(
+            employee_no="0001", name="残る管理者", password="x",
+            department=self.actor_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=keeper, role=PermissionRole.ADMIN)
+
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,1"])
+        summary = import_staff_csv(upload, actor=self.actor)
+
+        self.assertEqual(summary.errors, [])
+        target.refresh_from_db()
+        self.assertEqual(target.permission_profile.role, PermissionRole.MANAGER)
+        self.assertTrue(
+            AuditLog.objects.filter(action="職員マスタ　CSV取込 所属長降格").exists()
+        )
+
+    def test_manager_flag_demotion_blocked_when_last_admin(self):
+        """Rev1.5 職員マスタ!B128：所属長フラグによる降格で管理者が0人になる場合は、
+        メッセージを表示してその行の取込を中止する（行単位トランザクションをロールバック）。"""
+        target = Employee.objects.create_user(
+            employee_no="0832", name="農協 太郎", password="x",
+            department=self.actor_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=target, role=PermissionRole.ADMIN)
+
+        upload = _csv_upload(["0832,農協 花子,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,1"])
+        summary = import_staff_csv(upload, actor=self.actor)
+
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("管理者が0人になる", summary.errors[0])
+        target.refresh_from_db()
+        # 行全体がロールバックされるので氏名変更も権限降格も反映されない。
+        self.assertEqual(target.name, "農協 太郎")
+        self.assertEqual(target.permission_profile.role, PermissionRole.ADMIN)
 
     def test_row_error_does_not_stop_other_rows(self):
         upload = _csv_upload(

@@ -44,7 +44,11 @@
         <br>
         <table class="vertical-master-table-authority-info">
           <tr>
-            <th>システム権限</th><td>{{ form.role }}</td>
+            <th>システム権限</th>
+            <td>
+              {{ form.role }}
+              {% for error in form.role.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
+            </td>
           </tr>
         </table>
         <div>
@@ -106,28 +110,48 @@
 
 {% block extra_script %}
 <script>
-  // 原本index.html toggleAllCheckboxesForAuth()の移植。Rev1.1 権限管理!B119-123
-  // 「一括無許可にした際は、選択ボタンで設定する下記項目（文書管理-分類-表示／
-  // 契約書-部門間閲覧設定／契約書-分類-表示）もクリアする」に対応。
+  // 「一括無許可」相当のクリア処理（全チェックボックスOFF＋「選択」ボタンで設定する3項目クリア）。
+  // Rev1.1 権限管理!B119-123「一括無許可にした際は、選択ボタンで設定する下記項目（文書管理-分類-表示／
+  // 契約書-部門間閲覧設定／契約書-分類-表示）もクリアする」に対応。toggleAllCheckboxesForAuth()の
+  // 「一括無許可」分岐と、システム権限プルダウン変更時（下記、Rev1.5 権限管理!B114）で共有する。
+  function clearAllAuthoritySettings() {
+    const container = document.getElementById('master-detail-box-for-authority-edit');
+    container.querySelectorAll('input[type="checkbox"]').forEach((cb) => (cb.checked = false));
+    ['id_doc_visible_groups', 'id_contract_visible_departments', 'id_contract_visible_groups'].forEach((id) => {
+      const hidden = document.getElementById(id);
+      const display = hidden && document.getElementById(hidden.dataset.display);
+      if (hidden) hidden.value = '';
+      if (display) display.value = '';
+    });
+    const btn = document.getElementById('btn-toggle-all-authority');
+    if (btn) btn.textContent = '一括許可';
+  }
+
+  // 原本index.html toggleAllCheckboxesForAuth()の移植。
   function toggleAllCheckboxesForAuth() {
     const btn = document.getElementById('btn-toggle-all-authority');
     const container = document.getElementById('master-detail-box-for-authority-edit');
-    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
-    const clearableIds = ['id_doc_visible_groups', 'id_contract_visible_departments', 'id_contract_visible_groups'];
 
     if (btn.textContent === '一括許可') {
-      checkboxes.forEach((cb) => (cb.checked = true));
+      container.querySelectorAll('input[type="checkbox"]').forEach((cb) => (cb.checked = true));
       btn.textContent = '一括無許可';
     } else {
-      checkboxes.forEach((cb) => (cb.checked = false));
-      clearableIds.forEach((id) => {
-        const hidden = document.getElementById(id);
-        const display = hidden && document.getElementById(hidden.dataset.display);
-        if (hidden) hidden.value = '';
-        if (display) display.value = '';
-      });
-      btn.textContent = '一括許可';
+      clearAllAuthoritySettings();
     }
   }
+
+  // Rev1.5 権限管理!B114「[重要]現在の設定以外の権限を選択したタイミングで全ての項目をリセットする。
+  // (後述の「一括無許可」処理と同じ)」。システム権限プルダウンを読み込み時の値以外に変更したら、
+  // 詳細フラグ・選択項目の整合が崩れるため一括無許可と同じクリアを走らせる。
+  (function initRoleChangeReset() {
+    const roleSelect = document.getElementById('id_role');
+    if (!roleSelect) return;
+    const originalRole = roleSelect.value;
+    roleSelect.addEventListener('change', function () {
+      if (roleSelect.value !== originalRole) {
+        clearAllAuthoritySettings();
+      }
+    });
+  })();
 </script>
 {% endblock %}

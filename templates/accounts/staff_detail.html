@@ -25,10 +25,10 @@
         <tr><th>職員番号</th><td>{{ employee.employee_no }}</td></tr>
         <tr><th>氏名</th><td>{{ employee.name }}</td></tr>
         {% comment %}
-          原本は平文パスワードを表示するが、パスワードハッシュ化必須の規約上実際の値は表示不能なため
-          一覧と同じマスク表示にする（ログイン画面のダミー資格情報プリフィルと同種の必然的な逸脱）。
+          原本はパスワードをマスク表示（Rev1.5/html6で平文 ntarou1975 → ●●●●●● に変更）する。
+          ハッシュ化必須の規約上どのみち実際の値は表示不能なので、原本のマスク文字に合わせる。
         {% endcomment %}
-        <tr><th>パスワード</th><td>********</td></tr>
+        <tr><th>パスワード</th><td>●●●●●●</td></tr>
         <tr><th>本支所</th><td><span class="ctg-code-area">{{ employee.department.branch_code }}</span><span class="ctg-name-area">{{ employee.department.branch_name }}</span></td></tr>
         <tr><th>部課</th><td><span class="ctg-code-area">{{ employee.department.section_code }}</span><span class="ctg-name-area">{{ employee.department.section_name }}</span></td></tr>
         <tr><th>職階</th><td><span class="ctg-code-area">{{ employee.rank }}</span><span class="ctg-name-area">{{ employee.get_rank_display }}</span></td></tr>

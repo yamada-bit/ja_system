@@ -41,10 +41,10 @@
         <input type="hidden" name="token" value="{{ token }}">
         <table class="vertical-master-table">
           {% comment %}
-            原本は現在のパスワードを平文表示(ja1111等)するが、ハッシュ化必須の規約上実際の値は
-            表示不能なため一覧・詳細画面と同じマスク表示にする（ログイン画面と同種の必然的な逸脱）。
+            「現在のパスワード」行はRev1.5(原本html6)で削除された。以前はここに原本のダミー値
+            ja1111 の代わりのマスク表示を置いていた。なお「変更後パスワードが現在のものと同一なら
+            エラー」の検証（xlsx その他設定!B150、Rev1.5でも健在）は OtherPassForm 側で維持している。
           {% endcomment %}
-          <tr><th>現在のパスワード</th><td>********</td></tr>
           <tr>
             <th>変更後パスワード</th>
             <td>

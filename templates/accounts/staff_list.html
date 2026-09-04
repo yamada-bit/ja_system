@@ -75,7 +75,6 @@
             <tr>
               <th><a class="sort-link" href="{% sort_url request.GET 'employee_no' sort_key sort_dir %}">職員番号{% sort_arrow 'employee_no' sort_key sort_dir %}</a></th>
               <th><a class="sort-link" href="{% sort_url request.GET 'name' sort_key sort_dir %}">氏名{% sort_arrow 'name' sort_key sort_dir %}</a></th>
-              <th>パスワード</th>
               <th><a class="sort-link" href="{% sort_url request.GET 'branch_code' sort_key sort_dir %}">本支所コード{% sort_arrow 'branch_code' sort_key sort_dir %}</a></th>
               <th>本支所名</th>
               <th><a class="sort-link" href="{% sort_url request.GET 'section_code' sort_key sort_dir %}">部課コード{% sort_arrow 'section_code' sort_key sort_dir %}</a></th>
@@ -93,7 +92,6 @@
               <tr{% if employee.is_retired %} style="color:#F00;"{% endif %}>
                 <td>{{ employee.employee_no }}</td>
                 <td style="text-align:left;">{{ employee.name }}</td>
-                <td>********</td>
                 <td>{{ employee.department.branch_code }}</td>
                 <td style="text-align:left;">{{ employee.department.branch_name }}</td>
                 <td>{{ employee.department.section_code }}</td>

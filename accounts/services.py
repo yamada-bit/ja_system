@@ -4,8 +4,21 @@ from audit import services as audit_services
 from accounts.models import Employee, Position, Rank
 from core.text_normalization import filter_by_full_name
 from permissions.models import FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
+from permissions.services import would_orphan_admins
 
 logger = logging.getLogger(__name__)
+
+
+class LastAdminError(ValueError):
+    """権限リセットの結果、システムの"管理者"が0人になるため処理を中止した場合に送出する
+    （xlsx 権限管理!B222-223 / 職員マスタ!B127-128）。
+
+    ValueError を継承するのは、accounts.csv_import_services.import_staff_csv が行データ起因の
+    エラーを `except ValueError` で行単位に握って summary.errors へ集積する既存フローに
+    そのまま乗せるため（中止は行単位＝1行のミスで取込全体を止めない本モジュールの方針）。
+    職員マスタ手動編集（accounts.views.StaffEditView）側は transaction.atomic() でラップして
+    この例外を捕捉し、保存前の状態に巻き戻したうえでフォームエラーとして再表示する。
+    """
 
 # screen-staff-listのソート対象列（xlsx 職員マスタ!B56-62）。CSV出力（B88-91「一覧表に表示
 # されている内容(絞込み結果)をCSV形式で出力する」）でも同じ絞込み・並び順を再利用するため
@@ -81,6 +94,17 @@ def reset_permission_profile_if_needed(
         profile = employee.permission_profile
     except PermissionProfile.DoesNotExist:
         return
+
+    # xlsx 権限管理!B222-223 / 職員マスタ!B127-128：システム唯一の"管理者"を、本支所〜役職の
+    # 変更や退職に伴うリセットでSTAFFへ落とすと管理者が0人になる。Rev1.5はこのリセット経路
+    # 自体の0人ガードを明記していないが、明示的なロール変更（権限管理編集の更新・CSV所属長
+    # フラグ降格）だけ塞いでリセット経由を野放しにするとサイレントな孤児化が残る
+    # （会話ログ 2026-09-04 の指摘①）。role変更前に判定し、孤児化するなら中止する。
+    if would_orphan_admins(profile, PermissionRole.STAFF):
+        raise LastAdminError(
+            "この職員はシステム唯一の「管理者」です。本支所・部課・職階・役職の変更、または"
+            "退職の設定を行うと管理者が不在になります。先に他の職員を「管理者」に設定してください。"
+        )
 
     for field in FLAG_FIELDS:
         setattr(profile, field, False)

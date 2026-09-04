@@ -30,6 +30,41 @@ def is_admin(employee):
     return get_role(employee) == PermissionRole.ADMIN
 
 
+def admin_count(*, exclude_profile_pk=None):
+    """システム権限が"管理者"かつ在職中（is_retired=False）の職員の人数。
+
+    xlsx 権限管理!B222-223 / 職員マスタ!B127-128「システム全体で管理者が0人にならないように
+    チェックを掛ける」の判定用。退職者は職員マスタ編集・CSV取込のどちらの経路でも
+    accounts.services.reset_permission_profile_if_needed で権限がSTAFFへリセットされるのが
+    通常だが、Django admin での直接編集や、退職者を後から権限管理編集で管理者へ設定する経路
+    （AuthorityEditView は is_retired を見ない）でも role=ADMIN が残りうる。ログイン不能な
+    退職者を「有効な管理者」に数えると 0人ガードをすり抜けるため、明示的に is_retired=False で
+    絞る（会話ログ 2026-09-04 の指摘③）。
+    """
+    qs = PermissionProfile.objects.filter(
+        role=PermissionRole.ADMIN, employee__is_retired=False
+    )
+    if exclude_profile_pk is not None:
+        qs = qs.exclude(pk=exclude_profile_pk)
+    return qs.count()
+
+
+def would_orphan_admins(profile, new_role):
+    """`profile`のシステム権限を`new_role`へ変更すると、システム全体の"管理者"が0人になるか。
+
+    現在ADMINでない、または変更後もADMINのままなら影響しない。現在ADMINでADMIN以外へ
+    下げる更新のときだけ、他に在職中のADMINが1人も居なければTrue。権限管理編集の更新（X-1）、
+    職員CSV取込の所属長フラグ降格（X-2）、および本支所〜役職変更・退職に伴う権限リセット
+    （accounts.services.reset_permission_profile_if_needed。手動編集・CSV取込の両経路。
+    Rev1.5 はこのリセット経路自体の0人ガードを明記していないが、明示的なロール変更だけ塞いで
+    リセット経由を野放しにすると「本支所を変えたら管理者が消えた」というサイレントな事故が
+    残るため揃える。会話ログ 2026-09-04 の指摘①）で共有する。
+    """
+    if profile.role != PermissionRole.ADMIN or new_role == PermissionRole.ADMIN:
+        return False
+    return admin_count(exclude_profile_pk=profile.pk) == 0
+
+
 def can_select_department(employee, *, kind="document"):
     """保管・検索画面で自部署以外の部署を選択できるか（部署名「選択」ボタンの表示可否）。
 

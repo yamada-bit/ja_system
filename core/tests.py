@@ -763,6 +763,13 @@ class OtherSettingsRoutingTests(TestCase):
         response = self.client.get("/settings/other/")
         self.assertContains(response, "変更後パスワード")
 
+    def test_password_change_has_no_current_password_row(self):
+        """Rev1.5(原本html6)で「現在のパスワード」行がパスワード変更画面から削除された。
+        「変更後パスワードが現在のものと同一ならエラー」の検証は残る（下記
+        test_password_change_rejects_same_as_current）。"""
+        response = self.client.get("/settings/other/")
+        self.assertNotContains(response, "現在のパスワード")
+
     def test_staff_cannot_access_main_edit(self):
         department2 = Department.objects.create(
             branch_code="999", branch_name="別支店", section_code="", section_name=""
