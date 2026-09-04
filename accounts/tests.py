@@ -1129,6 +1129,12 @@ class ImportStaffCsvServiceTests(TestCase):
         # 行全体がロールバックされるので氏名変更も権限降格も反映されない。
         self.assertEqual(target.name, "農協 太郎")
         self.assertEqual(target.permission_profile.role, PermissionRole.ADMIN)
+        # 中止された行はsummaryのカウンタにも計上しない（氏名・部課の差分がある行だが
+        # _apply_manager_flagのLastAdminErrorでロールバックされるため updated=0）。
+        self.assertEqual(summary.updated, 0)
+        self.assertEqual(summary.unchanged, 0)
+        self.assertEqual(summary.retired, 0)
+        self.assertEqual(summary.created, 0)
 
     def test_row_error_does_not_stop_other_rows(self):
         upload = _csv_upload(

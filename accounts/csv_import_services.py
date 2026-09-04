@@ -174,8 +174,11 @@ def _import_employee(*, employee_no, name, department, section_code, position_co
             is_retired=(section_code == RETIRED_SECTION_CODE),
         )
         PermissionProfile.objects.create(employee=employee, role=PermissionRole.STAFF)
-        summary.created += 1
+        # 新規職員は必ずSTAFFで作成するため_apply_manager_flagがB128の0人ガード
+        # （LastAdminError）に達することは無いが、既存職員ブランチと同じく
+        # 「summaryのカウンタ加算はフラグ反映が最後まで通ってから」に揃える。
         _apply_manager_flag(employee, manager_flag, actor)
+        summary.created += 1
         return
 
     changed_fields = []
@@ -212,14 +215,22 @@ def _import_employee(*, employee_no, name, department, section_code, position_co
             employee, department_changed=department_changed, rank_changed=rank_changed,
             position_changed=position_changed, retired_changed=is_retiring_now, actor=actor,
         )
+
+    # 所属長フラグの反映はB108-109の権限リセット後に行う必要がある（リセットで一旦STAFFへ
+    # 落ちた後にMANAGERへ昇格させる順序。_apply_manager_flag docstring参照）。
+    # かつ、summaryのカウンタ加算より前に呼ぶ：_apply_manager_flagがB128（管理者0人ガード）で
+    # LastAdminErrorを送出するとその行のトランザクションはロールバックされるが、先に
+    # summary.updated/unchanged/retiredを加算していると「更新N件」等が実際の反映件数より
+    # 多く表示される不整合が残る。カウンタは行の処理が最後まで通ってから増やす。
+    _apply_manager_flag(employee, manager_flag, actor)
+
+    if changed_fields:
         if is_retiring_now:
             summary.retired += 1
         else:
             summary.updated += 1
     else:
         summary.unchanged += 1
-
-    _apply_manager_flag(employee, manager_flag, actor)
 
 
 def _apply_manager_flag(employee, manager_flag, actor):
