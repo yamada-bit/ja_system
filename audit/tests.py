@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
+from audit.services import build_diff_message
 from audit.services import log as audit_log
 from audit.services import log_raw as audit_log_raw
 from organizations.models import Department
@@ -76,6 +77,48 @@ class AuditLogServiceTests(TestCase):
             except Exception:
                 self.fail("log_raw()は例外を伝播させてはならない")
         self.assertEqual(AuditLog.objects.count(), 0)
+
+
+class BuildDiffMessageRedactionTests(TestCase):
+    """xlsx 操作履歴ログ!B69-70 の「更新した項目名：更新前データ -> 更新後データ」ルールを
+    パスワード等の機微項目へ適用すると認証情報が平文でログに残る（簡易設計指示書レビュー指摘
+    2-1）。build_diff_message が最終防衛としてマスクすることを確認する。
+    """
+
+    def test_non_sensitive_change_is_kept_verbatim(self):
+        message = build_diff_message("職員：太郎(1)", [("氏名", "旧名", "新名")])
+        self.assertEqual(message, "職員：太郎(1),氏名：旧名 -> 新名")
+
+    def test_password_label_value_is_masked_even_if_caller_passes_raw_value(self):
+        message = build_diff_message(
+            "職員：太郎(1)", [("パスワード", "oldsecret", "newsecret")]
+        )
+        self.assertNotIn("oldsecret", message)
+        self.assertNotIn("newsecret", message)
+        self.assertEqual(message, "職員：太郎(1),パスワード：(変更あり) -> (変更あり)")
+
+    def test_existing_marker_value_is_unchanged(self):
+        """既存の呼び出し（build_staff_edit_diff_message）が渡すマーカー値では文言が変わらない。"""
+        message = build_diff_message(
+            "職員：太郎(1)", [("パスワード", "(変更あり)", "(変更あり)")]
+        )
+        self.assertEqual(message, "職員：太郎(1),パスワード：(変更あり) -> (変更あり)")
+
+    def test_label_match_is_case_insensitive_and_partial(self):
+        for label in ("Password", "新パスワード", "PWD(確認)"):
+            with self.subTest(label=label):
+                message = build_diff_message("対象", [(label, "before", "after")])
+                self.assertNotIn("before", message)
+                self.assertIn("(変更あり) -> (変更あり)", message)
+
+    def test_sensitive_and_normal_changes_mixed(self):
+        message = build_diff_message(
+            "職員：太郎(1)",
+            [("氏名", "旧名", "新名"), ("パスワード", "raw", "raw2")],
+        )
+        self.assertEqual(
+            message, "職員：太郎(1),氏名：旧名 -> 新名,パスワード：(変更あり) -> (変更あり)"
+        )
 
 
 class AuditLogSettingsMenuAccessControlTests(TestCase):

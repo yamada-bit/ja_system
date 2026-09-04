@@ -76,6 +76,33 @@ def log(*, employee, action, event_message, personal_info_flag=False):
     )
 
 
+# 操作履歴ログに平文で残してはならない項目ラベルのキーワード（str.lowerして部分一致で判定）。
+# xlsx 操作履歴ログ!B69-70 の汎用ルール「更新した項目名：更新前データ -> 更新後データ」を
+# パスワードのような機微項目にそのまま適用すると、監査ログテーブル・CSV出力に認証情報が
+# 平文で蓄積される（簡易設計指示書レビュー指摘 2-1）。呼び出し側（accounts.services.
+# build_staff_edit_diff_message 等）は既に実値を渡さない運用だが、それは各呼び出し箇所が
+# 個別に覚えている運用に過ぎず、新しい更新系ビューを追加する開発者が生の差分をそのまま
+# 渡すと簡単に破れる。build_diff_message 側でも最終防衛としてマスクする。
+SENSITIVE_DIFF_LABEL_KEYWORDS = ("パスワード", "password", "passwd", "pwd")
+
+# マスク時に更新前/更新後の両方へ入れる固定文言。既存の呼び出し
+# （build_staff_edit_diff_message が渡している ("パスワード", "(変更あり)", "(変更あり)")）と
+# 同じ値にして、正常系のメッセージ文言を変えない。
+REDACTED_DIFF_VALUE = "(変更あり)"
+
+
+def _redact_sensitive_change(label, before, after):
+    """機微項目（パスワード等）の変更前後の値をマスクして返す。
+
+    値の内容に関わらず「変更あり」だけを残す。ラベル判定は大文字小文字を無視した部分一致
+    （「パスワード」「新パスワード」「Password(確認)」等をまとめて拾う）。
+    """
+    lowered = str(label).lower()
+    if any(keyword in lowered for keyword in SENSITIVE_DIFF_LABEL_KEYWORDS):
+        return REDACTED_DIFF_VALUE, REDACTED_DIFF_VALUE
+    return before, after
+
+
 def build_diff_message(subject_label, changes):
     """更新イベントの「更新した項目名：更新前データ -> 更新後データ」形式メッセージを組み立てる
     （xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞「職員：職員名(職員番号),更新した項目名：
@@ -84,8 +111,14 @@ def build_diff_message(subject_label, changes):
     `changes`は実際に変更されたフィールドのみを`(項目名, 更新前, 更新後)`のタプルで渡すこと
     （変更の無いフィールドを列挙しない判断は呼び出し側の責務）。accounts.services.
     build_staff_edit_diff_message・masters.views.py各Edit系の`audit_event_message()`から使う。
+
+    パスワード等の機微項目（SENSITIVE_DIFF_LABEL_KEYWORDS）は、呼び出し側が誤って実値を
+    渡してきても`_redact_sensitive_change`で「(変更あり)」にマスクしてから連結する。
     """
-    diff_parts = [f"{label}：{before} -> {after}" for label, before, after in changes]
+    diff_parts = []
+    for label, before, after in changes:
+        before, after = _redact_sensitive_change(label, before, after)
+        diff_parts.append(f"{label}：{before} -> {after}")
     if not diff_parts:
         return subject_label
     return subject_label + "," + ",".join(diff_parts)

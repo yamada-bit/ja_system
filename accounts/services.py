@@ -137,7 +137,8 @@ def build_staff_edit_diff_message(
     `before_*`は呼び出し側（accounts.views.StaffEditView.post）がform.save()実行前に
     保存しておいた変更前の値。`password_changed`は新しいパスワードが入力されたかどうかの
     真偽値のみを渡すこと（パスワード自体の値はCLAUDE.mdのマスキング方針によりログに残さない、
-    core.views.OtherSettingsView.postの「パスワード　更新」と同じ判断）。
+    core.views.OtherSettingsView.postの「パスワード　更新」と同じ判断。仮にここで実値を渡しても
+    audit_services.build_diff_message が最終防衛としてマスクする）。
     """
     subject = f"職員：{employee.name}({employee.employee_no})"
     changes = []
