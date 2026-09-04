@@ -164,6 +164,17 @@ button:disabled {
   border: 1px solid var(--border-color);
   border-radius: 4px;
 }
+/* Edge / IE のネイティブ「パスワード表示」ボタン（::-ms-reveal）・クリアボタン（::-ms-clear）を
+   抑制し、パスワード入力欄の表示切替は独自の 👁️ トグル（.password-toggle / .password-toggle2、
+   ログイン画面・職員マスタ編集・その他設定パスワード変更）に一本化する。抑制しないと Edge では
+   独自トグルとネイティブの目玉アイコンが二重に出る。Chrome / Firefox には汎用のネイティブ reveal
+   機能自体が無いため、独自トグルが cross-browser で唯一の表示切替手段になる。原本 style.css には
+   無い ja_pj 独自の追加。（職員マスタ編集の 👁️ は Rev1.5/原本html6 で削除されたが入力確認 UX を
+   優先して保持し、その他設定の変更後パスワード欄にも同トグルを追加した。差異一覧xlsx シート4 参照） */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  display: none;
+}
 .password-wrapper {
   position: relative;
 }

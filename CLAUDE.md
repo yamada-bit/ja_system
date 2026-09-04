@@ -200,7 +200,11 @@ DBレコード・ファイル実体ごと完全削除する」手動機能が202
   PDF.js化〈`static/vendor/pdfjs`、`settings.PDF_JS_PREVIEW_ENABLED`で旧`<iframe>`へ戻せる、
   2026-08-31ユーザー依頼〉など。詳細はアーカイブ内の各節を参照）。
 - ユーザー指示で意図的に見送った原本との差異（確認ダイアログの有無、文言の細かな違い等）は、
-  実装せず理由付きで`HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録する。
+  実装せず理由付きで`HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録する（例：Rev1.5/html6で原本が削除した
+  職員マスタ編集の目玉アイコン👁️は、Chrome/Firefoxにネイティブreveal機能が無く入力確認UXを優先して
+  ja_pjでは保持。あわせて`::-ms-reveal`抑制CSSを追加し、その他設定の変更後パスワード欄にも同トグルを
+  追加してパスワード入力3画面〈ログイン／職員マスタ編集／その他設定〉で挙動を揃えた。
+  ARCHIVE「H-3」節・差異一覧xlsxシート4参照）。
 
 ### 原本改訂を受け取った時の手順
 1. Claudeに全文再監査させる前に、まず`diff`で機械的に差分を特定する。

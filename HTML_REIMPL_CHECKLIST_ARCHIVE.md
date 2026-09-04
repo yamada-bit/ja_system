@@ -3173,12 +3173,43 @@ CLAUDE.md「原本改訂を受け取った時の手順」に従い機械diff→�
 - 差異一覧xlsx シート「1_必然的な逸脱」No.2（職員マスタ詳細・編集のパスワード平文表示）は、
   原本詳細がマスク化されたことで詳細側の逸脱がほぼ解消。→ 末尾の「差異一覧xlsx更新」でまとめて反映。
 
-### H-3 職員マスタ編集：目玉アイコン削除 — ユーザー指示でスキップ（2026-09-04）
+### H-3 職員マスタ編集：目玉アイコン — 原本は削除したが ja_pj は意図的に保持（2026-09-04、ユーザー判断）
 
 原本 html6 は職員マスタ編集画面から `<span class="password-toggle2" id="pass-toggle-icon2">👁️</span>
 とその click ハンドラJS、xlsx の説明文（職員マスタ AI233「Rev1.5 パスワード目玉アイコン説明削除」）を
-削除している。ja_pj への反映はユーザー指示により今回見送り（`templates/accounts/staff_edit.html`
-53行の span と 114-118行のJSは現状のまま）。将来反映する場合は本節を参照。
+削除している（原本の 👁️ の本来の役目は「プリフィルされた平文 ntarou1975 を見る」ことで、
+html6 は value を残したままアイコンだけ消した）。
+
+**ja_pj は 👁️ トグルを保持する**（`templates/accounts/staff_edit.html` 53行の span、114-118行の
+click ハンドラJS。現状のまま）。判断根拠（2026-09-04 ユーザーと確認）：
+- ja_pj の当該欄は空欄ロード（プリフィルなし）。👁️ で見えるのは管理者がいま入力した値だけで、
+  保存済みパスワードは露出しない＝原本が消した理由（プリフィル値の漏洩防止）は ja_pj に当てはまらない。
+- 他人のパスワードを設定・リセットする画面のため入力確認の価値が高い。
+- Chrome / Firefox には `type="password"` の汎用ネイティブ reveal 機能が無いため、独自トグルを消すと
+  これらのブラウザでは確認手段がゼロになる（Edge/IE のみ `::-ms-reveal` でネイティブに出る）。
+- ja_pj 内ではログイン画面（`.password-toggle`）と職員マスタ編集（`.password-toggle2`）で 👁️ を
+  持っており、削除すると職員マスタ編集だけが原本と食い違う例外になる（保持すればログインと揃う）。
+
+あわせて `static/css/style.css` に `::-ms-reveal` / `::-ms-clear` の抑制を追加：
+```css
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear { display: none; }
+```
+Edge で「独自 👁️ ＋ ネイティブ目玉」の二重表示になっていた（ログイン画面でも従来から発生）のを
+独自トグルに一本化する。原本 style.css には無い ja_pj 独自の追加。
+
+**その他設定 変更後パスワード欄にも同じトグルを追加**（2026-09-04 ユーザー依頼）。原本html6の
+その他設定は `<input type="password">` 2つのみで 👁️ は無いが、変更後パスワード／確認欄の打ち間違い
+確認のため、ログイン画面と同じ挙動の 👁️（`.password-toggle` ＋ `data-target` 属性で汎用ハンドラ）を
+`templates/core/other_pass.html` に追加した。これで ja_pj のパスワード入力3画面（ログイン／
+職員マスタ編集／その他設定）で表示切替 UX が揃う。
+
+- テスト：
+  - `accounts/tests.py` `StaffSettingsMenuAccessControlTests.test_staff_edit_keeps_password_reveal_toggle`
+    （編集画面に `id="pass-toggle-icon2"` が描画され続けること＝原本追随で誤って消さない回帰ガード）
+  - `core/tests.py` `OtherSettingsRoutingTests.test_password_change_fields_have_reveal_toggle`
+    （その他設定に `data-target="id_new_password"` / `..._confirm"` が描画されること）
+- 差異一覧xlsx シート4「見送った軽微差異」No.6 に理由付きで記録。
 
 ### H-4 その他設定：パスワード変更画面の「現在のパスワード」行を削除（2026-09-04）
 

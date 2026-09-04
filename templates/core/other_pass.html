@@ -48,14 +48,20 @@
           <tr>
             <th>変更後パスワード</th>
             <td>
-              {{ form.new_password }} (半角英数6桁以上)
+              <span class="password-wrapper" style="display:inline-block;">
+                {{ form.new_password }}
+                <span class="password-toggle" data-target="id_new_password">👁️</span>
+              </span> (半角英数6桁以上)
               {% for error in form.new_password.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
             </td>
           </tr>
           <tr>
             <th>変更後パスワード(確認)</th>
             <td>
-              {{ form.new_password_confirm }} (半角英数6桁以上)
+              <span class="password-wrapper" style="display:inline-block;">
+                {{ form.new_password_confirm }}
+                <span class="password-toggle" data-target="id_new_password_confirm">👁️</span>
+              </span> (半角英数6桁以上)
               {% for error in form.new_password_confirm.errors %}<div style="color:#c0392b;">{{ error }}</div>{% endfor %}
             </td>
           </tr>
@@ -76,5 +82,16 @@
     document.getElementById('id_new_password').value = '';
     document.getElementById('id_new_password_confirm').value = '';
   }
+
+  // パスワード表示切替トグル（ログイン画面・職員マスタ編集の 👁️ と同じ挙動）。
+  // 変更後パスワード／確認欄で「打ち間違い確認」ができるようにする。原本html6には無いが、
+  // Chrome/Firefox には type="password" の汎用ネイティブ reveal 機能が無いための独自追加
+  // （Edge のネイティブ目玉は style.css の ::-ms-reveal 抑制で非表示）。
+  document.querySelectorAll('.password-toggle[data-target]').forEach(function (icon) {
+    icon.addEventListener('click', function () {
+      const field = document.getElementById(icon.dataset.target);
+      if (field) field.type = field.type === 'password' ? 'text' : 'password';
+    });
+  });
 </script>
 {% endblock %}

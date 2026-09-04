@@ -770,6 +770,14 @@ class OtherSettingsRoutingTests(TestCase):
         response = self.client.get("/settings/other/")
         self.assertNotContains(response, "現在のパスワード")
 
+    def test_password_change_fields_have_reveal_toggle(self):
+        """変更後パスワード／確認欄に打ち間違い確認用の 👁️ トグルを付ける（ログイン画面・
+        職員マスタ編集と同じ挙動。原本html6には無いがChrome/Firefoxにネイティブreveal機能が
+        無いための独自追加。差異一覧xlsx シート4 No.6）。"""
+        response = self.client.get("/settings/other/")
+        self.assertContains(response, 'data-target="id_new_password"')
+        self.assertContains(response, 'data-target="id_new_password_confirm"')
+
     def test_staff_cannot_access_main_edit(self):
         department2 = Department.objects.create(
             branch_code="999", branch_name="別支店", section_code="", section_name=""

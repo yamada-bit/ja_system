@@ -523,6 +523,14 @@ class StaffSettingsMenuAccessControlTests(TestCase):
         self.assertNotContains(response, "<th>パスワード</th>", html=True)
         self.assertNotContains(response, "<td>********</td>", html=True)
 
+    def test_staff_edit_keeps_password_reveal_toggle(self):
+        """職員マスタ編集の 👁️ トグル（password-toggle2）は Rev1.5/原本html6 で原本からは
+        削除されたが、他人のパスワードを設定・リセットする画面での入力確認 UX を優先し、
+        ja_pj では意図的に保持する（差異一覧xlsx シート4）。原本追随で誤って消さないための回帰テスト。"""
+        self._login_as(PermissionRole.ADMIN)
+        response = self.client.get(f"/accounts/staff/{self.target.pk}/edit/")
+        self.assertContains(response, 'id="pass-toggle-icon2"')
+
     def test_manager_cannot_access_staff_csv_export(self):
         self._login_as(PermissionRole.MANAGER)
         response = self.client.get("/accounts/staff/csv/")
