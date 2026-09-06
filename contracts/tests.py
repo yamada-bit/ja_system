@@ -414,6 +414,37 @@ class SearchPreviewPaneTests(TestCase):
         self.assertNotContains(response, 'id="search-pdfjs-preview"')
         self.assertContains(response, 'id="search-preview-frame"')
 
+    def _create_contract(self, title, *, is_deleted=False):
+        from contracts.models import Contract
+
+        group, _ = Group.objects.get_or_create(
+            code="A", defaults={"name": "分類Ａ", "doc_kbn": DocKbn.CONTRACT}
+        )
+        category, _ = Category.objects.get_or_create(
+            code="001", defaults={"name": "カテゴリーＡ", "group": group, "doc_kbn": DocKbn.CONTRACT}
+        )
+        contract = Contract(
+            title=title, department=self.department, group=group, category=category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+        )
+        contract.file.save(f"{title}.pdf", ContentFile(b"%PDF-1.4 test"), save=False)
+        if is_deleted:
+            contract.is_deleted = True
+            contract.deleted_at = timezone.now()
+        contract.save()
+        return contract
+
+    def test_row_click_passes_is_deleted_flag_to_showSearchPreview(self):
+        """documents.tests.SearchPreviewPaneTests.test_row_click_passes_is_deleted_flag_to_
+        showSearchPreview と同じ（common.js showSearchPreview() の第5引数 isDeleted）。"""
+        self._create_contract("通常契約書")
+        response = self.client.get("/contracts/search/")
+        self.assertContains(response, "'contract', 'pdf', '')")
+
+        self._create_contract("削除済み契約書", is_deleted=True)
+        response = self.client.get("/contracts/search/", {"notice": "recently_deleted"})
+        self.assertContains(response, "'contract', 'pdf', '1')")
+
 
 class DeleteViewAjaxTests(TestCase):
     """documents.tests.DeleteViewAjaxTestsと同じ理由（原本フィデリティ監査で発見・修正）。"""

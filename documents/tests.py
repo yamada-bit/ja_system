@@ -958,6 +958,43 @@ class SearchPreviewPaneTests(TestCase):
         self.assertNotContains(response, 'id="search-pdfjs-preview"')
         self.assertContains(response, 'id="search-preview-frame"')
 
+    def _create_document(self, title, *, is_deleted=False):
+        from documents.models import Document
+
+        group, _ = Group.objects.get_or_create(
+            code="A", defaults={"name": "分類Ａ", "doc_kbn": DocKbn.DOCUMENT}
+        )
+        category, _ = Category.objects.get_or_create(
+            code="001", defaults={"name": "カテゴリーＡ", "group": group, "doc_kbn": DocKbn.DOCUMENT}
+        )
+        rp, _ = RetentionPeriod.objects.get_or_create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR,
+            defaults={"display_order": 1},
+        )
+        doc = Document(
+            title=title, department=self.department, group=group, category=category,
+            year=2026, retention_period=rp, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1),
+        )
+        doc.file.save(f"{title}.pdf", ContentFile(b"%PDF-1.4 test"), save=False)
+        if is_deleted:
+            doc.is_deleted = True
+            doc.deleted_at = timezone.now()
+        doc.save()
+        return doc
+
+    def test_row_click_passes_is_deleted_flag_to_showSearchPreview(self):
+        """common.js showSearchPreview() の第5引数 isDeleted（"1"/""）を行 onclick が渡すこと。
+        お知らせ「直近Xヵ月以内で削除された文書」一覧では削除済み専用のプレビュー文言を出す
+        必要がある（xlsx 検索・閲覧・変更!B347-348 の削除済み表示に付随する挙動）。"""
+        self._create_document("通常文書")
+        response = self.client.get("/documents/search/")
+        self.assertContains(response, "'document', 'pdf', '')")
+
+        self._create_document("削除済み文書", is_deleted=True)
+        response = self.client.get("/documents/search/", {"notice": "recently_deleted"})
+        self.assertContains(response, "'document', 'pdf', '1')")
+
 
 class BulkDownloadViewTests(TestCase):
     """screen-search「一括ダウンロード」（xlsx 検索・閲覧・変更!B264-265、要再確認No.20）。"""

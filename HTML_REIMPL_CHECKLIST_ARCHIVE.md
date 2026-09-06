@@ -3355,3 +3355,22 @@ CSV所属長フラグ降格）しか塞いでおらず、**同じ Rev1.5 の 職
   - 既存の「リセットされること」を検証するテストは、番人役の在職管理者を1名追加してガードに掛からない
     ようにした（`ResetPermissionProfileTests.setUp` / `test_department_change_resets_permissions`）。
 - `manage.py test` 802件 PASS。
+
+### 検索・閲覧・変更シート全行監査：削除済み一覧の行クリックプレビュー文言（2026-09-07 ユーザー依頼）
+
+簡易設計指示書 Rev1.5「検索・閲覧・変更」シートの行単位機械監査（Rev1.1→1.5 の機械 diff で
+**このシートは Rev1.2 以降 Rev1.5 まで無改訂**＝現行 Rev1.5 の全項目が実装済みであることを確認）中に
+発見した軽微な不一致を修正。
+
+- **症状**：`common.js showSearchPreview(title, previewUrl, kind, previewKind, isDeleted)` は第5引数
+  `isDeleted`（"1"/""）で「本文書/本契約書は削除されているため、プレビューを表示できません。」を
+  出し分ける作りだが、`templates/documents/search.html` / `templates/contracts/search.html` の行
+  `onclick` が4引数しか渡しておらず、お知らせ「直近Xヵ月以内で削除された文書/契約書」一覧から
+  行クリックした際に（削除済み専用文言ではなく）「ダウンロード権限が必要です」文言が出ていた。
+  ※ 仕様項目そのもの（B347-348・B674-675 の詳細ポップアップ削除済みバナー「本文書は削除されています」）は
+  `renderDetailPopup()` 側で正しく表示されるため、仕様は充足していた。ja_pj 独自のプレビュー補助文言のみの不一致。
+- **修正**：両 search.html の行 `onclick` に第5引数 `'{% if document.is_deleted %}1{% endif %}'`
+  （契約書側は `contract.is_deleted`）を追加。
+- テスト：`documents/tests.py` `SearchPreviewPaneTests.test_row_click_passes_is_deleted_flag_to_showSearchPreview`、
+  `contracts/tests.py` 同名（通常一覧は末尾 `', '')`、削除済み一覧〈notice=recently_deleted〉は末尾 `', '1')`）。
+- `manage.py test documents contracts` 346件 PASS。

@@ -99,7 +99,7 @@
               </thead>
               <tbody>
                 {% for contract in page_obj %}
-                  <tr{% if forloop.counter|divisibleby:2 %} style="background-color:#E7E7E7;"{% endif %} onclick="showSearchPreview('{{ contract.title|escapejs }}', '{% if can_download and not contract.is_deleted %}{% url 'contracts:preview' contract.pk %}{% endif %}', 'contract', '{{ contract.display_name|preview_kind }}')" ondblclick="openDetailPopup('{% url 'contracts:api_detail' contract.pk %}', 'contract')">
+                  <tr{% if forloop.counter|divisibleby:2 %} style="background-color:#E7E7E7;"{% endif %} onclick="showSearchPreview('{{ contract.title|escapejs }}', '{% if can_download and not contract.is_deleted %}{% url 'contracts:preview' contract.pk %}{% endif %}', 'contract', '{{ contract.display_name|preview_kind }}', '{% if contract.is_deleted %}1{% endif %}')" ondblclick="openDetailPopup('{% url 'contracts:api_detail' contract.pk %}', 'contract')">
                     <td style="text-align:center;"><input type="checkbox" class="row-checkbox" name="pks" value="{{ contract.pk }}" onclick="event.stopPropagation();"></td>
                     <td style="text-align:right;">{{ contract.display_no }}</td>
                     <td style="font-weight:bold;{% if notice %} color:#e74c3c;{% endif %}">{{ contract.title }}</td>
