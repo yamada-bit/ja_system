@@ -4,7 +4,15 @@ from django.test import TestCase
 
 from accounts.models import Employee, Position, Rank
 from masters.forms import CategoryForm, GroupForm, RetentionPeriodForm
-from masters.models import Category, DocKbn, Group, RetentionKbn, RetentionPeriod, RetentionPeriodUnit
+from masters.models import (
+    Category,
+    DocKbn,
+    Group,
+    RetentionKbn,
+    RetentionPeriod,
+    RetentionPeriodUnit,
+    SystemSetting,
+)
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
 
@@ -1564,3 +1572,50 @@ class CategoryFormFieldErrorRenderingTests(TestCase):
         self.assertContains(response, "一致しません")
         self.category.refresh_from_db()
         self.assertEqual(self.category.doc_kbn, DocKbn.DOCUMENT)
+
+
+class AdminSiteTests(TestCase):
+    """review_pending.txt No.23への対応。分類・カテゴリー・保存期間設定は管理サイトに
+    登録するが閲覧専用（アプリ側CRUD画面の論理削除・重複制御・監査ログを迂回させない）、
+    SystemSettingだけはシングルトンとして変更可・追加/削除不可、を検証する。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.superuser = Employee.objects.create_superuser(
+            employee_no="9999", name="保守担当", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="9999", password="pass1234")
+
+    def test_group_admin_is_readonly(self):
+        Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        # 変更画面は開けるが（閲覧）、追加画面は403、保存(POST)も拒否される。
+        self.assertEqual(self.client.get("/admin/masters/group/").status_code, 200)
+        self.assertEqual(self.client.get("/admin/masters/group/add/").status_code, 403)
+
+    def test_retention_period_admin_is_readonly(self):
+        self.assertEqual(self.client.get("/admin/masters/retentionperiod/add/").status_code, 403)
+
+    def test_system_setting_singleton_guard(self):
+        SystemSetting.objects.create(session_idle_timeout_minutes=30)
+        # 1行あるので追加は不可。
+        self.assertEqual(self.client.get("/admin/masters/systemsetting/add/").status_code, 403)
+        setting = SystemSetting.objects.get()
+        change_url = f"/admin/masters/systemsetting/{setting.pk}/change/"
+        self.assertEqual(self.client.get(change_url).status_code, 200)
+        # 削除は不可。
+        self.assertEqual(
+            self.client.get(f"/admin/masters/systemsetting/{setting.pk}/delete/").status_code, 403
+        )
+
+    def test_system_setting_can_be_edited(self):
+        setting = SystemSetting.objects.create(session_idle_timeout_minutes=30)
+        response = self.client.post(
+            f"/admin/masters/systemsetting/{setting.pk}/change/",
+            {"session_idle_timeout_minutes": 45},
+        )
+        self.assertEqual(response.status_code, 302)
+        setting.refresh_from_db()
+        self.assertEqual(setting.session_idle_timeout_minutes, 45)

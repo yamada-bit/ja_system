@@ -699,3 +699,32 @@ class DeptListViewSearchTests(TestCase):
             desc = [d.pk for d in self.client.get("/organizations/", {"sort": field, "dir": "desc"}).context["departments"]]
             self.assertEqual(asc, list(reversed(desc)), f"sort={field}")
             self.assertEqual(set(asc), {self.dept_a.pk, self.dept_b.pk})
+
+
+class AdminSiteTests(TestCase):
+    """review_pending.txt No.23への対応。部署・閲覧部署範囲・メイン画面項目設定は管理サイトに
+    登録するが閲覧専用（統合/分割・メニュー制御はアプリ側画面を通す）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        Employee.objects.create_superuser(
+            employee_no="9999", name="保守担当", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="9999", password="pass1234")
+
+    def test_department_admin_is_readonly(self):
+        self.assertEqual(self.client.get("/admin/organizations/department/").status_code, 200)
+        self.assertEqual(self.client.get("/admin/organizations/department/add/").status_code, 403)
+
+    def test_menu_item_setting_admin_is_readonly(self):
+        self.assertEqual(
+            self.client.get("/admin/organizations/menuitemsetting/add/").status_code, 403
+        )
+
+    def test_department_view_scope_admin_is_readonly(self):
+        self.assertEqual(
+            self.client.get("/admin/organizations/departmentviewscope/add/").status_code, 403
+        )

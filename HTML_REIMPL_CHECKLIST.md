@@ -237,6 +237,14 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   第5引数 `isDeleted` を追加。仕様項目である詳細ポップアップの削除済みバナー自体は正しく表示されて
   いた）。`manage.py test documents contracts` 346件 PASS（新規2件）。詳細はアーカイブ「検索・閲覧・
   変更シート全行監査：削除済み一覧の行クリックプレビュー文言」節参照。
+- `review_pending.txt` No.23（Django管理サイト未登録）の対応（2026-09-08、ユーザー指示・リリース前
+  作業）：`core.admin.ReadOnlyModelAdmin` を新設し、分類・カテゴリー・保存期間設定・部署・閲覧部署
+  範囲・メイン画面項目設定を**閲覧専用**で管理サイトに登録（追加/変更/削除不可＝アプリ側CRUD画面の
+  論理削除・重複制御・監査ログ・部署スコープを迂回させない）。`masters.SystemSetting` のみ
+  `SystemSettingAdmin` で「変更可・シングルトン（1行あれば追加不可）・削除不可」とし、実質DB直接操作
+  しか無かった編集経路を解消。管理サイトは superuser 限定（`accounts.Employee.has_perm` /
+  `has_module_perms` が `is_superuser` を返す既存挙動）。`manage.py test` 全818件PASS（新規7件）。
+  `review_pending.txt` の見送り件数は45→44件。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

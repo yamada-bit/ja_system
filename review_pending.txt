@@ -16,6 +16,21 @@ review_security.txt・review_code_documents_contracts.txt の14ファイルに�
 
 
 ================================================================================
+■ 2026-09-08 対応の記録
+================================================================================
+No.23（masters/admin.py・organizations/admin.py のモデル未登録）をユーザー指示で対応
+（リリース前作業）。core.admin.ReadOnlyModelAdmin を新設し、分類・カテゴリー・保存期間設定・
+部署・閲覧部署範囲・メイン画面項目設定を「閲覧専用」で管理サイトに登録（追加/変更/削除は
+不可＝アプリ側CRUD画面の論理削除・重複制御・監査ログ・部署スコープを迂回させない）。
+masters.SystemSetting のみ SystemSettingAdmin で「変更可・シングルトン（1行あれば追加不可）・
+削除不可」とし、実質DB直接操作しか無かった編集経路を解消。管理サイトは superuser 限定
+（accounts.Employee.has_perm/has_module_perms が is_superuser を返す既存挙動）。
+テスト: masters.tests.AdminSiteTests / organizations.tests.AdminSiteTests（新規7件）。
+manage.py test 全818件PASS。→ 本ファイル「organizations / masters」#23 を削除、集計を12→11件・
+合計45→44件に更新。
+
+
+================================================================================
 ■ 2026-08-28 判断セッションの記録
 ================================================================================
 review_pending.txt を「全61項目を一律見送り」の2026-08-26スナップショットから、1項目ずつ
@@ -164,9 +179,9 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     継承順の都合）を理由に手書きで再実装。現状はこの1箇所のみで実害は無い。
     (出典: review_code_organizations_masters.txt)
 
-23. masters/admin.py・organizations/admin.pyともDjango管理サイトへのモデル未登録。CLAUDE.md自体は
-    明文規約では無いが、masters.SystemSettingのようにDB直接操作しか変更手段が無いモデルが存在する
-    という運用上の不便さがすでに認識されている。将来的な運用改善候補。
+23. （2026-09-08 対応済み・本セクション冒頭の記録参照）masters/admin.py・organizations/admin.py
+    ともDjango管理サイトへ登録した。分類・カテゴリー・保存期間設定・部署・閲覧部署範囲・
+    メイン画面項目設定は閲覧専用、masters.SystemSettingのみシングルトン変更可。
     (出典: review_rule_organizations_masters.txt)
 
 24. masters.RetentionPeriodにupdated_atフィールドが無く、Group/Category（両方created_at/
@@ -323,11 +338,11 @@ CLAUDE.md「コーディング規約」「原本フィデリティ運用方針�
 ================================================================================
 documents/contracts: 10件
 permissions/accounts: 8件
-organizations/masters: 12件
+organizations/masters: 11件（#23は2026-09-08に対応済みのため除外）
 audit/core: 7件
 documents/contracts（2026-08-28追補 / review_code_documents_contracts.txt）: 6件
 documents/contracts（2026-08-28追補 / review_rule_doc_contract.txt 再監査）: 2件
-合計: 45件の見送り指摘。
+合計: 44件の見送り指摘。
 
 ★要追跡: #19・#20（部署バックフィル完了後に分岐を外す想定）
 
