@@ -153,7 +153,7 @@ CHUNK_UPLOAD_MAX_SIZE_BYTES = env.int("CHUNK_UPLOAD_MAX_SIZE_BYTES", default=500
 # core.upload_services.combine_upload_chunksがサーバー側で連結する。サーバーはこの値を
 # 参照せず（連結はchunk_index順に並べるだけ）、クライアント側のスループット／障害耐性の
 # トレードオフを決める値。以前はJSにハードコードしていたが、テスト用に書き換えたまま戻し
-# 忘れる事故があったため（HTML_REIMPL_CHECKLIST_ARCHIVE.md参照）、settingsへ集約して
+# 忘れる事故があったため（HTML_REIMPL_CHECKLIST_ARCHIVE2.md参照）、settingsへ集約して
 # storage1.htmlのテンプレートコンテキスト経由でJSへ渡す。
 #
 # 推奨: 既定の5MB（5 * 1024 * 1024）のままで問題ない。大容量ファイル主体で往復回数を

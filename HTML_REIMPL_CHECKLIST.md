@@ -10,9 +10,11 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
 コメントの罠など）。
 
 完了済みフェーズの詳細な実装経緯・監査結果・バグ修正ログは
-[HTML_REIMPL_CHECKLIST_ARCHIVE.md](HTML_REIMPL_CHECKLIST_ARCHIVE.md)に切り出した
-（2026-08-24、元ファイルが1815行まで肥大化したため分割。**新規セッションが通常参照すべきは
-このファイルのみ**。アーカイブは特定の過去の判断・バグ修正の詳しい経緯を掘り下げたい時にのみ開く）。
+[HTML_REIMPL_CHECKLIST_ARCHIVE.md](HTML_REIMPL_CHECKLIST_ARCHIVE.md)（Rev1.4＝2026-08-28以降）と
+[HTML_REIMPL_CHECKLIST_ARCHIVE2.md](HTML_REIMPL_CHECKLIST_ARCHIVE2.md)（Phase 0〜8・Rev1.1〜1.3期、
+それより前）に切り出した（2026-08-24分割、2026-09-07にARCHIVE2を再分割。**新規セッションが通常
+参照すべきはこのファイルのみ**。アーカイブは特定の過去の判断・バグ修正の詳しい経緯を掘り下げたい
+時にのみ開く）。
 
 ## 実装状況サマリ
 - 第一陣（検索・保管画面）／第二陣（設定画面：職員マスタ〜権限管理）／第三陣（設定画面：

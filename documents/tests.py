@@ -3267,7 +3267,7 @@ class StoragePathTests(TestCase):
 
 class EditDeleteViewTests(TestCase):
     """保管画面２（編集・edit.html）の[4]メモ欄直下「削除」ボタン＝レコードの論理削除
-    （2026-08-27ユーザー確定。HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節参照）。単独編集は検索画面へ、
+    （2026-08-27ユーザー確定。HTML_REIMPL_CHECKLIST_ARCHIVE2.md該当節参照）。単独編集は検索画面へ、
     一括編集はその1件を対象から外して次のレコードへ進む。"""
 
     def setUp(self):

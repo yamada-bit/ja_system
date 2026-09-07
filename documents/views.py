@@ -387,7 +387,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
 
 class BulkEditStartView(LoginRequiredMixin, View):
     """screen-search「一括編集」ボタン（html4差分で初めて仕様が提示された機能、
-    HTML_REIMPL_CHECKLIST_ARCHIVE.md「検索結果一覧 一括編集の実装」参照）。BulkDownloadViewと同じpks検証パターンで選択された
+    HTML_REIMPL_CHECKLIST_ARCHIVE2.md「検索結果一覧 一括編集の実装」参照）。BulkDownloadViewと同じpks検証パターンで選択された
     文書を確認し、以後のウィザード進行に必要な最小限の状態（pkの並び順と現在位置）だけを
     セッションに積んでBulkEditViewへ渡す。編集権限自体はDocumentEditView・検索詳細ポップアップの
     「変更」ボタン（static/js/common.js、!data.is_deleted && data.edit_urlのみが条件）と同じく
@@ -894,7 +894,7 @@ class EditDeleteView(DeleteView):
     「登録画面と同じ（＝不要な文書を削除する。本登録から除外する）」＋「初回登録から1週間以上
     経過・削除済みはボタンを非表示」。原本HTMLは当該ボタンがonclick未設定の死んだモックで、
     以前はメモ欄クリア（common.jsのclearMemo）として実装していたが、2026-08-27ユーザー確定で
-    レコードの論理削除（削除後は検索画面へ）に変更した（HTML_REIMPL_CHECKLIST_ARCHIVE.md該当節）。
+    レコードの論理削除（削除後は検索画面へ）に変更した（HTML_REIMPL_CHECKLIST_ARCHIVE2.md該当節）。
 
     削除自体はDeleteView（＝BaseDeleteView）と同一（スコープ取得・can_delete検証・論理削除）。
     異なるのは監査ログのaction名だけ。一括編集画面（BulkEditView）の削除は「更新」ボタンでまとめて
