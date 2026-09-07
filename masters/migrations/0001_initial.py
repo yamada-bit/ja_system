@@ -72,6 +72,8 @@ class Migration(migrations.Migration):
                 ('period_unit', models.CharField(choices=[('month', 'ヵ月'), ('year', '年'), ('permanent', '永年')], max_length=10, verbose_name='保存期間単位')),
                 ('display_order', models.PositiveIntegerField(verbose_name='表示順')),
                 ('is_deleted', models.BooleanField(default=False, verbose_name='削除済み')),
+                ('created_at', models.DateTimeField(auto_now_add=True, verbose_name='作成日時')),
+                ('updated_at', models.DateTimeField(auto_now=True, verbose_name='更新日時')),
             ],
             options={
                 'verbose_name': '保存期間設定',

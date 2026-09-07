@@ -589,7 +589,9 @@ class RetentionDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             return resp
 
         period.is_deleted = True
-        period.save(update_fields=["is_deleted"])
+        # updated_atも更新する（auto_now=Trueはupdate_fieldsに明示しないと発火しない。
+        # Group/CategoryのBaseScopedMasterDeleteViewと挙動を揃える。review_pending.txt No.24）。
+        period.save(update_fields=["is_deleted", "updated_at"])
         logger.info("保存期間設定を削除しました: id=%s", pk)
         audit_services.log(
             employee=request.user,

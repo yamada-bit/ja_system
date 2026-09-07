@@ -29,6 +29,17 @@ masters.SystemSetting のみ SystemSettingAdmin で「変更可・シングル�
 manage.py test 全818件PASS。→ 本ファイル「organizations / masters」#23 を削除、集計を12→11件・
 合計45→44件に更新。
 
+No.24（masters.RetentionPeriod に updated_at が無く Group/Category と非対称）もユーザー指示で
+対応（リリース前作業）。RetentionPeriod に created_at / updated_at（auto_now_add / auto_now）を
+追加し、開発中で本番未リリースのため masters/migrations/0001_initial.py の CreateModel に直接
+畳み込み（makemigrations --check クリーン、開発DBには手動で ALTER TABLE 実施）。論理削除
+（RetentionDeleteView.post）の save(update_fields=[...]) に updated_at を追加し Group/Category の
+BaseScopedMasterDeleteView と挙動を揃えた。テスト: MasterDeleteViewTests に
+test_retention_delete_bumps_updated_at 追加。manage.py test 全819件PASS。
+→ 本ファイル「organizations / masters」#24 を削除、集計を11→10件・合計44→43件に更新。
+※本番反映時：初回本番投入なら 0001_initial から通しで作られるため追加作業なし。
+  既にリリース済みの環境へ後追いする場合のみ通常の AddField マイグレーションが必要。
+
 
 ================================================================================
 ■ 2026-08-28 判断セッションの記録
@@ -184,9 +195,9 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     メイン画面項目設定は閲覧専用、masters.SystemSettingのみシングルトン変更可。
     (出典: review_rule_organizations_masters.txt)
 
-24. masters.RetentionPeriodにupdated_atフィールドが無く、Group/Category（両方created_at/
-    updated_atあり）と非対称。削除時にGroup/Categoryはupdated_atも更新するがRetentionPeriodは
-    フィールド自体が無いため更新されない。フィールド追加にはmigrationを伴うため見送り。
+24. （2026-09-08 対応済み・本セクション冒頭の記録参照）masters.RetentionPeriod に
+    created_at / updated_at を追加し Group/Category と対称化。0001_initial への畳み込みで対応、
+    論理削除でも updated_at を更新するよう RetentionDeleteView を修正。
     (出典: review_rule_organizations_masters.txt)
 
 25. organizations/services.py department_composite_order_byの単体テストが無く、唯一の実利用箇所
@@ -338,11 +349,11 @@ CLAUDE.md「コーディング規約」「原本フィデリティ運用方針�
 ================================================================================
 documents/contracts: 10件
 permissions/accounts: 8件
-organizations/masters: 11件（#23は2026-09-08に対応済みのため除外）
+organizations/masters: 10件（#23・#24は2026-09-08に対応済みのため除外）
 audit/core: 7件
 documents/contracts（2026-08-28追補 / review_code_documents_contracts.txt）: 6件
 documents/contracts（2026-08-28追補 / review_rule_doc_contract.txt 再監査）: 2件
-合計: 44件の見送り指摘。
+合計: 43件の見送り指摘。
 
 ★要追跡: #19・#20（部署バックフィル完了後に分岐を外す想定）
 

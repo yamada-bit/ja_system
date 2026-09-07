@@ -464,6 +464,20 @@ class MasterDeleteViewTests(TestCase):
         self.document.refresh_from_db()
         self.assertEqual(self.document.retention_period_id, self.retention_period.pk)
 
+    def test_retention_delete_bumps_updated_at(self):
+        """review_pending.txt No.24：Group/Categoryと揃え、論理削除でもupdated_atを更新する
+        （RetentionDeleteViewのsave(update_fields=[...])にupdated_atを含める）。"""
+        before = self.retention_period.updated_at
+        token = self.client.get(
+            f"/masters/retention/{self.retention_period.pk}/delete/"
+        ).context["token"]
+        self.client.post(
+            f"/masters/retention/{self.retention_period.pk}/delete/", {"token": token}
+        )
+        self.retention_period.refresh_from_db()
+        self.assertTrue(self.retention_period.is_deleted)
+        self.assertGreater(self.retention_period.updated_at, before)
+
 
 class ContractSideMasterCountTests(TestCase):
     """masters/views.pyのGroupListView/CategoryListView/GroupDeleteView/CategoryDeleteViewの

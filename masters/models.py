@@ -146,6 +146,13 @@ class RetentionPeriod(models.Model):
     display_order = models.PositiveIntegerField("表示順")
     is_deleted = models.BooleanField("削除済み", default=False)
 
+    # Group/Categoryと揃える（両者は最初からcreated_at/updated_atを持つ。RetentionPeriodだけ
+    # 非対称だったのをリリース前作業で解消、review_pending.txt No.24）。論理削除
+    # （RetentionDeleteView）でもupdated_atを更新する（Group/Categoryの
+    # BaseScopedMasterDeleteViewと同じ挙動）。
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
+
     class Meta:
         db_table = "m_retention_period"
         verbose_name = "保存期間設定"

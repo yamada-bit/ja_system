@@ -246,7 +246,13 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   `SystemSettingAdmin` で「変更可・シングルトン（1行あれば追加不可）・削除不可」とし、実質DB直接操作
   しか無かった編集経路を解消。管理サイトは superuser 限定（`accounts.Employee.has_perm` /
   `has_module_perms` が `is_superuser` を返す既存挙動）。`manage.py test` 全818件PASS（新規7件）。
-  `review_pending.txt` の見送り件数は45→44件。
+- `review_pending.txt` No.24（`masters.RetentionPeriod` に `updated_at` が無く Group/Category と
+  非対称）の対応（2026-09-08、ユーザー指示・リリース前作業）：`RetentionPeriod` に
+  `created_at` / `updated_at` を追加。本番未リリースのため `masters/migrations/0001_initial.py` の
+  `CreateModel` に直接畳み込み（`makemigrations --check` クリーン、開発DBは手動 `ALTER TABLE`）。
+  論理削除（`RetentionDeleteView.post`）の `save(update_fields=[...])` に `updated_at` を追加し
+  Group/Category の `BaseScopedMasterDeleteView` と挙動を揃えた。`manage.py test` 全819件PASS
+  （新規1件）。`review_pending.txt` の見送り件数は 45→43件（No.23・No.24）。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加
