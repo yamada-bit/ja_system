@@ -356,6 +356,77 @@ class SearchFormRadioDefaultsInitialAccessTests(TestCase):
         self.assertNotIn("checked", expiry_label)
 
 
+class SearchFormDepartmentAutoSetTests(TestCase):
+    """xlsx 検索・閲覧・変更!B46-48(Rev1.1)「部署名：ログインユーザーの部署を自動セット／
+    閲覧部署範囲テーブルの旧部署もカンマ区切り」。管理者（部署名「選択」ボタンあり＝
+    部署欄が非disabled）も含めて自部署が既定表示されること
+    （core.forms.apply_search_department_default、2026-09-08 ユーザー依頼で追加。
+    以前は非管理者しかセットされず管理者は部署欄が空だった）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.old_section = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="旧総務課"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.staff = Employee.objects.create_user(
+            employee_no="2", name="一般", password="pass1234",
+            department=self.department, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
+
+    def _dept_display_value(self, html):
+        import re
+
+        m = re.search(r'id="id_department_display"[^>]*value="([^"]*)"', html)
+        return m.group(1) if m else None
+
+    def test_admin_gets_own_department_prefilled(self):
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get("/documents/search/").content.decode()
+        self.assertEqual(self._dept_display_value(html), "総務部")
+        # 「選択」ボタンは管理者のみ表示（can_select_department）。
+        self.assertIn("openPopupPopup(this, 'dept'", html)
+
+    def test_non_admin_still_gets_own_department_prefilled(self):
+        self.client.login(username="2", password="pass1234")
+        html = self.client.get("/documents/search/").content.decode()
+        self.assertEqual(self._dept_display_value(html), "総務部")
+        self.assertNotIn("openPopupPopup(this, 'dept'", html)
+
+    def test_merge_split_predecessor_department_is_also_prefilled(self):
+        from organizations.models import DepartmentViewScope
+
+        DepartmentViewScope.objects.create(
+            viewer_department=self.department, visible_department=self.old_section,
+            action=DepartmentViewScope.ACTION_MERGE,
+        )
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get("/documents/search/").content.decode()
+        self.assertEqual(self._dept_display_value(html), "総務部, 旧総務課")
+
+    def test_explicit_department_in_query_is_not_overridden(self):
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get(
+            "/documents/search/", {"department": str(self.old_section.pk)}
+        ).content.decode()
+        self.assertEqual(self._dept_display_value(html), "旧総務課")
+
+    def test_auto_set_department_is_not_recorded_in_search_audit_log(self):
+        """自動セットされた自部署は「利用者が入力した検索項目」ではないため操作履歴ログに
+        載せない（core.search_services.build_search_audit_message の submitted_keys 絞り込み）。"""
+        self.client.login(username="1", password="pass1234")
+        self.client.get("/documents/search/", {"title": "規定"})
+        entry = AuditLog.objects.get(action="文書検索　検索")
+        self.assertEqual(entry.event_message, "文書タイトル：規定")
+
+
 class SearchSortTests(TestCase):
     """screen-search列見出しソート（documents.search_services.apply_sort）の回帰テスト。
     「No.」列は原本sortTable(1,'num',...)と同じく、その行に紐付いた表示番号（display_no、

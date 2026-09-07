@@ -10,6 +10,7 @@ from core.forms import (
     MATCH_CHOICES,
     MATCH_OR,
     apply_radio_defaults,
+    apply_search_department_default,
     scoped_group_and_category_querysets,
     search_year_choices,
     year_choices_with_existing,
@@ -17,6 +18,7 @@ from core.forms import (
 from core.widgets import InlineRadioSelect, PopupSelectWidget
 from masters.models import Category, DocKbn, Group
 from organizations.models import Department
+from organizations.services import visible_department_ids
 from permissions.services import can_select_department, contract_searchable_department_ids
 
 logger = logging.getLogger(__name__)
@@ -285,6 +287,19 @@ class SearchForm(forms.Form):
         # 実体はcore.forms.apply_radio_defaultsに集約済み（documents.forms.SearchFormとの重複を
         # コード監査で発見、2026-08-25修正）。
         args, kwargs = apply_radio_defaults(args, kwargs)
+        # xlsx 検索・閲覧・変更!B416-418(Rev1.1)「部署名：ログインユーザーの部署を自動セット／
+        # 閲覧部署範囲テーブルの旧部署もカンマ区切り」。管理者、および契約書-部門間閲覧設定ありの
+        # 職員は部署欄が非disabled（＝「選択」ボタンあり）のため`field.initial`が描画されず
+        # 空だった（documents.forms.SearchFormと同じ漏れ。core.forms.
+        # apply_search_department_default のdocstring参照）。部門間閲覧設定の部署は「選択」で
+        # 追加する対象であって自動セット対象ではない（B421-423は表示可否の規定）ため、
+        # 自動セット値は visible_department_ids（自部署＋統合/分割スコープ）に限定する。
+        own_dept_ids = (
+            visible_department_ids(employee)
+            if employee is not None and employee.department_id
+            else []
+        )
+        args, kwargs = apply_search_department_default(args, kwargs, own_dept_ids)
         super().__init__(*args, **kwargs)
         # xlsx 検索・閲覧・変更!B499「※文書管理と同じ」（B137-140「今年～契約書が保存されている
         # 最古の年」）。

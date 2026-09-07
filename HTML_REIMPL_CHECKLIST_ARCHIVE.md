@@ -1150,3 +1150,36 @@ CSV所属長フラグ降格）しか塞いでおらず、**同じ Rev1.5 の 職
 - テスト：`documents/tests.py` `SearchPreviewPaneTests.test_row_click_passes_is_deleted_flag_to_showSearchPreview`、
   `contracts/tests.py` 同名（通常一覧は末尾 `', '')`、削除済み一覧〈notice=recently_deleted〉は末尾 `', '1')`）。
 - `manage.py test documents contracts` 346件 PASS。
+
+### 検索・閲覧・変更シート全行監査 追補：部署名の自動セットが管理者で効いていなかった（2026-09-08 ユーザー依頼）
+
+「検索・閲覧・変更」B47（文書）／B417（契約書）「・ログインユーザーの部署を自動セットする。」を
+管理者ケースで確認した結果、**検索画面の部署名欄が管理者だけ空**だった（一般・所属長は自部署が
+プリフィル）。原本 html6 は `#search-dept value="総務部"`（`index.html:336`）でロールを問わず
+プリフィルし、`transitionToSearch()` は「選択」ボタンの表示可否だけをロールで切り替える。保管画面
+（B78-82）は ARCHIVE2「Rev1.1反映」項5 で同種の漏れ（管理者の部署欄が空）を修正済みだったが、
+検索フォーム側へ横展開されていなかった。
+
+- **原因**：`documents/contracts.forms.SearchForm.__init__` は非管理者分岐（`not
+  can_select_department` / `allowed_ids is not None`）でしか `department` の初期値をセットして
+  いなかった。かつ SearchForm は SearchView が常に `request.GET` でバインドするため、disabled で
+  ない部署欄（＝「選択」ボタンを持つ管理者、契約書は部門間閲覧設定ありの職員も）は
+  `field.initial` が描画に反映されない（`apply_radio_defaults` と同じ制約）。
+- **修正**：`core.forms.apply_search_department_default(args, kwargs, department_ids)` を新設。
+  `apply_radio_defaults` の直後に呼び、GET に `department` キーが無いときだけ
+  `organizations.services.visible_department_ids(employee)`（自部署＋統合/分割スコープ、B48/B418）を
+  カンマ区切りでバインド済み data に補完する。両 SearchForm で共通利用。非管理者の
+  disabled＋`field.initial` は同じ id 集合で残す（disabled 経路は initial が使われるため）。
+  契約書-部門間閲覧設定の部署は「選択」で追加する対象であって自動セット対象ではない（B421-423 は
+  表示可否の規定）ため、自動セット値は `visible_department_ids` に限定（契約書非管理者の
+  `field.initial` は従来どおり `contract_dept_ids` のままだが disabled 時のみ有効）。
+- **副作用（意図的、ユーザー確認済み）**：管理者の既定の検索スコープが「全部署横断」から
+  「自部署（＋統合/分割スコープ）」に変わる。他部署は「選択」で追加する。
+- **操作履歴ログへの波及**：`core.search_services.build_search_audit_message(form, submitted_keys)`
+  に `submitted_keys`（＝`request.GET.keys()`）引数を追加し、GET に実在するキーのフィールドだけを
+  「検索した項目」に列挙するようにした（自動セットされた自部署は利用者入力ではないため除外。
+  ラジオ既定値を `_SEARCH_AUDIT_EXCLUDED_FIELDS` で除くのと同じ考え方）。`documents/contracts.
+  views.SearchView.get` の呼び出しを更新。
+- テスト：`documents/tests.py` `SearchFormDepartmentAutoSetTests`（5件）、`contracts/tests.py`
+  同名（5件、部門間閲覧設定ありの職員ケース含む）。既存 `SearchAuditLogTests` は
+  submitted_keys 絞り込みで従来どおりの文言に戻ることを確認。`manage.py test` 全829件 PASS。

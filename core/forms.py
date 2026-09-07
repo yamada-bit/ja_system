@@ -135,6 +135,40 @@ def apply_radio_defaults(args, kwargs):
     return args, kwargs
 
 
+def apply_search_department_default(args, kwargs, department_ids):
+    """screen-search（文書/契約書）の検索フォームで、部署名欄にログインユーザーの部署を
+    既定セットする（xlsx 検索・閲覧・変更!B47,B417「・ログインユーザーの部署を自動セットする。」
+    ＋B48,B418〈Rev1.1、閲覧部署範囲テーブルの旧部署もカンマ区切り〉、原本 index.html:336
+    `#search-dept value="総務部"` の静的プリフィルに対応）。
+
+    `apply_radio_defaults`と同じ理由で、`initial`ではなくバインド済みdataへ補完する必要がある：
+    SearchFormはSearchViewが初回アクセス時もrequest.GETで常時バインドする方針
+    （accounts.services.filter_staff_querysetのコメント参照）のため、disabledでないフィールド
+    （＝部署名「選択」ボタンを持つ管理者の部署欄）は`field.initial`が描画に反映されない。
+    非管理者は`department`フィールドがdisabled＋`field.initial`済みでこの補完が無くても描画
+    されるが、管理者だけ部署欄が空になっていた（保管画面は同種の漏れをARCHIVE「Rev1.1反映」で
+    修正済みだったが検索フォーム側へ横展開されていなかった）。値の生成元を一本化するため
+    両ロールともこの経路を通す。
+
+    `department`キーがdataに無いときだけ補うので、「選択」ポップアップで部署を選んで検索した
+    場合（request.GETにdepartmentあり）や「条件クリア」（クエリ無し＝この既定に戻る）は
+    従来どおり。`department_ids`が空（退職者・部署未設定等）なら何もしない。
+    `apply_radio_defaults`の後に呼び出し、戻り値をそのまま`super().__init__`へ渡す。
+    """
+    if not department_ids:
+        return args, kwargs
+    joined = ",".join(str(i) for i in department_ids)
+    if args and args[0] is not None:
+        data = args[0].copy()
+        data.setdefault("department", joined)
+        args = (data,) + args[1:]
+    elif kwargs.get("data") is not None:
+        data = kwargs["data"].copy()
+        data.setdefault("department", joined)
+        kwargs["data"] = data
+    return args, kwargs
+
+
 class OtherPassForm(forms.Form):
     """screen-other-pass。「現在のパスワード」欄はRev1.5(原本html6)で画面から削除された
     （それ以前は原本が平文表示、ja_pjはハッシュ化必須の規約でマスク表示していた）。ただし

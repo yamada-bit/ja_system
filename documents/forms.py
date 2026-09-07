@@ -9,6 +9,7 @@ from core.forms import (
     MATCH_CHOICES,
     MATCH_OR,
     apply_radio_defaults,
+    apply_search_department_default,
     scoped_group_and_category_querysets,
     search_year_choices,
     year_choices_with_existing,
@@ -311,6 +312,17 @@ class SearchForm(forms.Form):
         # 実体はcore.forms.apply_radio_defaultsに集約済み（contracts.forms.SearchFormとの
         # 重複をコード監査で発見、2026-08-25修正）。
         args, kwargs = apply_radio_defaults(args, kwargs)
+        # xlsx 検索・閲覧・変更!B46-48(Rev1.1)「部署名：ログインユーザーの部署を自動セット／
+        # 閲覧部署範囲テーブルの旧部署もカンマ区切り」。管理者（部署名「選択」ボタンあり＝
+        # 非disabled）も含めて部署欄に自部署を既定表示するため、`field.initial`ではなくバインド
+        # 済みdataへ補完する（core.forms.apply_search_department_default のdocstring参照。
+        # 以前は下の非管理者分岐でしかセットされず、管理者は部署欄が空だった）。
+        own_dept_ids = (
+            visible_department_ids(employee)
+            if employee is not None and employee.department_id
+            else []
+        )
+        args, kwargs = apply_search_department_default(args, kwargs, own_dept_ids)
         super().__init__(*args, **kwargs)
         # xlsx 検索・閲覧・変更!B137-140「今年～文書が保存されている最古の年」（IntegerFieldでは
         # なくMultipleChoiceFieldなのはPopupSelectWidgetがリスト値を扱う都合上）。
@@ -321,11 +333,10 @@ class SearchForm(forms.Form):
             # 原本は行自体を消さず「選択」ボタンのみ非表示にする（index.html
             # select-dept-div表示切替）。フィールド自体は残しdisabled化し、
             # 自部署を読み取り専用表示する（widgetのボタン非表示はcore.widgets.PopupSelectWidget側）。
-            # xlsx 検索・閲覧・変更!B48(Rev1.1)「閲覧部署範囲テーブルを参照し...自動セットする」。
+            # disabledフィールドはバインド済みでも`field.initial`が描画・cleanに使われるため、
+            # 上のdata補完とは別に従来どおりinitialも設定する（同じ`own_dept_ids`で一致させる）。
             self.fields["department"].disabled = True
-            self.fields["department"].initial = (
-                visible_department_ids(employee) if employee.department_id else []
-            )
+            self.fields["department"].initial = own_dept_ids
         # xlsx 検索・閲覧・変更!P96,P152(Rev1.2)「分類/カテゴリー選択は…自部署の内容を表示」。
         group_qs, category_qs = scoped_group_and_category_querysets(
             doc_kbn=DocKbn.DOCUMENT, kind="document", employee=employee

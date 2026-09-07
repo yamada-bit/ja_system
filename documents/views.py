@@ -790,7 +790,7 @@ class SearchView(LoginRequiredMixin, View):
             audit_services.log(
                 employee=request.user,
                 action="文書検索　検索",
-                event_message=search_services.build_search_audit_message(form),
+                event_message=search_services.build_search_audit_message(form, request.GET.keys()),
             )
         return render(
             request,

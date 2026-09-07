@@ -253,6 +253,16 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   論理削除（`RetentionDeleteView.post`）の `save(update_fields=[...])` に `updated_at` を追加し
   Group/Category の `BaseScopedMasterDeleteView` と挙動を揃えた。`manage.py test` 全819件PASS
   （新規1件）。`review_pending.txt` の見送り件数は 45→43件（No.23・No.24）。
+- 「検索・閲覧・変更」B47/B417 追補：部署名の自動セットが**管理者で効いていなかった**修正
+  （2026-09-08、ユーザー依頼）：検索画面の部署名欄が管理者だけ空だった（原本 html6 は
+  ロール問わずプリフィル、保管画面は ARCHIVE2「Rev1.1反映」項5 で同種の漏れを修正済みだったが
+  検索側へ未展開）。`core.forms.apply_search_department_default` を新設し、GET に `department` が
+  無ければ `visible_department_ids(employee)`（自部署＋統合/分割スコープ）をバインド済み data に
+  補完（SearchForm は常時 `request.GET` バインドのため `field.initial` は非disabled欄に効かない）。
+  副作用として管理者の既定検索スコープが「全部署横断」→「自部署」に変わる（他部署は「選択」で追加。
+  ユーザー確認済み）。操作履歴ログは `build_search_audit_message(form, request.GET.keys())` で
+  GET 実在キーのみ列挙し自動セット部署を除外。`manage.py test` 全829件PASS（新規10件）。詳細は
+  ARCHIVE.md「検索・閲覧・変更シート全行監査 追補：部署名の自動セットが管理者で効いていなかった」節。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

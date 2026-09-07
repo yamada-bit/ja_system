@@ -127,16 +127,25 @@ def is_search_form_submission(get_params, field_names):
     return any(name in get_params for name in field_names)
 
 
-def build_search_audit_message(form):
+def build_search_audit_message(form, submitted_keys=None):
     """検索フォームの入力内容から操作履歴ログ用のイベントメッセージを組み立てる
     （xlsx 操作履歴ログ!B72-73＜文書検索　例＞「検索した項目：検索入力したデータ,………」、
     原本index.html:3315の契約書検索サンプル「分類：XXX,年：XXX,カテゴリー：XXX,タイトル：XXX,
     フリーワード：XXX」）。実際に値が入力/選択されたフィールドのみを、フォーム定義順で列挙する。
     呼び出し側は`form.is_valid()`が真であることを保証すること（cleaned_dataを使うため）。
+
+    `submitted_keys`（＝`request.GET.keys()`）を渡すと、そのキーがGETに実在するフィールドだけを
+    対象にする。SearchFormは部署名にログインユーザーの自部署を自動セットする
+    （core.forms.apply_search_department_default、xlsx 検索・閲覧・変更!B47,B417）ため、
+    利用者が「選択」で部署を変えずに他条件だけで検索しても`cleaned_data["department"]`に
+    自部署が入る。これを「検索した項目」として毎回記録すると、利用者が入力していない既定値まで
+    ログに載ってしまう（`_SEARCH_AUDIT_EXCLUDED_FIELDS`のラジオ既定値と同じ理由）。
     """
     parts = []
     for name, field in form.fields.items():
         if name in _SEARCH_AUDIT_EXCLUDED_FIELDS:
+            continue
+        if submitted_keys is not None and name not in submitted_keys:
             continue
         value = form.cleaned_data.get(name)
         # 空のQuerySet（ModelMultipleChoiceField、department/group/category等）はDjangoの

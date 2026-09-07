@@ -213,6 +213,86 @@ class SearchFormDepartmentScopeQueryTests(TestCase):
         self.assertEqual(spy.call_count, 1)
 
 
+class SearchFormDepartmentAutoSetTests(TestCase):
+    """xlsx 検索・閲覧・変更!B416-418(Rev1.1)「部署名：ログインユーザーの部署を自動セット／
+    閲覧部署範囲テーブルの旧部署もカンマ区切り」。管理者、および契約書-部門間閲覧設定ありの
+    職員（いずれも部署欄が非disabled）も含めて自部署が既定表示されること
+    （core.forms.apply_search_department_default、documents.tests.SearchFormDepartmentAutoSetTests
+    と同じ。2026-09-08 ユーザー依頼で追加）。部門間閲覧設定の部署は「選択」で追加する対象で
+    あって自動セット対象ではない（B421-423は表示可否の規定）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.old_section = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="旧総務課"
+        )
+        self.other_branch = Department.objects.create(
+            branch_code="100", branch_name="A支店", section_code="01", section_name="A支店営業課"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.staff = Employee.objects.create_user(
+            employee_no="2", name="一般", password="pass1234",
+            department=self.department, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
+        self.cross_dept_user = Employee.objects.create_user(
+            employee_no="3", name="部門間", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KAKARICHO,
+        )
+        p = PermissionProfile.objects.create(employee=self.cross_dept_user, role=PermissionRole.STAFF)
+        p.contract_visible_departments.add(self.other_branch)
+
+    def _dept_display_value(self, html):
+        import re
+
+        m = re.search(r'id="id_department_display"[^>]*value="([^"]*)"', html)
+        return m.group(1) if m else None
+
+    def test_admin_gets_own_department_prefilled(self):
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get("/contracts/search/").content.decode()
+        self.assertEqual(self._dept_display_value(html), "総務部")
+        self.assertIn("openPopupPopup(this, 'dept'", html)
+
+    def test_cross_dept_permission_user_gets_own_department_prefilled_not_the_cross_dept(self):
+        """契約書-部門間閲覧設定ありの非管理者は「選択」ボタンが出る（非disabled）ため、
+        以前は部署欄が空だった。自部署のみ既定表示され、部門間設定の部署は含めない。"""
+        self.client.login(username="3", password="pass1234")
+        html = self.client.get("/contracts/search/").content.decode()
+        self.assertEqual(self._dept_display_value(html), "総務部")
+        self.assertIn("openPopupPopup(this, 'dept'", html)
+
+    def test_non_admin_still_gets_own_department_prefilled(self):
+        self.client.login(username="2", password="pass1234")
+        html = self.client.get("/contracts/search/").content.decode()
+        self.assertEqual(self._dept_display_value(html), "総務部")
+        self.assertNotIn("openPopupPopup(this, 'dept'", html)
+
+    def test_merge_split_predecessor_department_is_also_prefilled(self):
+        from organizations.models import DepartmentViewScope
+
+        DepartmentViewScope.objects.create(
+            viewer_department=self.department, visible_department=self.old_section,
+            action=DepartmentViewScope.ACTION_MERGE,
+        )
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get("/contracts/search/").content.decode()
+        self.assertEqual(self._dept_display_value(html), "総務部, 旧総務課")
+
+    def test_explicit_department_in_query_is_not_overridden(self):
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get(
+            "/contracts/search/", {"department": str(self.old_section.pk)}
+        ).content.decode()
+        self.assertEqual(self._dept_display_value(html), "旧総務課")
+
+
 class SearchSortTests(TestCase):
     """screen-search（契約書モード）列見出しソート（contracts.search_services.apply_sort）の
     回帰テスト。documents.tests.SearchSortTestsと同じ理由（2026-08-17ユーザー報告）。
