@@ -1183,3 +1183,25 @@ CSV所属長フラグ降格）しか塞いでおらず、**同じ Rev1.5 の 職
 - テスト：`documents/tests.py` `SearchFormDepartmentAutoSetTests`（5件）、`contracts/tests.py`
   同名（5件、部門間閲覧設定ありの職員ケース含む）。既存 `SearchAuditLogTests` は
   submitted_keys 絞り込みで従来どおりの文言に戻ることを確認。`manage.py test` 全829件 PASS。
+
+### 一括ダウンロードの未選択ガードをalert方式へ（一括編集と統一、2026-09-08 ユーザー依頼）
+
+文書・契約書 検索・閲覧画面の「一括ダウンロード」ボタンを未選択で押したとき、サーバー側
+`BaseBulkDownloadView.post` が `messages` で「ダウンロードする文書/契約書を選択してください。」を
+出していた。ユーザー依頼で、一括編集ボタン（`startBulkEdit` の `alert`）と同じクライアント側
+`alert` 方式に統一。
+
+- `common.js` に `startBulkDownload()` を追加（`startBulkEdit()` と同型。選択0件なら
+  `alert("ダウンロードするデータが選択されていません。")` して `return false`）。原本 html6 の
+  当該ボタンは `onclick` 未設定のモックのため挙動の一次情報が無く、同じ「未選択ガード」を担う
+  一括編集に揃えた（`alert` 文言も一括編集の「編集するデータが選択されていません。」と対にした）。
+- `templates/{documents,contracts}/search.html` の「一括ダウンロード」ボタンに
+  `onclick="return startBulkDownload();"` を付与。
+- `core.record_views.BaseBulkDownloadView.post` の未選択時 `messages` 文言を
+  「ダウンロードするデータが選択されていません。」に変更（URL直打ち・JS無効時の保険として
+  サーバー側ガード自体は残す。`BulkEditStartView` の `messages` が `startBulkEdit` の `alert`
+  文言に揃えてあるのと同じ扱い）。`entity_label`（文書/契約書）はこのメッセージでは不使用に。
+- テスト：`documents/contracts.tests` の `BulkButtonsHiddenForRecentlyDeletedNoticeTests` に
+  `test_bulk_download_button_has_client_side_unselected_guard`、`BulkDownloadViewTests` の
+  `test_no_selection_redirects_with_message` を新文言でアサート（契約書側は新規追加）。
+  `manage.py test documents contracts core` 495件 PASS。

@@ -998,6 +998,12 @@ class BulkButtonsHiddenForRecentlyDeletedNoticeTests(TestCase):
         self.assertContains(response, "一括編集")
         self.assertContains(response, "一括選択")
 
+    def test_bulk_download_button_has_client_side_unselected_guard(self):
+        """未選択時の案内は一括編集（startBulkEdit）と同じくクライアント側alertで出す
+        （2026-09-08ユーザー依頼。common.js startBulkDownload）。"""
+        response = self.client.get("/documents/search/")
+        self.assertContains(response, "return startBulkDownload();")
+
 
 class SearchPreviewPaneTests(TestCase):
     """screen-search「文書イメージ」欄のプレビュー描画方式（2026-08-31）。行クリック時に
@@ -1125,8 +1131,14 @@ class BulkDownloadViewTests(TestCase):
         self.assertIn("2件", entry.event_message)
 
     def test_no_selection_redirects_with_message(self):
+        from django.contrib.messages import get_messages
+
         response = self.client.post("/documents/bulk-download/", {})
         self.assertRedirects(response, "/documents/search/")
+        # クライアント側alertを迂回した直POST時の保険。文言はcommon.js startBulkDownloadの
+        # alertに合わせる（2026-09-08）。
+        msgs = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertIn("ダウンロードするデータが選択されていません。", msgs)
 
     def test_invalid_pks_values_are_ignored_not_crashing(self):
         """pksに数値以外の値が混ざっても未捕捉のValueErrorで500にならず、有効なpkのみで

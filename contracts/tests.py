@@ -467,6 +467,12 @@ class BulkButtonsHiddenForRecentlyDeletedNoticeTests(TestCase):
         self.assertContains(response, "一括編集")
         self.assertContains(response, "一括選択")
 
+    def test_bulk_download_button_has_client_side_unselected_guard(self):
+        """documents.tests.BulkButtonsHiddenForRecentlyDeletedNoticeTests
+        .test_bulk_download_button_has_client_side_unselected_guard と同じ（2026-09-08）。"""
+        response = self.client.get("/contracts/search/")
+        self.assertContains(response, "return startBulkDownload();")
+
 
 class SearchPreviewPaneTests(TestCase):
     """documents.tests.SearchPreviewPaneTests と同じ（screen-search「文書イメージ」欄の
@@ -1175,6 +1181,17 @@ class BulkDownloadViewTests(TestCase):
         self.assertTrue(any("present" in n for n in names))
         warnings = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("1件のファイルを取得できなかった" in m for m in warnings))
+
+    def test_no_selection_redirects_with_message(self):
+        """documents.tests.BulkDownloadViewTests.test_no_selection_redirects_with_message
+        と同じ（クライアント側alertを迂回した直POST時の保険。文言はcommon.js
+        startBulkDownloadのalertに合わせる。2026-09-08）。"""
+        from django.contrib.messages import get_messages
+
+        response = self.client.post("/contracts/bulk-download/", {})
+        self.assertRedirects(response, "/contracts/search/")
+        msgs = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertIn("ダウンロードするデータが選択されていません。", msgs)
 
 
 class BulkEditViewTests(TestCase):

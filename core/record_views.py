@@ -109,7 +109,11 @@ class BaseBulkDownloadView(View):
     def post(self, request):
         pks = request.POST.getlist("pks")
         if not pks:
-            messages.error(request, f"ダウンロードする{self.entity_label}を選択してください。")
+            # 通常はクライアント側 common.js startBulkDownload() のalertで弾かれる
+            # （2026-09-08ユーザー依頼で一括編集と同じalert方式に変更）。ここはURL直打ち・
+            # JS無効時の保険。文言はそのalert（「ダウンロードするデータが選択されていません。」）に
+            # 合わせる（BulkEditStartViewのmessagesがstartBulkEditのalert文言に揃えてあるのと同じ）。
+            messages.error(request, "ダウンロードするデータが選択されていません。")
             return redirect(self.search_url_name)
         if not can_download(request.user, kind=self.kind):
             logger.warning(

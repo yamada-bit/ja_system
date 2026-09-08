@@ -82,7 +82,7 @@
             「一括選択」トグルごと非表示にする。
           {% endcomment %}
           {% if notice != "recently_deleted" %}
-          <button type="button" id="btn-toggle-all" onclick="toggleAllCheckboxes()">一括選択</button>　{% if can_download %}<button type="submit">一括ダウンロード</button>{% endif %}　<button type="submit" formaction="{% url 'documents:bulk_edit_start' %}" onclick="return startBulkEdit();">一括編集</button>
+          <button type="button" id="btn-toggle-all" onclick="toggleAllCheckboxes()">一括選択</button>　{% if can_download %}<button type="submit" onclick="return startBulkDownload();">一括ダウンロード</button>{% endif %}　<button type="submit" formaction="{% url 'documents:bulk_edit_start' %}" onclick="return startBulkEdit();">一括編集</button>
           {% endif %}
           <div class="table-wrapper">
             <table class="result-table" data-result-count="{{ page_obj.paginator.count }}">

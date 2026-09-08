@@ -60,6 +60,23 @@ function startBulkEdit() {
 }
 
 /*
+ * 検索・閲覧画面の「一括ダウンロード」ボタンの未選択ガード。原本index.htmlの当該ボタンは
+ * onclick未設定のモックで挙動の一次情報が無いため、同じ「未選択なら中断」を担う一括編集
+ * （startBulkEdit）に揃える（2026-09-08ユーザー依頼。以前はサーバー側BaseBulkDownloadViewが
+ * messagesで「ダウンロードする文書/契約書を選択してください。」を出していた → 一括編集と同様に
+ * クライアント側alertへ変更）。サーバー側(BaseBulkDownloadView.post)の未選択ガードは
+ * URL直打ち・JS無効対策の保険として残す（文言もこのalertに合わせてある）。
+ */
+function startBulkDownload() {
+  const checked = document.querySelectorAll(".row-checkbox:checked");
+  if (checked.length === 0) {
+    alert("ダウンロードするデータが選択されていません。");
+    return false;
+  }
+  return true;
+}
+
+/*
  * 文書/契約書 検索・閲覧画面の列見出しソートリンク用（簡易設計指示書Rev1_1 検索・閲覧・変更
  * シートB244,245「検索結果が1万件を超えている場合はソートに時間が掛かる旨、アラート表示する」）。
  * 件数はテンプレート側で`.result-table`の`data-result-count`属性に埋め込み済み
