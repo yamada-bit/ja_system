@@ -53,7 +53,9 @@
             </tr>
             <tr>
               <td class="label">期間</td>
-              <td>{{ form.save_date_start }} ～ {{ form.save_date_end }}<span style="display:inline-block; width:48px;"></span> {{ form.save_day_kbn }}</td>
+              <td>{{ form.save_date_start }} ～ {{ form.save_date_end }}<span style="display:inline-block; width:48px;"></span> {{ form.save_day_kbn }}
+                {% if form.save_date_end.errors %}<div class="field-error">{{ form.save_date_end.errors.0 }}</div>{% endif %}
+              </td>
             </tr>
             <tr>
               <td class="label">保存期間</td>

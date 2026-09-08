@@ -169,6 +169,26 @@ def apply_search_department_default(args, kwargs, department_ids):
     return args, kwargs
 
 
+def validate_date_range(form, start_field, end_field, *, label):
+    """開始日 > 終了日 の逆転入力を`end_field`のエラーとして弾く共通ヘルパー。
+
+    原本HTML/xlsxはこの検証を持たない（開始・終了とも素の`<input type="date">`で、
+    JSチェックも無い）。ただし逆転した期間指定は検索なら「黙って0件」、契約書保管なら
+    ほぼ確実な入力ミスをそのまま保存、となり利用者に不親切なため、リリース前作業で
+    サーバー側の健全性チェックとして追加した（review_pending.txt No.3、2026-09-08
+    ユーザー指示。動的UI制御の追加ではなくナンセンス入力の拒否）。
+
+    両方入力されている場合のみ検証し、`開始 == 終了`（単日指定）は許可する。
+    `form.clean()`から`validate_date_range(self, "save_date_start", "save_date_end",
+    label="期間")`のように呼ぶ。契約書保管フォームのようにフィールド名へ添字が付く
+    （`contract_period_start_0`等）場合は、呼び出し側で組み立てた実名を渡す。
+    """
+    start = form.cleaned_data.get(start_field)
+    end = form.cleaned_data.get(end_field)
+    if start and end and start > end:
+        form.add_error(end_field, f"{label}(終了)は{label}(開始)より前にできません。")
+
+
 class OtherPassForm(forms.Form):
     """screen-other-pass。「現在のパスワード」欄はRev1.5(原本html6)で画面から削除された
     （それ以前は原本が平文表示、ja_pjはハッシュ化必須の規約でマスク表示していた）。ただし

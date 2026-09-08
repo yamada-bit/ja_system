@@ -167,6 +167,82 @@ class SearchQuerysetTests(TestCase):
             _ = obj.extracted_text
 
 
+class DateRangeValidationTests(TestCase):
+    """開始＞終了の逆転入力を弾く（review_pending.txt No.3、原本・xlsxに無いがサーバー側の
+    健全性チェックとして追加）。検索フォームの「期間」と、契約書保管フォームの「契約期間」。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+
+    def test_search_form_rejects_reversed_period(self):
+        form = SearchForm(data={"save_date_start": "2026-06-01", "save_date_end": "2026-01-01"})
+        self.assertFalse(form.is_valid())
+        self.assertIn("save_date_end", form.errors)
+
+    def test_search_form_allows_same_day_and_normal(self):
+        self.assertTrue(
+            SearchForm(data={"save_date_start": "2026-01-01", "save_date_end": "2026-01-01"}).is_valid()
+        )
+        self.assertTrue(
+            SearchForm(data={"save_date_start": "2026-01-01", "save_date_end": "2026-06-01"}).is_valid()
+        )
+
+    def _upload_data(self, suffix, **overrides):
+        data = {
+            f"year{suffix}": 2026, "title_0": "契約書A",
+            f"department{suffix}": self.department.pk, f"group{suffix}": self.group.pk,
+            f"category{suffix}": self.category.pk,
+        }
+        data.update(overrides)
+        return data
+
+    def test_upload_form_rejects_reversed_contract_period_create_mode(self):
+        from contracts.forms import UploadStep2Form
+
+        form = UploadStep2Form(
+            data=self._upload_data(
+                "_0", contract_period_start_0="2026-12-31", contract_period_end_0="2026-01-01"
+            ),
+            employee=self.admin, file_count=1, edit_mode=False,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("contract_period_end_0", form.errors)
+
+    def test_upload_form_rejects_reversed_contract_period_edit_mode(self):
+        from contracts.forms import UploadStep2Form
+
+        form = UploadStep2Form(
+            data=self._upload_data(
+                "", contract_period_start="2026-12-31", contract_period_end="2026-01-01"
+            ),
+            employee=self.admin, edit_mode=True,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("contract_period_end", form.errors)
+
+    def test_upload_form_allows_normal_contract_period(self):
+        from contracts.forms import UploadStep2Form
+
+        form = UploadStep2Form(
+            data=self._upload_data(
+                "_0", contract_period_start_0="2026-01-01", contract_period_end_0="2026-12-31"
+            ),
+            employee=self.admin, file_count=1, edit_mode=False,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+
 class SearchFormDepartmentScopeQueryTests(TestCase):
     """SearchForm.__init__の部署スコープ計算（contract_searchable_department_ids）。
 

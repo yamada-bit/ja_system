@@ -78,3 +78,15 @@ a.sort-link {
   color: #c0392b;
   font-size: 12px;
 }
+
+/*
+ * 検索条件パネル（screen-search の .search-condition-table / screen-log-list の
+ * .master-search-panel）の期間欄で、開始＞終了の逆転入力を弾いたときのエラー文言
+ * （review_pending.txt No.3）。原本にこの検証・表示は無いため、独自の最小スタイルとして持つ。
+ */
+.search-condition-table .field-error,
+.master-search-panel .field-error {
+  margin-top: 3px;
+  color: #c0392b;
+  font-size: 12px;
+}

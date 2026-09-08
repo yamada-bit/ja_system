@@ -13,6 +13,7 @@ from core.forms import (
     apply_search_department_default,
     scoped_group_and_category_querysets,
     search_year_choices,
+    validate_date_range,
     year_choices_with_existing,
 )
 from core.widgets import InlineRadioSelect, PopupSelectWidget
@@ -189,6 +190,19 @@ class UploadStep2Form(forms.Form):
                 label=f"契約書タイトル({i + 1})", initial=initial, max_length=255
             )
 
+    def clean(self):
+        cleaned = super().clean()
+        # 契約期間(開始)＞(終了)の逆転はほぼ入力ミスのため保存前に弾く（review_pending.txt No.3）。
+        # createモードはフィールド名がファイルごとに{name}_{i}へ複製されている（__init__参照）。
+        if self.per_file_mode:
+            for i in range(self.file_count):
+                validate_date_range(
+                    self, f"contract_period_start_{i}", f"contract_period_end_{i}", label="契約期間"
+                )
+        else:
+            validate_date_range(self, "contract_period_start", "contract_period_end", label="契約期間")
+        return cleaned
+
     def file_data(self, i):
         """i番目のファイルとして保存するクリーン値の辞書（キーは PER_FILE_FIELDS ＋ "title"）。
         documents.forms.UploadStep2Form.file_data と同じ役割。"""
@@ -340,3 +354,9 @@ class SearchForm(forms.Form):
         self.fields["group"].widget.queryset = group_qs
         self.fields["category"].queryset = category_qs
         self.fields["category"].widget.queryset = category_qs
+
+    def clean(self):
+        cleaned = super().clean()
+        # documents.forms.SearchForm.clean と同じ（review_pending.txt No.3）。
+        validate_date_range(self, "save_date_start", "save_date_end", label="期間")
+        return cleaned

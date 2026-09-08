@@ -25,6 +25,7 @@
         <div>
           <label style="font-weight:bold; margin-right:5px;">操作日</label>
           {{ form.date_start }}～{{ form.date_end }}
+          {% if form.date_end.errors %}<div class="field-error">{{ form.date_end.errors.0 }}</div>{% endif %}
         </div>
         <div>
           <label style="font-weight:bold; margin-right:5px;">職員番号</label>

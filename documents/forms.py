@@ -12,6 +12,7 @@ from core.forms import (
     apply_search_department_default,
     scoped_group_and_category_querysets,
     search_year_choices,
+    validate_date_range,
     year_choices_with_existing,
 )
 from core.widgets import InlineRadioSelect, PopupSelectWidget
@@ -345,3 +346,9 @@ class SearchForm(forms.Form):
         self.fields["group"].widget.queryset = group_qs
         self.fields["category"].queryset = category_qs
         self.fields["category"].widget.queryset = category_qs
+
+    def clean(self):
+        cleaned = super().clean()
+        # 期間(開始)＞期間(終了)は「黙って0件」になり不親切なため弾く（review_pending.txt No.3）。
+        validate_date_range(self, "save_date_start", "save_date_end", label="期間")
+        return cleaned

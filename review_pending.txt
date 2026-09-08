@@ -29,6 +29,18 @@ masters.SystemSetting のみ SystemSettingAdmin で「変更可・シングル�
 manage.py test 全818件PASS。→ 本ファイル「organizations / masters」#23 を削除、集計を12→11件・
 合計45→44件に更新。
 
+No.3（日付範囲の開始≦終了クロスフィールド検証が無い）もユーザー指示で対応（リリース前作業）。
+原本HTML/xlsxにこの検証・JSチェックは無いが、逆転した期間指定は検索なら「黙って0件」、契約書
+保管ならほぼ確実な入力ミスをそのまま保存、となり不親切なため、サーバー側の健全性チェックとして
+`core.forms.validate_date_range` を新設し4フォームの `clean()` から呼ぶ：documents.SearchForm /
+contracts.SearchForm の「期間」（save_date_start/end）、audit.AuditLogSearchForm の「操作日」
+（date_start/end）、contracts.UploadStep2Form の「契約期間」（contract_period_start/end、
+createモードは `_i` 添字ぶんループ）。開始==終了（単日）は許可、開始>終了のみ終了フィールドの
+エラーにする。エラー文言は search.html×2・log_list.html に `.field-error` で表示（`django_widgets.css`
+に `.search-condition-table`／`.master-search-panel` 用の最小スタイル追加）。実ブラウザで
+文書検索・操作履歴ログの両画面にエラーが出ることを確認。テスト新規11件、manage.py test 全843件PASS。
+→ 本ファイル「documents / contracts」#3 を削除、集計を10→9件・合計43→42件に更新。
+
 No.24（masters.RetentionPeriod に updated_at が無く Group/Category と非対称）もユーザー指示で
 対応（リリース前作業）。RetentionPeriod に created_at / updated_at（auto_now_add / auto_now）を
 追加し、開発中で本番未リリースのため masters/migrations/0001_initial.py の CreateModel に直接
@@ -80,9 +92,9 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
    低リスクな入力検証の穴。
    (出典: review_code_doc_contract_full.txt)
 
-3. documents/forms.py:229-234, contracts/forms.py:233-238・98-103（save_date_start/end等）に
-   開始日≦終了日のクロスフィールド検証無し。原本HTML/xlsxがこの検証を要求しているか未確認のため、
-   実装するとすれば原本確認が先。
+3. （2026-09-08 対応済み・本セクション冒頭の記録参照）日付範囲の開始≦終了クロスフィールド検証を
+   core.forms.validate_date_range として実装し、documents/contracts の SearchForm「期間」・
+   audit.AuditLogSearchForm「操作日」・contracts.UploadStep2Form「契約期間」の4フォームに適用。
    (出典: review_code_doc_contract_full.txt)
 
 4. documents/search_services.py:198-221, contracts/search_services.py:166-186
@@ -347,13 +359,13 @@ CLAUDE.md「コーディング規約」「原本フィデリティ運用方針�
 ================================================================================
 ■ 集計
 ================================================================================
-documents/contracts: 10件
+documents/contracts: 9件（#3は2026-09-08に対応済みのため除外）
 permissions/accounts: 8件
 organizations/masters: 10件（#23・#24は2026-09-08に対応済みのため除外）
 audit/core: 7件
 documents/contracts（2026-08-28追補 / review_code_documents_contracts.txt）: 6件
 documents/contracts（2026-08-28追補 / review_rule_doc_contract.txt 再監査）: 2件
-合計: 43件の見送り指摘。
+合計: 42件の見送り指摘。
 
 ★要追跡: #19・#20（部署バックフィル完了後に分岐を外す想定）
 

@@ -2,6 +2,8 @@ import logging
 
 from django import forms
 
+from core.forms import validate_date_range
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,3 +34,9 @@ class AuditLogSearchForm(forms.Form):
         widget=forms.TextInput(attrs={"placeholder": "キーワード検索", "style": "padding:4px; width:150px;"}),
     )
     personal_info_flag = forms.BooleanField(label="個人情報書類", required=False)
+
+    def clean(self):
+        cleaned = super().clean()
+        # 操作日(開始)＞(終了)は「黙って0件」になり不親切なため弾く（review_pending.txt No.3）。
+        validate_date_range(self, "date_start", "date_end", label="操作日")
+        return cleaned

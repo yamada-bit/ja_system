@@ -176,6 +176,44 @@ class UsedRetentionPeriodsTests(TestCase):
         self.assertNotIn(period, list(used_retention_periods()))
 
 
+class SearchFormDateRangeTests(TestCase):
+    """screen-search「期間」欄の開始＞終了の逆転入力を弾く（review_pending.txt No.3、
+    原本・xlsxに無いがサーバー側の健全性チェックとして追加）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_reversed_date_range_is_invalid(self):
+        form = SearchForm(data={"save_date_start": "2026-06-01", "save_date_end": "2026-01-01"})
+        self.assertFalse(form.is_valid())
+        self.assertIn("save_date_end", form.errors)
+
+    def test_reversed_date_range_renders_error_on_search_page(self):
+        response = self.client.get(
+            "/documents/search/", {"save_date_start": "2026-06-01", "save_date_end": "2026-01-01"}
+        )
+        self.assertContains(response, "期間(終了)は期間(開始)より前にできません。")
+
+    def test_same_day_range_is_valid(self):
+        form = SearchForm(data={"save_date_start": "2026-01-01", "save_date_end": "2026-01-01"})
+        self.assertTrue(form.is_valid())
+
+    def test_normal_range_and_single_bound_are_valid(self):
+        self.assertTrue(
+            SearchForm(data={"save_date_start": "2026-01-01", "save_date_end": "2026-06-01"}).is_valid()
+        )
+        self.assertTrue(SearchForm(data={"save_date_start": "2026-01-01"}).is_valid())
+        self.assertTrue(SearchForm(data={"save_date_end": "2026-01-01"}).is_valid())
+
+
 class SearchQuerysetTests(TestCase):
     """screen-search「文書タイトル」「フリーワード」のAND/OR切替（xlsx 検索・閲覧・変更シート）。"""
 

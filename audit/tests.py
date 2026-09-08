@@ -186,6 +186,24 @@ class AuditLogListViewTests(TestCase):
         self.assertContains(response, "文書　ダウンロード")
         self.assertContains(response, "ログイン</td>")
 
+    def test_reversed_operation_date_range_shows_error(self):
+        """操作日(開始)＞(終了)は弾いてエラー文言を出す（review_pending.txt No.3、原本・xlsxに
+        無いがサーバー側の健全性チェックとして追加）。"""
+        from audit.forms import AuditLogSearchForm
+
+        form = AuditLogSearchForm(data={"date_start": "2026-06-01", "date_end": "2026-01-01"})
+        self.assertFalse(form.is_valid())
+        self.assertIn("date_end", form.errors)
+
+        response = self.client.get("/audit/", {"date_start": "2026-06-01", "date_end": "2026-01-01"})
+        self.assertContains(response, "操作日(終了)は操作日(開始)より前にできません。")
+
+    def test_same_day_operation_date_range_is_valid(self):
+        from audit.forms import AuditLogSearchForm
+
+        form = AuditLogSearchForm(data={"date_start": "2026-01-01", "date_end": "2026-01-01"})
+        self.assertTrue(form.is_valid())
+
     def test_filter_by_employee_name(self):
         response = self.client.get("/audit/", {"employee_name": "山田"})
         self.assertContains(response, "文書　ダウンロード")

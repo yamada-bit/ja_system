@@ -16,6 +16,9 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
 参照すべきはこのファイルのみ**。アーカイブは特定の過去の判断・バグ修正の詳しい経緯を掘り下げたい
 時にのみ開く）。
 
+原本HTML/xlsxの外側にある、コード側で必要な本番リリース前作業（static/js の minify など）は
+[RELEASE_PREP_NOTES.md](RELEASE_PREP_NOTES.md) に集約する。
+
 ## 実装状況サマリ
 - 第一陣（検索・保管画面）／第二陣（設定画面：職員マスタ〜権限管理）／第三陣（設定画面：
   分類マスタ〜その他設定）とも実装・原本フィデリティ監査完了。フェーズ8の全陣横断整合性
@@ -253,6 +256,15 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   論理削除（`RetentionDeleteView.post`）の `save(update_fields=[...])` に `updated_at` を追加し
   Group/Category の `BaseScopedMasterDeleteView` と挙動を揃えた。`manage.py test` 全819件PASS
   （新規1件）。`review_pending.txt` の見送り件数は 45→43件（No.23・No.24）。
+- `review_pending.txt` No.3（日付範囲の開始≦終了クロスフィールド検証が無い）の対応（2026-09-08、
+  ユーザー指示・リリース前作業）：原本・xlsxにこの検証は無いが、逆転入力は検索で「黙って0件」・
+  契約書保管で入力ミスをそのまま保存となり不親切なため、`core.forms.validate_date_range` を新設し
+  4フォームの `clean()` から適用（documents/contracts `SearchForm` の「期間」、
+  `audit.AuditLogSearchForm` の「操作日」、`contracts.UploadStep2Form` の「契約期間」）。開始==終了は
+  許可、開始>終了のみ終了フィールドのエラー。文言は `search.html`×2 / `log_list.html` に
+  `.field-error` で表示（`django_widgets.css` に検索条件パネル用の最小スタイル追加）。実ブラウザで
+  文書検索・操作履歴ログ画面のエラー表示を確認。`manage.py test` 全843件PASS（新規11件）。
+  見送り件数は 43→42件。
 - 「検索・閲覧・変更」B47/B417 追補：部署名の自動セットが**管理者で効いていなかった**修正
   （2026-09-08、ユーザー依頼）：検索画面の部署名欄が管理者だけ空だった（原本 html6 は
   ロール問わずプリフィル、保管画面は ARCHIVE2「Rev1.1反映」項5 で同種の漏れを修正済みだったが
