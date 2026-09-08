@@ -262,11 +262,13 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   4フォームの `clean()` から適用（documents/contracts `SearchForm` の「期間」、
   `audit.AuditLogSearchForm` の「操作日」、`contracts.UploadStep2Form` の「契約期間」）。開始==終了は
   許可、開始>終了のみ終了フィールドのエラー。文言は `search.html`×2 / `log_list.html` および
-  契約書保管の `storage2.html` / `edit.html`（契約期間行）に `.field-error` で表示
-  （`django_widgets.css` に検索条件パネル用の最小スタイル追加）。実ブラウザで文書検索・操作履歴
-  ログ・契約書編集画面のエラー表示を確認。`manage.py test` 全844件PASS（新規12件）。
-  見送り件数は 43→42件。※初回コミットで契約書保管/編集テンプレートへの表示追加が漏れており、
-  ユーザー報告を受けて追補（フォーム側 `clean()` は当初から機能していた）。
+  契約書保管の `storage2.html` / `edit.html` に `.field-error` で表示。契約期間行は1行ぴったりの
+  flexレイアウトのため `.field-error` を行内に置くと `:has(.field-error){flex-wrap}` で日付欄が
+  ズレる → この行だけエラーを `.form-row` の直後の兄弟にし `django_widgets.css` の
+  `.form-row + .field-error` で入力欄下に揃える。実ブラウザで文書検索・操作履歴ログ・契約書編集
+  画面のエラー表示・位置を確認。`manage.py test` 全844件PASS（新規12件）。見送り件数は 43→42件。
+  ※初回コミットで契約書保管/編集テンプレートへの表示追加が漏れ・その追補でも行内配置により
+  日付欄がズレ、いずれもユーザー報告を受けて修正（フォーム側 `clean()` は当初から機能）。
 - 「検索・閲覧・変更」B47/B417 追補：部署名の自動セットが**管理者で効いていなかった**修正
   （2026-09-08、ユーザー依頼）：検索画面の部署名欄が管理者だけ空だった（原本 html6 は
   ロール問わずプリフィル、保管画面は ARCHIVE2「Rev1.1反映」項5 で同種の漏れを修正済みだったが

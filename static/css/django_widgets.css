@@ -90,3 +90,16 @@ a.sort-link {
   color: #c0392b;
   font-size: 12px;
 }
+
+/*
+ * 契約書 保管／編集画面の「契約期間」行（storage2.html / edit.html）だけは、
+ * label＋日付2つ＋「～」で1行ぴったりに収める設計のため、エラーを .form-row の中に置くと
+ * .form-row:has(.field-error){flex-wrap} が効いて「終了」日付欄が次行へ折り返しズレる
+ * （上のコメント参照）。この行だけエラーを .form-row の直後の兄弟として出し、ラベル幅ぶん
+ * （.form-row label = 100px）字下げして入力欄の下に揃える。
+ */
+.form-row + .field-error {
+  margin: -2px 0 6px 100px;
+  color: #c0392b;
+  font-size: 12px;
+}

@@ -104,9 +104,11 @@
                 {% for error in title_field.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
               </div>
               <div class="form-row" style="margin-top:10px;"><label>契約日</label>{{ form.contract_date }}</div>
-              <div class="form-row"><label>契約期間</label>{{ form.contract_period_start }} ～ {{ form.contract_period_end }}
-                {% for error in form.contract_period_end.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
-              </div>
+              {# 契約期間行はlabel＋日付2つ＋「～」で1行ぴったりの設計。エラーを行内に入れると #}
+              {# .form-row:has(.field-error){flex-wrap} で終了欄が折り返してずれるため行の外へ出す #}
+              {# （django_widgets.css .form-row + .field-error）。 #}
+              <div class="form-row"><label>契約期間</label>{{ form.contract_period_start }} ～ {{ form.contract_period_end }}</div>
+              {% for error in form.contract_period_end.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
               <div class="form-row"><label>契約更新日</label>{{ form.renewal_date }}</div>
               <div class="form-row"><label>契約金額</label>{{ form.contract_amount }} 円</div>
               <div class="form-row"><label>契約先名</label>{{ form.contract_partner }}</div>
