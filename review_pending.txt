@@ -36,10 +36,14 @@ No.3（日付範囲の開始≦終了クロスフィールド検証が無い）�
 contracts.SearchForm の「期間」（save_date_start/end）、audit.AuditLogSearchForm の「操作日」
 （date_start/end）、contracts.UploadStep2Form の「契約期間」（contract_period_start/end、
 createモードは `_i` 添字ぶんループ）。開始==終了（単日）は許可、開始>終了のみ終了フィールドの
-エラーにする。エラー文言は search.html×2・log_list.html に `.field-error` で表示（`django_widgets.css`
-に `.search-condition-table`／`.master-search-panel` 用の最小スタイル追加）。実ブラウザで
-文書検索・操作履歴ログの両画面にエラーが出ることを確認。テスト新規11件、manage.py test 全843件PASS。
+エラーにする。エラー文言は search.html×2・log_list.html、および契約書保管の storage2.html・
+edit.html（契約期間行）に `.field-error` で表示（`django_widgets.css` に
+`.search-condition-table`／`.master-search-panel` 用の最小スタイル追加。`.form-row` は既存の
+`:has(.field-error)` 折り返しを流用）。実ブラウザで文書検索・操作履歴ログ・契約書編集画面に
+エラーが出ることを確認。テスト新規12件、manage.py test 全844件PASS。
 → 本ファイル「documents / contracts」#3 を削除、集計を10→9件・合計43→42件に更新。
+※初回コミット(e2a1875)では契約書保管/編集テンプレートへのエラー表示追加が漏れており、
+ユーザー報告を受けて storage2.html・edit.html にも追加（フォーム側 clean() は当初から機能）。
 
 No.24（masters.RetentionPeriod に updated_at が無く Group/Category と非対称）もユーザー指示で
 対応（リリース前作業）。RetentionPeriod に created_at / updated_at（auto_now_add / auto_now）を

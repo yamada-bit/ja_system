@@ -184,6 +184,32 @@ class DateRangeValidationTests(TestCase):
         self.category = Category.objects.create(
             code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
         )
+        self.client.login(username="1", password="x")
+
+    def test_contract_edit_screen_renders_reversed_period_error(self):
+        """契約書編集画面（edit.html）で契約期間の逆転入力エラーが「契約期間」行の下に出る。
+        ユーザー報告：フォーム側のclean()は入れたがテンプレートにエラー表示が無かった。"""
+        from contracts.models import Contract
+
+        contract = Contract(
+            title="契約A", department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.admin, expiry_date=datetime.date(2036, 1, 1),
+        )
+        contract.file.save("c.txt", ContentFile(b"x"), save=False)
+        contract.save()
+        token = self.client.get(f"/contracts/{contract.pk}/edit/").context["token"]
+        response = self.client.post(
+            f"/contracts/{contract.pk}/edit/",
+            {
+                "token": token, "department": self.department.pk, "group": self.group.pk,
+                "category": self.category.pk, "year": 2026, "title_0": "契約A",
+                "contract_period_start": "2026-12-31", "contract_period_end": "2026-01-01",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "契約期間(終了)は契約期間(開始)より前にできません。")
+        contract.refresh_from_db()
+        self.assertIsNone(contract.contract_period_start)
 
     def test_search_form_rejects_reversed_period(self):
         form = SearchForm(data={"save_date_start": "2026-06-01", "save_date_end": "2026-01-01"})

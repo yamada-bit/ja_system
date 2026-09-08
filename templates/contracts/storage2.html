@@ -112,7 +112,9 @@
                   {% for error in fs.fields.title.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
                 </div>
                 <div class="form-row" style="margin-top:10px;"><label>契約日</label>{{ fs.fields.contract_date }}</div>
-                <div class="form-row"><label>契約期間</label>{{ fs.fields.contract_period_start }} ～ {{ fs.fields.contract_period_end }}</div>
+                <div class="form-row"><label>契約期間</label>{{ fs.fields.contract_period_start }} ～ {{ fs.fields.contract_period_end }}
+                  {% for error in fs.fields.contract_period_end.errors %}<div class="field-error">{{ error }}</div>{% endfor %}
+                </div>
                 <div class="form-row"><label>契約更新日</label>{{ fs.fields.renewal_date }}</div>
                 <div class="form-row"><label>契約金額</label>{{ fs.fields.contract_amount }} 円</div>
                 <div class="form-row"><label>契約先名</label>{{ fs.fields.contract_partner }}</div>
