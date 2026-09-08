@@ -1205,3 +1205,20 @@ CSV所属長フラグ降格）しか塞いでおらず、**同じ Rev1.5 の 職
   `test_bulk_download_button_has_client_side_unselected_guard`、`BulkDownloadViewTests` の
   `test_no_selection_redirects_with_message` を新文言でアサート（契約書側は新規追加）。
   `manage.py test documents contracts core` 495件 PASS。
+
+### 検索・閲覧画面「文書イメージ」枠の初期プレースホルダが左寄せだった（2026-09-08 ユーザー報告）
+
+文書／契約書 検索・閲覧画面の初期表示で、プレビュー枠の「一覧から行を選択すると／ここに
+プレビューが表示されます」（＋📄）が中央でなく左寄りに表示されていた。
+
+- **原因**：原本 style.css は `.pdf-view-box` 自体に `justify-content: center` があり中央表示
+  だったが、ja_pj はズーム時のドラッグスクロールで左端に到達できるようにするため
+  `justify-content` を外している（`.pdf-view-box` のコメント参照）。その結果、枠幅より狭い
+  ブロックである `#search-preview-placeholder`（および権限不足文言）だけが主軸 flex-start＝
+  左寄せになっていた。実プレビュー表示要素（`#search-preview-frame` は `width:100%`、
+  `#search-pdfjs-preview` は `.pdfjs-preview` の `align-self:stretch`）は影響を受けない。
+- **修正**：`static/css/style.css` に `#search-preview-placeholder { margin-left:auto;
+  margin-right:auto; }` を追加（主軸方向のみ中央寄せを復元。cross 軸は `align-items:flex-start`
+  のまま＝原本と同じ上寄せ）。文書・契約書 search.html が同一 id を使うため1ルールで両対応。
+- **確認**：`seed_test_data` の管理者（9005）でログインし実プレビュー。枠 320px に対し
+  左右の余白が 43px / 43px で一致（修正前は左 0 相当）。コンソールエラーなし。

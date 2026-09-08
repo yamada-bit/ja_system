@@ -352,6 +352,17 @@ input[type="password"]::-ms-clear {
   min-width: 320px;  /* 確保したい最小幅（お好みのサイズに調整してください） */
   flex-shrink: 0;    /* 画面が狭くなったりテーブルが広がっても、この枠を縮小させない */
 }
+/* 検索・閲覧画面「文書イメージ」枠の初期プレースホルダ／権限不足文言。原本 style.css は
+   .pdf-view-box 自体に justify-content:center があり中央表示だったが、ja_pj はドラッグ
+   スクロール対応のため上記のとおり justify-content を外している。そのため枠幅より狭い
+   このブロックだけが左寄せになる（2026-09-08 ユーザー報告）。実プレビュー表示要素は
+   #search-preview-frame が width:100%、#search-pdfjs-preview が .pdfjs-preview の
+   align-self:stretch のため影響を受けない。ここだけ主軸方向の margin:auto で中央寄せを
+   復元する（cross 軸は align-items:flex-start のまま＝原本と同じく上寄せ）。 */
+#search-preview-placeholder {
+  margin-left: auto;
+  margin-right: auto;
+}
 .pdf-view-box2 {
   border: 1px solid var(--border-color);
   background: #666;
