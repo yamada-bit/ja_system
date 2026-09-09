@@ -7,7 +7,12 @@ from django.test import TestCase
 from accounts.csv_import_services import CsvImportError, import_staff_csv
 from accounts.forms import LoginForm, StaffEditForm, StaffRegistForm, StaffSearchForm
 from accounts.models import Employee, Position, Rank
-from accounts.services import LastAdminError, filter_staff_queryset, reset_permission_profile_if_needed
+from accounts.services import (
+    LastAdminError,
+    build_staff_edit_diff_message,
+    filter_staff_queryset,
+    reset_permission_profile_if_needed,
+)
 from audit.models import AuditLog
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
@@ -31,6 +36,19 @@ class EmployeeModelTests(TestCase):
         )
         self.assertNotEqual(employee.password, "plaintext123")
         self.assertTrue(employee.check_password("plaintext123"))
+
+    def test_create_user_without_employee_no_raises(self):
+        """A-1: EmployeeManager.create_user の
+        `if not employee_no: raise ValueError("職員番号は必須です")` 分岐（マネージャの基本異常系）。"""
+        with self.assertRaisesMessage(ValueError, "職員番号は必須です"):
+            Employee.objects.create_user(
+                employee_no="",
+                name="番号なし太郎",
+                password="x",
+                department=self.department,
+                rank=Rank.KOSAYAKU,
+                position=Position.KACHO,
+            )
 
 
 class LoginFormTests(TestCase):
@@ -734,6 +752,113 @@ class StaffRegistEditAuditLogTests(TestCase):
         self.assertTrue(any("二重に送信された可能性" in m for m in messages))
 
 
+class StaffRegistEditInvalidFormTests(TestCase):
+    """A-2 / A-3: 入力ミスで form.is_valid()==False のときの再表示経路
+    （トークン再発行・フォーム再描画・未保存）。フォーム単体バリデーション
+    （StaffRegistFormTests / StaffEditFormTests）とトークン不正・IntegrityError は
+    別途カバー済みだが、最頻出の入力ミス経路が HTTP 統合テストで空白だった。
+    """
+
+    def setUp(self):
+        self.dept1 = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept2 = Department.objects.create(
+            branch_code="222", branch_name="移動先支店", section_code="", section_name=""
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.dept1, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_regist_post_with_duplicate_employee_no_redisplays_form(self):
+        """A-2: 職員番号重複で is_valid()==False。トークン再発行・フォーム再描画・未作成。"""
+        Employee.objects.create_user(
+            employee_no="7777", name="既存太郎", password="x", department=self.dept1,
+            rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        token = self.client.get("/accounts/staff/regist/").context["token"]
+        response = self.client.post(
+            "/accounts/staff/regist/",
+            {
+                "token": token, "employee_no": "7777", "name": "重複太郎",
+                "department": self.dept1.pk, "rank": Rank.KOSAYAKU, "position": Position.KACHO,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["form"].is_valid())
+        self.assertContains(response, "既に登録されています")
+        # 消費済みトークンではなく新しいトークンが再発行されている。
+        self.assertNotEqual(response.context["token"], token)
+        self.assertFalse(Employee.objects.filter(name="重複太郎").exists())
+
+    def test_edit_post_with_invalid_form_redisplays_without_saving_or_resetting(self):
+        """A-3: 氏名空で is_valid()==False。所属部署を変更していても「未保存・
+        reset_permission_profile_if_needed も呼ばれない」（＝権限リセットの監査ログが出ない）。"""
+        target = Employee.objects.create_user(
+            employee_no="8080", name="編集対象", password="x", department=self.dept1,
+            rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        profile = PermissionProfile.objects.create(
+            employee=target, role=PermissionRole.ADMIN, doc_download=True
+        )
+        token = self.client.get(f"/accounts/staff/{target.pk}/edit/").context["token"]
+        response = self.client.post(
+            f"/accounts/staff/{target.pk}/edit/",
+            {
+                "token": token, "name": "",  # 必須エラー
+                "department": self.dept2.pk,  # 変更しているが保存されないはず
+                "rank": Rank.KOSAYAKU, "position": Position.KACHO,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["form"].is_valid())
+        self.assertNotEqual(response.context["token"], token)
+        target.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(target.name, "編集対象")
+        self.assertEqual(target.department_id, self.dept1.pk)
+        self.assertEqual(profile.role, PermissionRole.ADMIN)
+        self.assertTrue(profile.doc_download)
+        self.assertFalse(AuditLog.objects.filter(action="権限管理　自動リセット").exists())
+
+
+class BuildStaffEditDiffMessageTests(TestCase):
+    """A-4: build_staff_edit_diff_message の所属部署／役職／退職 差分文言
+    （xlsx 操作履歴ログ!B69-70）。統合テストで氏名・職階・パスワードマーカー・無変更は
+    カバー済みだが、この3項目の差分文言生成は一度も検証されていなかった。監査ログの正確性に直結。
+    """
+
+    def setUp(self):
+        self.dept1 = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept2 = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="02", section_name="営業部"
+        )
+
+    def test_department_position_retired_diff_message(self):
+        employee = Employee.objects.create_user(
+            employee_no="1", name="差分太郎", password="x",
+            department=self.dept2, rank=Rank.KOSAYAKU, position=Position.KACHO, is_retired=True,
+        )
+        message = build_staff_edit_diff_message(
+            employee,
+            before_name="差分太郎",
+            before_department=self.dept1,
+            before_rank=Rank.KOSAYAKU,
+            before_position=Position.IPPAN,
+            before_is_retired=False,
+            password_changed=False,
+        )
+        self.assertEqual(
+            message,
+            "職員：差分太郎(1),所属部署：総務部 -> 営業部,役職：一般職 -> 課長,退職：在籍 -> 退職",
+        )
+
+
 class StaffEditViewResetPermissionIntegrationTests(TestCase):
     """StaffEditView.postがbefore_department_id等の差分検出ロジックを介して
     reset_permission_profile_if_neededを実際に「変更あり」で駆動する経路の統合テスト。
@@ -1236,6 +1361,65 @@ class ImportStaffCsvServiceTests(TestCase):
         entry = AuditLog.objects.get(action="職員マスタ　CSV取込 所属長昇格")
         self.assertIn("0832", entry.event_message)
 
+    def test_import_records_summary_audit_log(self):
+        """A-5: 取込全体のサマリを記録する audit_services.log(action="職員マスタ　CSV取込")
+        本体（event_message にサマリ文字列を含む）。サブアクション（所属長昇降格）の監査ログは
+        検証済みだが、このサマリログ自体が未検証だった。"""
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,0"])
+        import_staff_csv(upload, actor=self.actor)
+        entry = AuditLog.objects.get(action="職員マスタ　CSV取込")
+        self.assertEqual(entry.employee_no, "9999")
+        self.assertIn("職員マスタCSV取込", entry.event_message)
+        self.assertIn("新規登録1件", entry.event_message)
+
+    def test_unchanged_row_increments_unchanged_counter(self):
+        """A-6: 既存職員と CSV 行が完全一致（氏名・部署・役職・職階すべて同一、退職遷移なし）
+        の場合に summary.unchanged が +1 される分岐（xlsx B121-122 系の「変更なし」集計精度）。"""
+        Employee.objects.create_user(
+            employee_no="0832", name="農協 太郎", password="x",
+            department=self.actor_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,0"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(summary.unchanged, 1)
+        self.assertEqual(summary.updated, 0)
+        self.assertEqual(summary.created, 0)
+        self.assertEqual(summary.retired, 0)
+
+    def test_new_employee_with_manager_flag_is_promoted(self):
+        """A-7: 新規職員は STAFF で作成後 _apply_manager_flag で MANAGER へ昇格する複合経路
+        （PermissionProfile.objects.create 直後の昇格）。既存 test は既存職員のみ。"""
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,1"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(summary.created, 1)
+        employee = Employee.objects.get(employee_no="0832")
+        self.assertEqual(employee.permission_profile.role, PermissionRole.MANAGER)
+
+    def test_new_employee_with_section_code_99_is_created_retired(self):
+        """A-8: 新規行で section_code=="99" のとき create_user(is_retired=True) になる分岐。
+        既存職員の退職遷移はカバー済みだが、新規かつ最初から退職のケースが未検証だった。"""
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,99,退職,16,課長,20,考査役,0"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(summary.created, 1)
+        employee = Employee.objects.get(employee_no="0832")
+        self.assertTrue(employee.is_retired)
+
+    def test_manager_flag_creates_manager_profile_when_missing(self):
+        """A-9: manager_flag=="1" だが対象職員に PermissionProfile が無い場合、
+        _apply_manager_flag は get_or_create(defaults={"role": MANAGER}) で MANAGER を
+        新規作成し即 return する分岐。既存 test は必ず profile を先に作っている。"""
+        Employee.objects.create_user(
+            employee_no="0832", name="農協 太郎", password="x",
+            department=self.actor_department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.assertFalse(
+            PermissionProfile.objects.filter(employee__employee_no="0832").exists()
+        )
+        upload = _csv_upload(["0832,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,1"])
+        import_staff_csv(upload, actor=self.actor)
+        profile = PermissionProfile.objects.get(employee__employee_no="0832")
+        self.assertEqual(profile.role, PermissionRole.MANAGER)
+
 
 class StaffCsvImportViewTests(TestCase):
     def setUp(self):
@@ -1309,3 +1493,34 @@ class StaffCsvImportViewTests(TestCase):
         self.assertTrue(Employee.objects.filter(employee_no="0832").exists())
         messages = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("一部エラーがありました" in m for m in messages))
+
+
+class UnauthenticatedAccessRedirectTests(TestCase):
+    """X-1: 未認証アクセス時のログインリダイレクト（LoginRequiredMixin）。職員マスタは
+    氏名・所属等の個人情報を含む画面のため、未ログインで到達しないことの回帰保護。
+    Mixin の MRO（LoginRequiredMixin, SettingsMenuAccessMixin, View）が全ビューで一貫し、
+    未認証時に get_role(AnonymousUser) へ進んで 500 にならず 302 になることの担保も兼ねる（X-2）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.target = Employee.objects.create_user(
+            employee_no="2", name="対象太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+
+    def test_staff_views_redirect_anonymous_to_login(self):
+        for path in (
+            "/accounts/staff/",
+            "/accounts/staff/csv/",
+            "/accounts/staff/csv/import/",
+            "/accounts/staff/regist/",
+            f"/accounts/staff/{self.target.pk}/",
+            f"/accounts/staff/{self.target.pk}/edit/",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 302)
+                self.assertIn("/accounts/login/", response["Location"])

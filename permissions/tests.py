@@ -34,6 +34,20 @@ class PermissionServicesTests(TestCase):
         """権限プロファイル未設定の職員は最も制限の強い一般扱い。"""
         self.assertEqual(get_role(self.employee), PermissionRole.STAFF)
 
+    def test_get_profile_returns_none_for_object_without_permission_profile_attr(self):
+        """P-6: review_code_permissions_accounts No.1 で追加した保険
+        （permission_profile 属性自体を持たない AnonymousUser 等 → None を返す）の単体テスト。
+        呼び出し側は None を最も制限の強い扱いにするため、未認証で権限が緩む方向には働かない。
+        """
+        from django.contrib.auth.models import AnonymousUser
+
+        from permissions.services import get_profile, is_admin
+
+        anon = AnonymousUser()
+        self.assertIsNone(get_profile(anon))
+        self.assertEqual(get_role(anon), PermissionRole.STAFF)
+        self.assertFalse(is_admin(anon))
+
     def test_get_role_reflects_profile(self):
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
         self.assertEqual(get_role(self.employee), PermissionRole.ADMIN)
@@ -406,6 +420,43 @@ class AuthorityListSortTests(TestCase):
         self.assertEqual(list(qs), [self.emp_a])
 
 
+class AuthorityListDepartmentScopeTests(TestCase):
+    """P-7: AuthorityListView.get（HTTP 経由）の所属長スコープ。visible_employees の
+    「非管理者は自部署のみ」絞り込みは CSV 側
+    （AuthorityCsvExportViewTests.test_export_respects_department_scoping_for_manager）
+    では検証済みだが、一覧画面本体では viewer=管理者のケースしかテストしていなかった。
+    """
+
+    def setUp(self):
+        self.dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.other_dept = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        self.manager = Employee.objects.create_user(
+            employee_no="1", name="所属長太郎", password="pass1234",
+            department=self.dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.manager, role=PermissionRole.MANAGER)
+        self.same_dept = Employee.objects.create_user(
+            employee_no="2", name="同部署太郎", password="x",
+            department=self.dept, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        self.other = Employee.objects.create_user(
+            employee_no="3", name="他部署太郎", password="x",
+            department=self.other_dept, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_manager_list_excludes_other_department_employees(self):
+        response = self.client.get("/permissions/")
+        listed = set(response.context["page_obj"].object_list)
+        self.assertIn(self.manager, listed)
+        self.assertIn(self.same_dept, listed)
+        self.assertNotIn(self.other, listed)
+
+
 class AuthorityEditFormTests(TestCase):
     """権限管理編集フォームは原本の全項目を含むこと（Rev1.1で権限管理!B167-215の構成に
     再編。旧フィールド漏れの再発防止という趣旨を引き継ぎ、新構成の項目一覧を検証する）。
@@ -633,6 +684,62 @@ class AuthorityEditViewTests(TestCase):
         self.client.post(f"/permissions/{self.other_employee.pk}/edit/", {"role": PermissionRole.STAFF, "token": token})
         self.assertTrue(AuditLog.objects.filter(action="権限管理　更新").exists())
 
+    def test_get_creates_permission_profile_for_unset_employee(self):
+        """P-5: 「未設定」職員の編集画面に入った時点で get_or_create により
+        role=STAFF・全フラグ False のプロファイルを確定する仕様（AuthorityEditView docstring
+        明記）。既存 test は profile 無しの職員を GET して 200 になることは見ているが、
+        プロファイルが実際に作成されたことを assert していなかった。
+        """
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.assertFalse(
+            PermissionProfile.objects.filter(employee=self.other_employee).exists()
+        )
+        response = self.client.get(f"/permissions/{self.other_employee.pk}/edit/")
+        self.assertEqual(response.status_code, 200)
+        profile = PermissionProfile.objects.get(employee=self.other_employee)
+        self.assertEqual(profile.role, PermissionRole.STAFF)
+        self.assertFalse(any(getattr(profile, name) for name in FLAG_FIELDS))
+        for name in MULTI_FIELDS:
+            self.assertEqual(list(getattr(profile, name).all()), [])
+
+    def test_admin_post_updates_flags_and_m2m_then_redirects(self):
+        """P-4: 画面の主目的（role 以外の項目更新）の正常系。既存 POST テストは全て role の
+        変更（昇格阻止・降格阻止・0人ガード）に集中しており、フラグ ON/OFF や
+        doc_visible_groups の M2M 保存を伴う「成功→success メッセージ→authority_list へ
+        リダイレクト」経路が HTTP でもフォーム保存でも一度も実行されていなかった。
+        form.save() ＋ _save_m2m() の結線バグを検知する。
+        """
+        from masters.models import DocKbn, Group
+
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        profile = PermissionProfile.objects.create(
+            employee=self.other_employee, role=PermissionRole.STAFF
+        )
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        token = self.client.get(f"/permissions/{self.other_employee.pk}/edit/").context["token"]
+        response = self.client.post(
+            f"/permissions/{self.other_employee.pk}/edit/",
+            {
+                "role": PermissionRole.STAFF,
+                "token": token,
+                "doc_download": "on",
+                "contract_edit": "on",
+                "doc_visible_groups": [group.pk],
+            },
+            follow=True,
+        )
+        self.assertRedirects(response, "/permissions/")
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("権限設定を更新しました" in m for m in messages))
+        profile.refresh_from_db()
+        self.assertTrue(profile.doc_download)
+        self.assertTrue(profile.contract_edit)
+        self.assertFalse(profile.contract_download)
+        self.assertEqual(list(profile.doc_visible_groups.all()), [group])
+        from audit.models import AuditLog
+
+        self.assertTrue(AuditLog.objects.filter(action="権限管理　更新").exists())
+
     def test_unauthenticated_get_redirects_to_login(self):
         """review_code_permissions_accounts No.1：AuthorityEditView.dispatch は自前で
         get_object_or_404 → can_manage_target → logger.warning(... employee_no ...) を
@@ -723,6 +830,57 @@ class AuthorityCsvExportViewTests(TestCase):
         content = response.content.decode("utf-8-sig")
         self.assertIn("職員番号,部署,氏名,役職,権限", content)
         self.assertIn("1,総務部,管理者太郎,課長,管理者", content)
+
+    def test_export_row_for_employee_without_profile(self):
+        """P-1: PermissionProfile 未設定の職員を CSV 出力すると role 列 "未設定" ＋
+        フラグ列すべて空文字になる分岐（_flags_row の `if profile is None:
+        return [""] * len(CSV_EXPORT_FIELDS)`）。新入職員・権限管理未実施で実データに
+        頻出する状態だが、既存 test は setUp で必ず profile を作っており未検証だった。
+        """
+        other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        Employee.objects.create_user(
+            employee_no="2", name="未設定太郎", password="x", department=other_department,
+            rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        response = self.client.get("/permissions/csv/")
+        content = response.content.decode("utf-8-sig")
+        # role 列 "未設定" に続き、フラグ列（CSV_EXPORT_FIELDS 相当）はすべて空文字
+        # ＝末尾に空フィールド分のカンマだけが並ぶ。
+        self.assertIn(
+            "2,別支店,未設定太郎,一般職,未設定" + "," * len(CSV_EXPORT_FIELDS) + "\r\n",
+            content,
+        )
+
+    def test_export_multi_select_fields_are_joined_in_correct_columns(self):
+        """P-2: doc_visible_groups / contract_visible_departments が設定された行で、
+        M2M 値の文字列化（`",".join(str(obj) ...)`）が CSV_EXPORT_FIELDS の列順どおりに
+        出力されること（既存 test はヘッダーと基本5列までしか assert していなかった）。
+        """
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        dept = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        profile = PermissionProfile.objects.get(employee=self.employee)
+        profile.doc_visible_groups.add(group)
+        profile.contract_visible_departments.add(dept)
+        response = self.client.get("/permissions/csv/")
+        content = response.content.decode("utf-8-sig")
+        # 列順: 権限, doc_visible_groups, doc_retention_edit(False→""),
+        #       doc_download(True→"〇"), contract_visible_departments, 以降すべて空。
+        self.assertIn("管理者,分類Ａ,,〇,別支店,,,,,," + "\r\n", content)
+
+    def test_export_flag_true_renders_maru_in_correct_column(self):
+        """P-3: フラグ境界（True→"〇" / False→""）の実出力位置を固定する。
+        setUp で doc_download=True のみ与えているため、doc_download 列だけ "〇"、
+        他フラグ列は空文字になる（既存 test は "1,総務部,…,管理者" までしか見ていない）。
+        """
+        response = self.client.get("/permissions/csv/")
+        content = response.content.decode("utf-8-sig")
+        # 権限, doc_visible_groups(""), doc_retention_edit(""), doc_download("〇"),
+        # 以降 CSV_EXPORT_FIELDS の残り6列すべて空。
+        self.assertIn("管理者,,,〇" + "," * (len(CSV_EXPORT_FIELDS) - 3) + "\r\n", content)
 
     def test_export_respects_department_scoping_for_manager(self):
         """管理者以外は自部署の職員のみCSVに含まれる（一覧画面と同じ絞込み）。"""
@@ -930,4 +1088,19 @@ class AuthorityListOperationColumnStickyTests(TestCase):
         self.assertIn("function fixAuthorityStickyOffsets()", js)
         self.assertIn("for (let i = 1; i <= 6; i++)", js)
         self.assertNotIn("for (let i = 1; i <= 5; i++)", js)
+
+
+class UnauthenticatedAccessRedirectTests(TestCase):
+    """X-1: 未認証アクセス時のログインリダイレクト。AuthorityEditView（302）と
+    api OptionListAPIView（302）のみ検証済みで、一覧・CSV出力（LoginRequiredMixin +
+    SettingsMenuAccessMixin）が未検証だった。所属長にも開かれた権限情報の一覧のため、
+    未ログインで到達しないことの回帰保護を入れる。
+    """
+
+    def test_authority_views_redirect_anonymous_to_login(self):
+        for path in ("/permissions/", "/permissions/csv/"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 302)
+                self.assertIn("/accounts/login/", response["Location"])
 
