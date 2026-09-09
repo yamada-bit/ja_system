@@ -551,6 +551,48 @@ class DeptEditViewMergeSplitTests(TestCase):
         # 部署マスタからの削除は行わない（Rev1.1で論理削除から閲覧部署範囲テーブル更新へ変更）。
         self.assertTrue(Department.objects.filter(pk=self.dept_y.pk).exists())
 
+    def test_split_via_view_creates_scopes_audit_log_and_message(self):
+        """No.3（テストカバレッジ棚卸し第2版、2026-09-10追加）：統合はView経由で検証済み
+        （上のtest_merge_via_view_...）だが、分割はform層（DeptEditFormTests.
+        test_split_action_requires_target）とservice層（ApplyDeptActionTests.
+        test_split_grants_targets_visibility_into_editing_department）に分かれており、
+        View→form→apply_dept_action→監査ログの一気通しが未検証だった。統合と分割で
+        DepartmentViewScopeの向き（viewer/visible）が逆になるため、View側の受け渡しミスを
+        検知できるようにする。複数対象を渡し、target_namesが「、」連結されることも確認する。
+        """
+        dept_z = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="03", section_name="部署Z"
+        )
+        token = self.client.get(f"/organizations/{self.dept_x.pk}/edit/").context["token"]
+        response = self.client.post(
+            f"/organizations/{self.dept_x.pk}/edit/",
+            {
+                "token": token, "branch_name": "本店", "section_name": "部署X",
+                "dept_action": "split",
+                # PopupSelectWidget(multi=True) はカンマ区切りの単一文字列で複数値を受け取る
+                # （core.widgets.PopupSelectWidget.value_from_datadict 参照）。
+                "dept_action_target": f"{self.dept_y.pk},{dept_z.pk}",
+            },
+            follow=True,
+        )
+        self.assertRedirects(response, "/organizations/")
+        # (a) 分割の向き：viewer=対象部署、visible=編集中の部署（統合とは逆）。
+        scopes = {
+            (s.viewer_department_id, s.visible_department_id)
+            for s in DepartmentViewScope.objects.all()
+        }
+        self.assertEqual(
+            scopes,
+            {(self.dept_y.pk, self.dept_x.pk), (dept_z.pk, self.dept_x.pk)},
+        )
+        # (b) 監査ログ "部署管理　分割"（target_names 付き、複数対象は「、」連結）。
+        entry = AuditLog.objects.get(action="部署管理　分割")
+        self.assertIn("部署Y、部署Z", entry.event_message)
+        self.assertIn(str(self.dept_x), entry.event_message)
+        # (c)(d) 成功メッセージも分割・「、」連結。
+        msgs = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("分割を反映しました" in m and "部署Y、部署Z" in m for m in msgs))
+
 
 class BranchAndSectionChoicesTests(TestCase):
     """organizations.services.branch_choices/section_choices（accounts.forms.StaffSearchForm・
@@ -699,6 +741,74 @@ class DeptListViewSearchTests(TestCase):
             desc = [d.pk for d in self.client.get("/organizations/", {"sort": field, "dir": "desc"}).context["departments"]]
             self.assertEqual(asc, list(reversed(desc)), f"sort={field}")
             self.assertEqual(set(asc), {self.dept_a.pk, self.dept_b.pk})
+
+
+class DeptFormValidationErrorRerenderTests(TestCase):
+    """No.6（テストカバレッジ棚卸し第2版、2026-09-10追加）：DeptRegistView / DeptEditView の
+    一般的な入力不正時の再描画パスと、DeptListView の検索フォーム invalid 時のフォールバック。
+    現状の form 系テストは「重複」「統合 target 必須」のみで、必須欠落など一般的なバリデーション
+    エラー時に View が 500 にならず・token を再発行してフォームを再描画すること、および
+    DeptListView が invalid な choice を受けたとき絞り込みをスキップして全件表示すること
+    （`if form.is_valid()` の else 相当）が未検証だった。
+    """
+
+    def setUp(self):
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept_b = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="02", section_name="経理部"
+        )
+        self.operator = Employee.objects.create_user(
+            employee_no="1", name="操作太郎", password="pass1234",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.operator, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_regist_missing_required_field_rerenders_form_with_new_token(self):
+        first_token = self.client.get("/organizations/regist/").context["token"]
+        response = self.client.post(
+            "/organizations/regist/",
+            # 本支所コードを欠落させる（必須エラー）。
+            {"token": first_token, "branch_code": "", "branch_name": "新支店",
+             "section_code": "01", "section_name": "総務部"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["form"].errors)
+        self.assertFalse(Department.objects.filter(branch_name="新支店").exists())
+        # 二重送信トークンが再発行され、そのまま再送信できること。
+        new_token = response.context["token"]
+        self.client.post(
+            "/organizations/regist/",
+            {"token": new_token, "branch_code": "555", "branch_name": "新支店",
+             "section_code": "01", "section_name": "総務部"},
+        )
+        self.assertTrue(Department.objects.filter(branch_code="555").exists())
+
+    def test_edit_invalid_input_rerenders_form_with_new_token(self):
+        token = self.client.get(f"/organizations/{self.dept_a.pk}/edit/").context["token"]
+        response = self.client.post(
+            f"/organizations/{self.dept_a.pk}/edit/",
+            # 本支所名を欠落させる（必須エラー）。
+            {"token": token, "branch_name": "", "section_name": "総務部", "dept_action": "none"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["form"].errors)
+        self.assertIn("token", response.context)
+        self.dept_a.refresh_from_db()
+        self.assertEqual(self.dept_a.branch_name, "本店")
+
+    def test_list_with_invalid_branch_code_choice_shows_all_departments(self):
+        """DeptSearchForm.branch_code は実データ由来の choices のため、選択肢に無い値は
+        ChoiceField バリデーションで invalid になる。その場合 `if form.is_valid()` の else に
+        落ち、絞り込みをスキップして全件表示する。"""
+        response = self.client.get("/organizations/", {"branch_code": "不正な値"})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["form"].is_valid())
+        self.assertEqual(
+            set(response.context["departments"]), {self.dept_a, self.dept_b}
+        )
 
 
 class AdminSiteTests(TestCase):

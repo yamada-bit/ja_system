@@ -1767,6 +1767,211 @@ class CategoryFormFieldErrorRenderingTests(TestCase):
         self.assertEqual(self.category.doc_kbn, DocKbn.DOCUMENT)
 
 
+class MasterAdminDepartmentFilterTests(TestCase):
+    """No.1（テストカバレッジ棚卸し第2版、2026-09-10追加）：GroupListView/CategoryListViewの
+    `apply_search_filters`にある管理者向け「部署」検索フィルタ
+    （`if is_admin and form.cleaned_data.get("department")`）は、DepartmentScopingTests側で
+    プルダウンが描画されることのみ確認しており、実際に部署で絞り込めることが未検証だった。
+    部署は権限境界に直結する項目のため、`?department=<pk>`指定で当該部署のマスタのみに
+    絞られることを直接検証する。
+    """
+
+    def setUp(self):
+        self.dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="pass1234",
+            department=self.dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_list_filtered_by_department(self):
+        group_a = Group.objects.create(
+            code="10", name="総務分類", doc_kbn=DocKbn.DOCUMENT, department=self.dept_a
+        )
+        group_b = Group.objects.create(
+            code="20", name="経理分類", doc_kbn=DocKbn.DOCUMENT, department=self.dept_b
+        )
+        response = self.client.get("/masters/class/", {"department": self.dept_b.pk})
+        self.assertEqual(list(response.context["page_obj"]), [group_b])
+        self.assertNotIn(group_a, list(response.context["page_obj"]))
+
+    def test_category_list_filtered_by_department(self):
+        group_a = Group.objects.create(
+            code="A1", name="総務分類", doc_kbn=DocKbn.DOCUMENT, department=self.dept_a
+        )
+        group_b = Group.objects.create(
+            code="A2", name="経理分類", doc_kbn=DocKbn.DOCUMENT, department=self.dept_b
+        )
+        cat_a = Category.objects.create(
+            code="100", name="総務カテゴリ", group=group_a, doc_kbn=DocKbn.DOCUMENT, department=self.dept_a
+        )
+        cat_b = Category.objects.create(
+            code="200", name="経理カテゴリ", group=group_b, doc_kbn=DocKbn.DOCUMENT, department=self.dept_b
+        )
+        response = self.client.get("/masters/cat/", {"department": self.dept_b.pk})
+        self.assertEqual(list(response.context["page_obj"]), [cat_b])
+        self.assertNotIn(cat_a, list(response.context["page_obj"]))
+
+
+class RetentionInitialFromQueryParamsTests(TestCase):
+    """No.4（テストカバレッジ棚卸し第2版、2026-09-10追加）：RetentionRegistView._initial /
+    RetentionEditView（GET）は、一覧の選択状態（kbn/doc_name）を登録・編集画面へ引き継ぐ
+    機構の入口側。出口（完了後リダイレクトの引き継ぎ）はRetentionRedirectPreservesSelectionTests
+    で検証済みだが、入口＝遷移してきた画面の初期描画が未検証だった
+    （「電子決裁区分で登録を開いたのに文書区分のフォームが出る」類の退行を拾えない）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_regist_get_carries_eapproval_kbn_and_doc_name_into_form(self):
+        response = self.client.get(
+            "/masters/retention/regist/", {"kbn": RetentionKbn.EAPPROVAL, "doc_name": "keihi"}
+        )
+        form = response.context["form"]
+        self.assertEqual(form.initial["kbn"], RetentionKbn.EAPPROVAL)
+        self.assertEqual(form.initial["doc_name"], "keihi")
+
+    def test_regist_get_clears_doc_name_for_document_kbn(self):
+        """`doc_name = GET.get(...) if kbn == EAPPROVAL else ""` の三項分岐。文書区分では
+        doc_name クエリが付いていても空に落とす。"""
+        response = self.client.get(
+            "/masters/retention/regist/", {"kbn": RetentionKbn.DOCUMENT, "doc_name": "keihi"}
+        )
+        form = response.context["form"]
+        self.assertEqual(form.initial["kbn"], RetentionKbn.DOCUMENT)
+        self.assertEqual(form.initial["doc_name"], "")
+
+    def test_edit_get_puts_instance_kbn_and_doc_name_into_hidden_fields(self):
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.EAPPROVAL, doc_name="ringisho", period_value=2,
+            period_unit=RetentionPeriodUnit.YEAR, display_order=1,
+        )
+        response = self.client.get(f"/masters/retention/{period.pk}/edit/")
+        form = response.context["form"]
+        self.assertEqual(form["kbn"].value(), RetentionKbn.EAPPROVAL)
+        self.assertEqual(form["doc_name"].value(), "ringisho")
+
+
+class RetentionDeletedRecordReturns404Tests(TestCase):
+    """No.5（テストカバレッジ棚卸し第2版、2026-09-10追加）：RetentionEditView /
+    RetentionDeleteView の `get_object_or_404(RetentionPeriod, pk=pk, is_deleted=False)` に
+    対する異常系（論理削除済みレコードへの URL 直叩き・削除の二度押し）。Group/Category は
+    scoped_lookup が is_deleted=False で絞るため実質カバー済みだが、Retention は独自実装で
+    この経路の回帰テストが無かった。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+        self.deleted = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR,
+            display_order=1, is_deleted=True,
+        )
+
+    def test_edit_get_on_deleted_period_returns_404(self):
+        self.assertEqual(
+            self.client.get(f"/masters/retention/{self.deleted.pk}/edit/").status_code, 404
+        )
+
+    def test_edit_post_on_deleted_period_returns_404(self):
+        response = self.client.post(
+            f"/masters/retention/{self.deleted.pk}/edit/",
+            {
+                "token": "x", "kbn": RetentionKbn.DOCUMENT, "doc_name": "",
+                "period_value": "9", "period_unit": RetentionPeriodUnit.YEAR, "display_order": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_get_on_deleted_period_returns_404(self):
+        self.assertEqual(
+            self.client.get(f"/masters/retention/{self.deleted.pk}/delete/").status_code, 404
+        )
+
+    def test_delete_post_on_deleted_period_returns_404(self):
+        response = self.client.post(
+            f"/masters/retention/{self.deleted.pk}/delete/", {"token": "x"}
+        )
+        self.assertEqual(response.status_code, 404)
+
+
+class MasterAdminDepartmentSortTests(TestCase):
+    """No.2（テストカバレッジ棚卸し第2版、2026-09-10追加）：GroupListView/CategoryListView
+    （BaseScopedMasterListView）の`sort_key == "department" and is_admin`分岐
+    ＝organizations.services.department_composite_order_byは、DepartmentScopingTests側で
+    「非管理者では無効」だけが検証されており、管理者が実際に使ったときの並び順が未検証だった。
+    department_composite_order_by自体の単体テストも無い。
+
+    部課コード(section_code)のみでソートすると本支所(branch_code)をまたいで無関係に並ぶ
+    既知の落とし穴（services.pyコメント参照）を突くよう、branch_code×section_codeの複合キー順が
+    section_code単独の順と食い違う2部署を用意し、asc/descで本支所コード→部課コードの
+    複合キー順（descは完全逆順）になることを検証する。
+    """
+
+    def setUp(self):
+        # 複合キー asc: dept_low("000","50") → dept_high("100","10")
+        # section_code 単独 asc なら dept_high("10") → dept_low("50") で逆になる。
+        self.dept_low = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="50", section_name="管財部"
+        )
+        self.dept_high = Department.objects.create(
+            branch_code="100", branch_name="支店", section_code="10", section_name="総務部"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="pass1234",
+            department=self.dept_low, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.client.login(username="1", password="pass1234")
+
+    def test_group_list_sort_by_department_uses_branch_then_section_composite_key(self):
+        g_low = Group.objects.create(
+            code="1", name="G-low", doc_kbn=DocKbn.DOCUMENT, department=self.dept_low
+        )
+        g_high = Group.objects.create(
+            code="2", name="G-high", doc_kbn=DocKbn.DOCUMENT, department=self.dept_high
+        )
+        asc = self.client.get("/masters/class/", {"sort": "department", "dir": "asc"})
+        self.assertEqual(list(asc.context["page_obj"]), [g_low, g_high])
+        desc = self.client.get("/masters/class/", {"sort": "department", "dir": "desc"})
+        self.assertEqual(list(desc.context["page_obj"]), [g_high, g_low])
+
+    def test_category_list_sort_by_department_uses_branch_then_section_composite_key(self):
+        group = Group.objects.create(code="G", name="共通分類", doc_kbn=DocKbn.DOCUMENT)
+        c_low = Category.objects.create(
+            code="1", name="C-low", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.dept_low
+        )
+        c_high = Category.objects.create(
+            code="2", name="C-high", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.dept_high
+        )
+        asc = self.client.get("/masters/cat/", {"sort": "department", "dir": "asc"})
+        self.assertEqual(list(asc.context["page_obj"]), [c_low, c_high])
+        desc = self.client.get("/masters/cat/", {"sort": "department", "dir": "desc"})
+        self.assertEqual(list(desc.context["page_obj"]), [c_high, c_low])
+
+
 class AdminSiteTests(TestCase):
     """review_pending.txt No.23への対応。分類・カテゴリー・保存期間設定は管理サイトに
     登録するが閲覧専用（アプリ側CRUD画面の論理削除・重複制御・監査ログを迂回させない）、
