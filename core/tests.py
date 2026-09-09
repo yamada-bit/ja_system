@@ -539,18 +539,18 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
         doc.save()
         return doc
 
-    def _create_contract(self, deleted_at):
+    def _create_contract(self, deleted_at=None, code="C1"):
         from contracts.models import Contract
 
-        contract_group = Group.objects.create(code="C1", name="契約分類", doc_kbn=DocKbn.CONTRACT)
+        contract_group = Group.objects.create(code=code, name="契約分類", doc_kbn=DocKbn.CONTRACT)
         contract_category = Category.objects.create(
-            code="C01", name="契約カテゴリー", group=contract_group, doc_kbn=DocKbn.CONTRACT
+            code=f"{code}01", name="契約カテゴリー", group=contract_group, doc_kbn=DocKbn.CONTRACT
         )
         contract = Contract(
             title="テスト契約書", department=self.department, group=contract_group, category=contract_category,
             year=2026, uploader=self.employee,
             expiry_date=timezone.localdate() + datetime.timedelta(days=100),
-            is_deleted=True, deleted_at=deleted_at,
+            is_deleted=deleted_at is not None, deleted_at=deleted_at,
         )
         contract.file.save("test.pdf", ContentFile(b"dummy"), save=False)
         contract.save()
@@ -600,20 +600,23 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
         self.assertFalse(Contract.objects.filter(pk=old_contract.pk).exists())
         self.assertFalse(old_contract.file.storage.exists(file_name))
 
-    def test_contract_related_file_purged_with_contract(self):
-        from contracts.models import Contract, RelatedFile
+    def test_contract_relation_rows_purged_with_contract(self):
+        """Rev1.6：関連書類は既存契約書への参照（ContractRelation）。purgeで契約書本体が物理削除
+        されると、その契約書が contract 側でも related_contract 側でも参照している関連行が
+        on_delete=CASCADE で一緒に消える。"""
+        from contracts.models import Contract, ContractRelation
 
         old_contract = self._create_contract(deleted_at=timezone.now() - datetime.timedelta(days=40))
-        related = RelatedFile.objects.create(
-            contract=old_contract, file=ContentFile(b"REL", name="付属資料.pdf"), display_order=0
-        )
-        related_file_name = related.file.name
+        other = self._create_contract(code="C2")
+        ContractRelation.objects.create(contract=old_contract, related_contract=other, display_order=0)
+        ContractRelation.objects.create(contract=other, related_contract=old_contract, display_order=0)
 
         call_command("purge_expired_deleted_records")
 
         self.assertFalse(Contract.objects.filter(pk=old_contract.pk).exists())
-        self.assertFalse(RelatedFile.objects.filter(pk=related.pk).exists())
-        self.assertFalse(old_contract.file.storage.exists(related_file_name))
+        self.assertTrue(Contract.objects.filter(pk=other.pk).exists())
+        self.assertFalse(ContractRelation.objects.filter(contract=old_contract).exists())
+        self.assertFalse(ContractRelation.objects.filter(related_contract=old_contract).exists())
 
     def test_document_purge_creates_audit_log(self):
         """廃止されたdocuments.views.DeleteViewの完全削除ログ（action="検索・閲覧画面 完全削除"）を
@@ -648,8 +651,8 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
             ):
                 call_command("purge_expired_deleted_records")
 
-        self.assertTrue(any(f" pk={doc_pk} " in message for message in cm.output))
-        self.assertFalse(any(f" pk=None " in message for message in cm.output))
+        self.assertTrue(any(f" pk={doc_pk}" in message for message in cm.output))
+        self.assertFalse(any(" pk=None" in message for message in cm.output))
 
 
 class AddMonthsClampTests(TestCase):
@@ -1162,32 +1165,23 @@ class BulkEditServicesStagingTests(TestCase):
         self.assertFalse(toggle_delete_mark(self.session, self.KEY, 10))
         self.assertFalse(is_marked_for_delete(self.session[self.KEY], 10))
 
-    def test_stage_related_accumulates(self):
-        from core.bulk_edit_services import stage_related, staged_related_for
+    def test_stage_related_ids_overwrites(self):
+        """Rev1.6：関連書類のステージは「紐付け先契約書pkの全量リスト」を丸ごと上書きする
+        （差分ではない）。未編集ページは None（＝現状維持）。"""
+        from core.bulk_edit_services import stage_related_ids, staged_related_ids_for
+
+        self._start([10, 20])
+        stage_related_ids(self.session, self.KEY, 10, [3, 5])
+        stage_related_ids(self.session, self.KEY, 10, [7])
+        self.assertEqual(staged_related_ids_for(self.session[self.KEY], 10), [7])
+        self.assertIsNone(staged_related_ids_for(self.session[self.KEY], 20))
+
+    def test_discard_bulk_edit_clears_state(self):
+        from core.bulk_edit_services import discard_bulk_edit, stage_related_ids
 
         self._start([10])
-        stage_related(self.session, self.KEY, 10, add_refs=[{"temp_name": "t1", "original_name": "a.pdf"}])
-        stage_related(self.session, self.KEY, 10, remove_ids=[5, 5, 6])
-        bucket = staged_related_for(self.session[self.KEY], 10)
-        self.assertEqual([r["original_name"] for r in bucket["add"]], ["a.pdf"])
-        self.assertEqual(bucket["remove"], [5, 6])
-
-    def test_discard_bulk_edit_removes_staged_related_temp_files(self):
-        from pathlib import Path
-
-        from django.conf import settings
-
-        from core.bulk_edit_services import discard_bulk_edit, stage_related
-        from core.upload_services import TMP_UPLOAD_SUBDIR, stash_files_to_tmp
-
-        self._start([10])
-        refs = stash_files_to_tmp([SimpleUploadedFile("a.pdf", b"x")])
-        stage_related(self.session, self.KEY, 10, add_refs=refs)
-        tmp_path = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR / refs[0]["temp_name"]
-        self.assertTrue(tmp_path.exists())
-
+        stage_related_ids(self.session, self.KEY, 10, [3])
         discard_bulk_edit(self.session, self.KEY)
-        self.assertFalse(tmp_path.exists())
         self.assertIsNone(self.session.get(self.KEY))
 
 

@@ -187,75 +187,156 @@ function setSearchPreviewMessage(titleEl, title, message) {
   titleEl.appendChild(document.createTextNode(message));
 }
 
-/*
- * 保管画面２（契約書モード）の「関連書類」欄。原本index.html:852-873の
- * handleRelatedFileChange()/removeRelatedFileRow()を移植。ファイルを選択するたびその行を
- * 「📎 ファイル名 ×」表示に切り替え、空の行を1つ追加する（複数ファイルを1つずつ添付できる）。
- * 実送信のため、原本には無い name="related_files"（一括登録時は文書ごとに
- * "related_files_{doc-index}"）を新規行のinputに付与する。コンテナ・フィールド名は
- * クリックされたinput自身から取得するため、id="storage-file-inputs-container"（編集画面、
- * 単一文書）とid="storage-file-inputs-container-N"（保管画面、複数文書の一括登録時に
- * 文書ごとの関連書類を独立して扱うためdata-doc-index方式で分離）のどちらでも動作する。
- */
-function handleRelatedFileChange(input) {
-  if (!input.files || input.files.length === 0) return;
-  const filename = input.files[0].name;
-  const fieldName = input.name;
-  const row = input.closest(".related-file-row");
-  const container = input.closest("[id^='storage-file-inputs-container']");
+/* ==========================================
+   保管画面２／編集画面（契約書モード）の「関連書類」欄（Rev1.6）
+   ------------------------------------------------------------------
+   xlsx 保管!B478-484：関連書類は「既に保存済みの契約書をポップアップ検索して複数紐付ける」方式。
+   選んだ契約書1件につき hidden input（name はコンテナの data-field-name。保管画面は
+   related_contract_ids_{doc-index}、編集画面は related_contract_ids）を1つ持ち、行は
+   「📎 契約書タイトル ×」で表示する。× でその行（＝hidden input）を消す＝関連付けを取り止める。
+   ========================================== */
+let activeRelatedContainer = null;
 
-  // 表示切り替えは row.innerHTML の書き換えではなく、input自体を非表示にした上で表示用の
-  // span/buttonを追加で挿入する形にする。row.innerHTMLで置き換えるとイベント発火元のinput
-  // （＝ユーザーが選択したFileオブジェクトを保持している唯一の要素）自体がDOMから消えてしまい、
-  // フォーム送信時にそのファイルの実データが一切送られない不具合があった（画面には
-  // 「📎 ファイル名」と表示されるため、登録後に該当の関連書類が保存されていないことでしか
-  // 気づけなかった）。inputを残したまま非表示にすることで、name属性が同じ複数のinputとして
-  // 通常のmultipart/form-data送信に乗り、サーバー側のrequest.FILES.getlist()で全件拾える。
-  input.style.display = "none";
+function _relatedSelectedValues(container) {
+  return new Set(
+    Array.from(container.querySelectorAll("input[type=hidden].related-contract-id")).map(
+      (inp) => inp.value,
+    ),
+  );
+}
+
+function _appendRelatedRow(container, id, title) {
+  const fieldName = container.dataset.fieldName;
+  const row = document.createElement("div");
+  row.className = "related-file-row";
+
   const nameSpan = document.createElement("span");
   nameSpan.className = "related-file-name";
-  nameSpan.textContent = `\u{1F4CE} ${filename}`;
+  nameSpan.textContent = `\u{1F4CE} ${title}`;
+
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.className = "related-contract-id";
+  hidden.name = fieldName;
+  hidden.value = String(id);
+
   const deleteBtn = document.createElement("button");
   deleteBtn.type = "button";
   deleteBtn.className = "btn-delete-file";
   deleteBtn.textContent = "×";
   deleteBtn.onclick = function () {
-    removeRelatedFileRow(deleteBtn);
+    row.remove();
   };
+
   row.appendChild(nameSpan);
+  row.appendChild(hidden);
   row.appendChild(deleteBtn);
-
-  const newRow = document.createElement("div");
-  newRow.className = "related-file-row";
-  newRow.innerHTML = `<input type="file" name="${fieldName}" onchange="handleRelatedFileChange(this)">`;
-  container.appendChild(newRow);
+  // 「ファイルの選択」ボタンの行（コンテナ末尾）の手前に差し込む。
+  const selectRow = container.querySelector(".related-select-row");
+  container.insertBefore(row, selectRow);
 }
 
-function removeRelatedFileRow(btn) {
-  btn.closest(".related-file-row").remove();
+/* 「ファイルの選択」ボタン。契約書検索ポップアップを開く。 */
+function openRelatedSearchPopup(btn) {
+  activeRelatedContainer = btn.closest("[id^='storage-related-container']");
+  document.getElementById("related-search-title").value = "";
+  document.getElementById("related-search-freeword").value = "";
+  document.getElementById("related-search-results").innerHTML = "";
+  const pop = document.getElementById("popup-related-search");
+  pop.classList.remove("hidden-popup");
+  positionPopupPopupEl(btn, pop);
 }
 
-/*
- * 編集モードで既に保存済みの関連書類を削除する場合、新規行と違いサーバー側のレコードを
- * 消す必要があるため、対象IDをhidden(id_remove_related_ids)にカンマ区切りで積んでから行を消す
- * （ContractEditView.post側でこの値を見て該当RelatedFileを削除する）。
- */
+function closeRelatedSearchPopup() {
+  document.getElementById("popup-related-search").classList.add("hidden-popup");
+}
+
+function runRelatedSearch() {
+  if (!activeRelatedContainer) return;
+  const apiUrl = activeRelatedContainer.dataset.apiUrl;
+  const excludePk = activeRelatedContainer.dataset.excludePk || "";
+  const title = document.getElementById("related-search-title").value;
+  const freeword = document.getElementById("related-search-freeword").value;
+  const params = new URLSearchParams({ title, freeword });
+  if (excludePk) params.set("exclude", excludePk);
+
+  const resultsEl = document.getElementById("related-search-results");
+  resultsEl.textContent = "検索中...";
+  fetch(`${apiUrl}?${params.toString()}`)
+    .then((r) => r.json())
+    .then((data) => {
+      renderRelatedSearchResults(data.items || []);
+    })
+    .catch(() => {
+      resultsEl.textContent = "検索に失敗しました。";
+    });
+}
+
+function renderRelatedSearchResults(items) {
+  const resultsEl = document.getElementById("related-search-results");
+  resultsEl.innerHTML = "";
+  if (items.length === 0) {
+    resultsEl.textContent = "該当する契約書がありません。";
+    return;
+  }
+  const selected = _relatedSelectedValues(activeRelatedContainer);
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "popup-select-row";
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = "related-result-checkbox";
+    input.value = item.value;
+    input.checked = selected.has(String(item.value));
+    input.dataset.label = item.label;
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(" " + item.label));
+    if (item.sub) {
+      const sub = document.createElement("span");
+      sub.style.cssText = "color:#7f8c8d; font-size:11px; margin-left:6px;";
+      sub.textContent = item.sub;
+      label.appendChild(sub);
+    }
+    row.appendChild(label);
+    resultsEl.appendChild(row);
+  });
+}
+
+/* 「確定」。検索結果ページでチェックしたものを紐付けに加え、外したものは取り除く
+   （結果に出ていない既存の紐付けはそのまま。xlsx「複数選択し、関連確定出来る」を複数回の
+   検索にまたがって累積できるようにする）。 */
+function submitRelatedSearchSelection() {
+  if (!activeRelatedContainer) return;
+  const container = activeRelatedContainer;
+  const checkboxes = document.querySelectorAll("#related-search-results .related-result-checkbox");
+  const shownValues = new Set(Array.from(checkboxes).map((cb) => cb.value));
+  const checkedById = {};
+  checkboxes.forEach((cb) => {
+    if (cb.checked) checkedById[cb.value] = cb.dataset.label;
+  });
+
+  // 結果ページに出ていて外されたものは削除。
+  container.querySelectorAll(".related-file-row").forEach((row) => {
+    const hidden = row.querySelector("input.related-contract-id");
+    if (hidden && shownValues.has(hidden.value) && !(hidden.value in checkedById)) {
+      row.remove();
+    }
+  });
+  // 新たにチェックされたものを追加（既存はスキップ）。
+  const already = _relatedSelectedValues(container);
+  Object.keys(checkedById).forEach((id) => {
+    if (!already.has(id)) _appendRelatedRow(container, id, checkedById[id]);
+  });
+  closeRelatedSearchPopup();
+}
+
 /*
  * 契約金額欄（onblur）。原本index.html:1554-1564のformatCurrency()そのまま移植。
  */
 function formatCurrency(inputElement) {
   const value = inputElement.value.replace(/[^0-9]/g, "");
   inputElement.value = value !== "" ? Number(value).toLocaleString("ja-JP") : "";
-}
-
-function removeExistingRelatedFile(btn, relatedFileId) {
-  const hidden = document.getElementById("id_remove_related_ids");
-  if (hidden) {
-    const ids = hidden.value ? hidden.value.split(",") : [];
-    ids.push(String(relatedFileId));
-    hidden.value = ids.join(",");
-  }
-  btn.closest(".related-file-row").remove();
 }
 
 /* ==========================================
@@ -329,8 +410,13 @@ function openPopupPopup(btn, type, mode, apiUrl) {
  * 呼び出し側は renderPopupPopupItems() で中身を描画した「後」に呼ぶこと（実寸が要るため）。
  */
 function positionPopupPopup(btn) {
+  positionPopupPopupEl(btn, document.getElementById("popup-select"));
+}
+
+/* 任意のポップアップ要素をトリガーボタン基準で配置する（Rev1.6で関連書類検索ポップアップと
+   共用するため positionPopupPopup から切り出した）。 */
+function positionPopupPopupEl(btn, pop) {
   const rect = btn.getBoundingClientRect();
-  const pop = document.getElementById("popup-select");
   const popRect = pop.getBoundingClientRect();
   const windowWidth = window.innerWidth;
   const windowHeight = window.innerHeight;
@@ -463,45 +549,44 @@ function submitPopupPopupSelection() {
   closePopupPopup();
 }
 
-/* popup-selectのドラッグ移動・リサイズ（原本のUXをそのまま踏襲） */
-document.addEventListener("DOMContentLoaded", () => {
-  const pHeader = document.querySelector(".popup-select-header");
-  const pWindow = document.getElementById("popup-select");
-  if (!pHeader || !pWindow) return;
+/* ポップアップ（popup-select、および Rev1.6 の関連書類検索 popup-related-search）の
+   ドラッグ移動・リサイズ。原本のpopup-select UXをそのまま踏襲しつつ、同型の別ポップアップにも
+   使えるよう共通関数に切り出した。 */
+function makePopupMovable(windowEl, headerEl, resizeEl, itemsEl) {
+  if (!windowEl || !headerEl) return;
 
   let isMoving = false;
   let moveOffsetX = 0;
   let moveOffsetY = 0;
-  pHeader.addEventListener("mousedown", (e) => {
+  headerEl.addEventListener("mousedown", (e) => {
     isMoving = true;
-    pHeader.style.cursor = "move";
-    moveOffsetX = e.clientX - pWindow.offsetLeft;
-    moveOffsetY = e.clientY - pWindow.offsetTop;
+    headerEl.style.cursor = "move";
+    moveOffsetX = e.clientX - windowEl.offsetLeft;
+    moveOffsetY = e.clientY - windowEl.offsetTop;
   });
   document.addEventListener("mousemove", (e) => {
     if (!isMoving) return;
-    pWindow.style.left = e.clientX - moveOffsetX + "px";
-    pWindow.style.top = e.clientY - moveOffsetY + "px";
+    windowEl.style.left = e.clientX - moveOffsetX + "px";
+    windowEl.style.top = e.clientY - moveOffsetY + "px";
   });
   document.addEventListener("mouseup", () => {
     if (isMoving) {
       isMoving = false;
-      pHeader.style.cursor = "default";
+      headerEl.style.cursor = "default";
     }
   });
 
-  const rHandle = document.getElementById("popup-select-resize");
-  if (!rHandle) return;
+  if (!resizeEl) return;
   let isResizing = false;
   let startW = 0;
   let startH = 0;
   let startMouseX = 0;
   let startMouseY = 0;
-  rHandle.addEventListener("mousedown", (e) => {
+  resizeEl.addEventListener("mousedown", (e) => {
     isResizing = true;
     e.preventDefault();
-    startW = pWindow.offsetWidth;
-    startH = pWindow.offsetHeight;
+    startW = windowEl.offsetWidth;
+    startH = windowEl.offsetHeight;
     startMouseX = e.clientX;
     startMouseY = e.clientY;
   });
@@ -509,13 +594,30 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!isResizing) return;
     const nextW = startW + (e.clientX - startMouseX);
     const nextH = startH + (e.clientY - startMouseY);
-    if (nextW > 200) pWindow.style.width = nextW + "px";
-    const itemsBox = document.getElementById("popup-select-items-container");
-    if (nextH > 150 && itemsBox) itemsBox.style.maxHeight = nextH - 100 + "px";
+    if (nextW > 200) windowEl.style.width = nextW + "px";
+    if (nextH > 150 && itemsEl) itemsEl.style.maxHeight = nextH - 100 + "px";
   });
   document.addEventListener("mouseup", () => {
     isResizing = false;
   });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  makePopupMovable(
+    document.getElementById("popup-select"),
+    document.querySelector(".popup-select-header"),
+    document.getElementById("popup-select-resize"),
+    document.getElementById("popup-select-items-container"),
+  );
+  const relWindow = document.getElementById("popup-related-search");
+  if (relWindow) {
+    makePopupMovable(
+      relWindow,
+      relWindow.querySelector(".popup-select-header"),
+      document.getElementById("popup-related-search-resize"),
+      document.getElementById("related-search-results"),
+    );
+  }
 });
 
 /* ==========================================
@@ -646,6 +748,28 @@ function closeDetailPopup() {
   if (pdfjsEl && window.PdfPreview) window.PdfPreview.clear(pdfjsEl);
 }
 
+/*
+ * 検索結果詳細ポップアップ「関連書類」欄の1行（xlsx 検索・閲覧・変更!B677-680, Rev1.6）。
+ *  - preview_url あり → ファイル名をリンク化し、クリックで別タブに紐付け先契約書のPDFプレビュー。
+ *  - is_deleted      → 赤フォント。クリックで「既に削除されている関連資料です」とだけ表示。
+ *  - どちらでもない  → 素テキスト（ダウンロード権限が無いケース）。
+ * rc は contracts.api.DetailAPIView が返す {title, is_deleted, preview_url}。
+ */
+function renderRelatedResourceLink(rc) {
+  const name = `\u{1F4CE} ${escapeHtml(rc.title)}`;
+  if (rc.is_deleted) {
+    return `<a href="#" style="color:#c0392b;" onclick="alertDeletedRelatedResource();return false;">${name}</a>`;
+  }
+  if (rc.preview_url) {
+    return `<a href="${escapeHtml(rc.preview_url)}" target="_blank" rel="noopener">${name}</a>`;
+  }
+  return name;
+}
+
+function alertDeletedRelatedResource() {
+  alert("既に削除されている関連資料です");
+}
+
 function renderDetailPopup(data, kind) {
   const label = kind === "document" ? "文書" : "契約書";
   const banner = document.getElementById("detail-alert-banner");
@@ -761,8 +885,8 @@ function renderDetailPopup(data, kind) {
       ["契約先名", data.contract_partner],
       ["保存者", data.uploader],
       ["保存日時", data.save_date],
-      ["関連書類", data.related_files && data.related_files.length
-        ? { html: data.related_files.map((f) => `\u{1F4CE} ${escapeHtml(f)}`).join("<br>") }
+      ["関連書類", data.related_contracts && data.related_contracts.length
+        ? { html: data.related_contracts.map(renderRelatedResourceLink).join("<br>") }
         : "なし"],
       ["メモ欄", data.memo],
     ];
@@ -773,8 +897,9 @@ function renderDetailPopup(data, kind) {
     '<table class="search-condition-table" style="width:100%;">' +
     rows
       .map(([label, value]) => {
-        // 関連書類の行だけは複数ファイル名を <br> で連結した整形済みHTML（各ファイル名は
-        // 生成時に escapeHtml 済み）。それ以外の値は生テキストなのでここでエスケープする。
+        // 関連書類の行だけは renderRelatedResourceLink() が組んだ整形済みHTML（タイトルは
+        // 生成時に escapeHtml 済み。リンク/赤字/素テキストの3態）。それ以外の値は生テキストなので
+        // ここでエスケープする。
         const cell =
           value && typeof value === "object" && "html" in value ? value.html : escapeHtml(value);
         return `<tr><td class="label">${label}</td><td>${cell}</td></tr>`;

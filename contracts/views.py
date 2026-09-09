@@ -13,15 +13,16 @@ from django.views.generic import UpdateView
 
 from audit import services as audit_services
 from contracts.forms import SearchForm, UploadStep2Form
-from contracts.models import Contract, RelatedFile
+from contracts.models import Contract
 from contracts.search_services import build_queryset
 from contracts.services import (
     apply_contract_edit,
     build_zip_archive,
     calculate_expiry_date,
     contract_edit_is_dirty,
-    parse_remove_related_ids,
+    filter_valid_related_ids,
     scoped_get_object_or_404,
+    sync_related_contracts,
 )
 from core import (
     bulk_edit_services,
@@ -33,7 +34,6 @@ from core import (
 )
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
-from core.upload_services import PendingFileStorageError
 from core.text_extraction_services import try_immediate_text_layer_extraction
 from permissions.services import (
     can_download,
@@ -114,16 +114,18 @@ class UploadStep2View(RequiresContractEditMixin, View):
     """screen-storage2（契約書モード・登録）。複数ファイルを一括選択した場合、メタデータ
     （部署・分類・年・カテゴリー・契約日等・メモ）も関連書類もページャーで表示中のファイル
     ごとに個別入力する（メタデータのファイルごと化は2026-08-31ユーザー確定、
-    documents.views.UploadStep2View／UploadStep2Form docstring参照。関連書類は
-    `related_files_{index}` で以前から一括登録対応済み）。保存ループは `form.file_data(i)` を通す。
-    保管フロー全体のURL直叩き対策は RequiresContractEditMixin参照。
+    documents.views.UploadStep2View／UploadStep2Form docstring参照）。関連書類はRev1.6で
+    「既に保管済みの契約書をポップアップ検索して複数紐付ける」方式になり、hidden input
+    `related_contract_ids_{index}`（カンマ区切りのpk並び）で送られる。保存ループは
+    `form.file_data(i)` を通す。保管フロー全体のURL直叩き対策は RequiresContractEditMixin参照。
     """
 
     template_name = "contracts/storage2.html"
     form_id = "contracts_upload_step2"
 
-    def _render_form(self, request, form, pending, active_doc_index=0):
-        """GET・バリデーションエラー再描画・「削除」後の再描画で共通の保管画面２レンダリング。"""
+    def _render_form(self, request, form, pending, active_doc_index=0, per_file_related_ids=None):
+        """GET・バリデーションエラー再描画・「削除」後の再描画で共通の保管画面２レンダリング。
+        `per_file_related_ids` はファイルごとの紐付け先契約書pkリスト。GET時はNone＝全ファイル空。"""
         token = issue_token(request.session, self.form_id)
         return render(
             request,
@@ -131,12 +133,14 @@ class UploadStep2View(RequiresContractEditMixin, View):
             {
                 "form": form,
                 "file_rows": upload_views.file_rows(form, pending),
-                "file_field_sets": upload_views.file_field_sets(
-                    form, pending, UploadStep2Form.PER_FILE_FIELDS
+                "file_field_sets": _merge_related_into_field_sets(
+                    upload_views.file_field_sets(form, pending, UploadStep2Form.PER_FILE_FIELDS),
+                    per_file_related_ids,
                 ),
                 "active_doc_index": active_doc_index,
                 "token": token,
                 "mode": "create",
+                "related_search_url": reverse("contracts:api_related_search"),
                 **_pending_preview_context(request, pending),
             },
         )
@@ -144,7 +148,8 @@ class UploadStep2View(RequiresContractEditMixin, View):
     def _handle_remove(self, request, pending):
         """「削除」ボタン＝表示中ファイルのアップロード取り消し。残りのファイルの入力値を
         詰め直して再描画する（documents.views.UploadStep2View._handle_remove と同じ。
-        契約書の関連書類はファイル入力のためブラウザ仕様で復元不可＝選び直しが必要）。"""
+        契約書の関連書類はhidden inputのため、他ファイルのメタデータと同じく
+        remap_step2_initial_after_remove で詰め直せる＝選び直し不要）。"""
         try:
             index = int(request.POST.get("remove_index", ""))
         except (TypeError, ValueError):
@@ -174,9 +179,14 @@ class UploadStep2View(RequiresContractEditMixin, View):
             initial_titles=[_strip_ext(item["original_name"]) for item in remaining],
             initial=initial,
         )
+        # 関連書類（hidden inputのpk並び）も削除位置に合わせて添字を詰め直す。
+        remapped_ids = _remap_related_ids_after_remove(
+            request.POST, removed_index=index, new_count=len(remaining)
+        )
         messages.info(request, f"「{removed['original_name']}」のアップロードを取り消しました。")
         return self._render_form(
-            request, form, remaining, active_doc_index=min(index, len(remaining) - 1)
+            request, form, remaining, active_doc_index=min(index, len(remaining) - 1),
+            per_file_related_ids=remapped_ids,
         )
 
     def get(self, request):
@@ -210,17 +220,21 @@ class UploadStep2View(RequiresContractEditMixin, View):
             error_index = form.first_error_file_index()
             if len(pending) > 1:
                 messages.error(request, f"{error_index + 1}件目に入力エラーがあります。")
-            return self._render_form(request, form, pending, active_doc_index=error_index)
+            return self._render_form(
+                request, form, pending, active_doc_index=error_index,
+                per_file_related_ids=[
+                    request.POST.getlist(f"related_contract_ids_{i}") for i in range(len(pending))
+                ],
+            )
 
         can_select = can_select_department(request.user)
         save_date = timezone.now()
         created = []
-        created_related = []
         try:
-            # 複数契約書を1回のリクエストでまとめて登録するため、途中の1件（本体または
-            # 関連書類）でファイルI/O例外が起きた場合に一部だけDBへコミット済みという
-            # 中途半端な状態を残さないよう、ループ全体を1トランザクションにする
-            # （documents.views.UploadStep2Viewと同じ理由。原本フィデリティ監査で発見）。
+            # 複数契約書を1回のリクエストでまとめて登録するため、途中の1件でファイルI/O例外が
+            # 起きた場合に一部だけDBへコミット済みという中途半端な状態を残さないよう、ループ全体を
+            # 1トランザクションにする（documents.views.UploadStep2Viewと同じ理由。原本フィデリティ
+            # 監査で発見）。
             with transaction.atomic():
                 for doc_index, pending_item in enumerate(pending):
                     # メタデータは2026-08-31ユーザー確定でファイルごとに個別入力
@@ -251,13 +265,14 @@ class UploadStep2View(RequiresContractEditMixin, View):
                     finally:
                         temp_file.close()
                     contract.save()
-                    # 原本index.html:1567-1589のsetupStorageFormForActiveDoc()通り、一括登録時も
-                    # 文書ごとに独立した関連書類欄（storage2.htmlのrelated_files_{doc_index}）を持つ
-                    # （原本フィデリティ監査で発見：以前は1件登録時のみ許可していた）。
-                    for i, related in enumerate(request.FILES.getlist(f"related_files_{doc_index}")):
-                        created_related.append(
-                            RelatedFile.objects.create(contract=contract, file=related, display_order=i)
-                        )
+                    # 関連書類（Rev1.6）：ファイルごとに独立した hidden input
+                    # `related_contract_ids_{doc_index}`（紐付け先契約書pkの繰り返し）を、実在・
+                    # 閲覧権限内のものだけに絞ってContractRelationへ同期する。
+                    valid_related_ids = filter_valid_related_ids(
+                        request.POST.getlist(f"related_contract_ids_{doc_index}"),
+                        employee=request.user,
+                    )
+                    sync_related_contracts(contract, valid_related_ids)
                     # イベントメッセージは原本index.html:3320の操作履歴ログサンプル
                     # 「文書　アップロード｜ファイル名：契約書_100」に合わせ、タイトルではなく
                     # 実ファイル名(display_name)を「ファイル名：」形式で記録する
@@ -269,18 +284,16 @@ class UploadStep2View(RequiresContractEditMixin, View):
                     )
                     created.append(contract)
         except (OSError, DBError):
-            # open_pending_file()／file.save()（本体・関連書類とも）でのファイルI/O失敗に加え、
-            # contract.save()/RelatedFile.objects.create()でのDB制約違反等（DBError）も対象にする
-            # （documents.views.UploadStep2Viewと同じ理由。品質レビューで発見：以前はOSErrorしか
-            # 捕捉しておらずDBErrorは未捕捉のまま生の500エラーになっていた）。
-            # transaction.atomic()によりDBへの登録はロールバックされるが、ロールバック対象の
-            # 契約書・関連書類について既にストレージへ書き込み済みだったファイル実体はDB
-            # トランザクションの対象外のため孤児化する。created/created_relatedに積まれた
-            # （=save()まで成功していた）ファイル実体をここで明示的に削除して孤児ファイルを防ぐ。
+            # open_pending_file()／file.save()でのファイルI/O失敗に加え、contract.save()／
+            # ContractRelationのDB制約違反等（DBError）も対象にする（documents.views.
+            # UploadStep2Viewと同じ理由。品質レビューで発見：以前はOSErrorしか捕捉しておらず
+            # DBErrorは未捕捉のまま生の500エラーになっていた）。transaction.atomic()によりDBへの
+            # 登録はロールバックされるが、ロールバック対象の契約書について既にストレージへ書き込み
+            # 済みだったファイル実体はDBトランザクションの対象外のため孤児化する。createdに積まれた
+            # （=save()まで成功していた）ファイル実体をここで明示的に削除して孤児ファイルを防ぐ
+            # （関連書類はRev1.6で物理ファイルを持たなくなったため後始末は本体ファイルのみ）。
             for contract in created:
                 contract.file.delete(save=False)
-            for related_file in created_related:
-                related_file.file.delete(save=False)
             logger.exception(
                 "契約書の保管処理中にエラーが発生しました: employee_no=%s", request.user.employee_no
             )
@@ -311,12 +324,17 @@ class UploadStep2View(RequiresContractEditMixin, View):
             {
                 "form": form,
                 "file_rows": upload_views.file_rows(form, pending),
-                "file_field_sets": upload_views.file_field_sets(
-                    form, pending, UploadStep2Form.PER_FILE_FIELDS
+                "file_field_sets": _merge_related_into_field_sets(
+                    upload_views.file_field_sets(form, pending, UploadStep2Form.PER_FILE_FIELDS),
+                    [
+                        list(c.related_links.values_list("related_contract_id", flat=True))
+                        for c in created
+                    ],
                 ),
                 "active_doc_index": 0,
                 "token": token,
                 "mode": "create",
+                "related_search_url": reverse("contracts:api_related_search"),
                 "complete": {"created": created, "mode": "create"},
                 "preview_kinds": [get_preview_kind(c.display_name) or "" for c in created],
                 "preview_urls": preview_urls,
@@ -339,7 +357,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
         # セキュリティレビューで発見：部署スコープ外の契約書へのURL直打ちを防ぐ
         # （contracts.services.scoped_get_object_or_404 docstring参照。2026-08-25修正）。
         return scoped_get_object_or_404(
-            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
+            Contract.objects.prefetch_related("related_links__related_contract").filter(is_deleted=False),
             self.request.user,
             self.kwargs["pk"],
         )
@@ -356,6 +374,8 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                 "contract": self.object,
                 "token": token,
                 "title_field": form["title_0"],
+                "related_rows": _related_rows_for_contract(self.object),
+                "related_search_url": reverse("contracts:api_related_search"),
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
                 **_edit_delete_context(self.object),
@@ -380,6 +400,10 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                     "contract": self.object,
                     "token": token,
                     "title_field": form["title_0"],
+                    "related_rows": _resolve_related_rows(
+                        request.POST.getlist("related_contract_ids")
+                    ),
+                    "related_search_url": reverse("contracts:api_related_search"),
                     "preview_kind": get_preview_kind(self.object.display_name),
                     "can_download": can_download(request.user, kind="contract"),
                     **_edit_delete_context(self.object),
@@ -387,21 +411,14 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
             )
 
         contract = self.object
-        remove_ids = parse_remove_related_ids(
-            request.POST.get("remove_related_ids", ""), employee_no=request.user.employee_no
+        related_ids = filter_valid_related_ids(
+            request.POST.getlist("related_contract_ids"),
+            employee=request.user,
+            exclude_pk=contract.pk,
         )
-        new_related_files = request.FILES.getlist("related_files")
 
         try:
-            apply_contract_edit(contract, form.cleaned_data, request.user, remove_ids, new_related_files)
-        except OSError:
-            logger.exception(
-                "契約書の更新処理中にファイルI/Oエラーが発生しました: contract_id=%s, employee_no=%s",
-                contract.pk,
-                request.user.employee_no,
-            )
-            messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
-            return redirect("contracts:edit", pk=contract.pk)
+            apply_contract_edit(contract, form.cleaned_data, request.user, related_ids)
         except DBError:
             logger.exception(
                 "契約書の更新処理中にDBエラーが発生しました: contract_id=%s, employee_no=%s",
@@ -427,6 +444,8 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                 "contract": contract,
                 "token": token,
                 "title_field": form["title_0"],
+                "related_rows": _related_rows_for_contract(contract),
+                "related_search_url": reverse("contracts:api_related_search"),
                 "complete": {"created": [contract], "mode": "update"},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
@@ -481,7 +500,7 @@ class BulkEditStartView(RequiresContractEditMixin, View):
             messages.error(request, "編集するデータが選択されていません。")
             return redirect("contracts:search")
 
-        # 開始のたび、前回の中断で残ったステージ内容（関連書類の一時ファイル含む）を掃除する。
+        # 開始のたび、前回の中断で残ったステージ内容を掃除する。
         bulk_edit_services.discard_bulk_edit(request.session, BULK_EDIT_SESSION_KEY)
         bulk_edit_services.start_bulk_edit(request.session, BULK_EDIT_SESSION_KEY, ordered_pks)
         return redirect("contracts:bulk_edit")
@@ -497,10 +516,10 @@ CONTRACT_BULK_FORM_FIELDS = (
 
 class BulkEditView(RequiresContractEditMixin, View):
     """一括編集ウィザード本体（契約書側・ステージング型。2026-08-28ユーザー確定）。
-    documents.views.BulkEditViewと同じ設計（入力値・削除マーク・関連書類の増減を「更新」まで
-    セッション〈＋一時ファイル領域〉にステージし、「更新」で全ページ検証→変更のあったものだけを
-    1トランザクションで確定）。関連書類の追加ファイルは MEDIA_ROOT/tmp_uploads/ に退避し、
-    「キャンセル」で実体ごと破棄する。BulkEditStartViewと同じくRev1.2の「契約書-契約書-
+    documents.views.BulkEditViewと同じ設計（入力値・削除マーク・関連書類の紐付けを「更新」まで
+    セッションにステージし、「更新」で全ページ検証→変更のあったものだけを1トランザクションで
+    確定）。関連書類はRev1.6で既存契約書への参照になったため、ステージするのは紐付け先契約書pkの
+    並び（一時ファイル領域は不要になった）。BulkEditStartViewと同じくRev1.2の「契約書-契約書-
     契約書情報変更」がOFFの職員はアクセス不可（RequiresContractEditMixin参照）。
     """
 
@@ -517,7 +536,7 @@ class BulkEditView(RequiresContractEditMixin, View):
     def _current_object(self, request, state):
         # セキュリティレビューで発見：部署スコープ外の契約書へのセッション改ざん・URL直打ちを防ぐ。
         return scoped_get_object_or_404(
-            Contract.objects.prefetch_related("related_files").filter(is_deleted=False),
+            Contract.objects.prefetch_related("related_links__related_contract").filter(is_deleted=False),
             request.user,
             state["pks"][state["index"]],
         )
@@ -558,26 +577,15 @@ class BulkEditView(RequiresContractEditMixin, View):
                 self.object.pk,
                 {k: request.POST.get(k, "") for k in CONTRACT_BULK_FORM_FIELDS},
             )
-            # 関連書類の増減も同時にステージ（アップロード分は一時領域へ退避）。
-            new_files = request.FILES.getlist("related_files")
-            add_refs = []
-            if new_files:
-                try:
-                    add_refs = upload_services.stash_files_to_tmp(new_files)
-                except PendingFileStorageError:
-                    logger.exception(
-                        "一括編集：関連書類の一時退避に失敗しました: employee_no=%s", request.user.employee_no
-                    )
-                    messages.error(request, "ファイルの保存に失敗しました。もう一度お試しください。")
-                    return redirect("contracts:bulk_edit")
-            remove_ids = parse_remove_related_ids(
-                request.POST.get("remove_related_ids", ""), employee_no=request.user.employee_no
+            # 関連書類（紐付け先契約書pkの並び）もそのページの hidden input を丸ごとステージする。
+            related_ids = filter_valid_related_ids(
+                request.POST.getlist("related_contract_ids"),
+                employee=request.user,
+                exclude_pk=self.object.pk,
             )
-            if add_refs or remove_ids:
-                bulk_edit_services.stage_related(
-                    request.session, BULK_EDIT_SESSION_KEY, self.object.pk,
-                    add_refs=add_refs, remove_ids=remove_ids,
-                )
+            bulk_edit_services.stage_related_ids(
+                request.session, BULK_EDIT_SESSION_KEY, self.object.pk, related_ids
+            )
 
         total = len(state["pks"])
         index = state["index"]
@@ -616,7 +624,8 @@ class BulkEditView(RequiresContractEditMixin, View):
         to_delete = set(state.get("to_delete", []))
         staged = state.get("staged", {})
         objs_by_pk = {
-            c.pk: c for c in Contract.objects.prefetch_related("related_files").filter(pk__in=pks)
+            c.pk: c
+            for c in Contract.objects.prefetch_related("related_links").filter(pk__in=pks)
         }
 
         # --- 検証パス ---
@@ -676,7 +685,6 @@ class BulkEditView(RequiresContractEditMixin, View):
             )
 
         # --- 確定パス ---
-        opened_files = []
         status_by_pk = {}
         try:
             with transaction.atomic():
@@ -696,20 +704,17 @@ class BulkEditView(RequiresContractEditMixin, View):
                         status_by_pk[pk] = "削除"
                     elif pk in forms_by_pk:
                         f = forms_by_pk[pk]
-                        bucket = bulk_edit_services.staged_related_for(state, pk)
-                        related_changed = bool(bucket["add"] or bucket["remove"])
+                        # ステージ済みの紐付け先契約書pk（未編集ページはNone＝現状維持）。
+                        staged_ids = bulk_edit_services.staged_related_ids_for(state, pk)
+                        current_ids = list(
+                            obj.related_links.values_list("related_contract_id", flat=True)
+                        )
+                        related_ids = current_ids if staged_ids is None else staged_ids
+                        related_changed = staged_ids is not None and set(staged_ids) != set(current_ids)
                         if contract_edit_is_dirty(
                             obj, f.cleaned_data, request.user, related_changed=related_changed
                         ):
-                            new_files = []
-                            for ref in bucket["add"]:
-                                fh = upload_services.open_pending_file(ref["temp_name"])
-                                fh.name = ref["original_name"]
-                                opened_files.append(fh)
-                                new_files.append(fh)
-                            apply_contract_edit(
-                                obj, f.cleaned_data, request.user, bucket["remove"], new_files
-                            )
+                            apply_contract_edit(obj, f.cleaned_data, request.user, related_ids)
                             audit_services.log(
                                 employee=request.user,
                                 action="保管画面２　更新",
@@ -720,20 +725,13 @@ class BulkEditView(RequiresContractEditMixin, View):
                             status_by_pk[pk] = "更新なし"
                     else:
                         status_by_pk[pk] = "更新なし"
-        except (OSError, PendingFileStorageError, DBError):
+        except DBError:
             logger.exception(
                 "契約書の一括編集確定中にエラーが発生しました: employee_no=%s", request.user.employee_no
             )
             messages.error(request, "更新に失敗しました。もう一度お試しください。")
             return redirect("contracts:bulk_edit")
-        finally:
-            for fh in opened_files:
-                try:
-                    fh.close()
-                except OSError:
-                    pass
 
-        bulk_edit_services.discard_staged_related_files(state)
         bulk_edit_services.clear_bulk_edit_state(request.session, BULK_EDIT_SESSION_KEY)
         return self._render_complete(request, pks, status_by_pk)
 
@@ -765,6 +763,8 @@ class BulkEditView(RequiresContractEditMixin, View):
                 "contract": self.object,
                 "token": token,
                 "title_field": form["title_0"],
+                "related_rows": _related_rows_for_contract(self.object),
+                "related_search_url": reverse("contracts:api_related_search"),
                 "complete": {"mode": "bulk", "rows": rows, "counts": counts},
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
@@ -790,20 +790,17 @@ class BulkEditView(RequiresContractEditMixin, View):
             "marked_delete": marked_delete,
             "can_delete": deletion_services.can_delete(self.object),
             "related_rows": self._related_rows(state),
+            "related_search_url": reverse("contracts:api_related_search"),
         }
 
     def _related_rows(self, state):
-        """一括編集画面の[3]関連書類の表示行。既存（ステージ済みの削除を除外）＋ステージ済みの
-        追加（「追加予定」）。追加分の個別取消は用意しない（キャンセルで一括破棄する。"""
-        bucket = bulk_edit_services.staged_related_for(state, self.object.pk)
-        removed = set(bucket["remove"])
-        rows = [
-            {"kind": "existing", "id": rf.pk, "name": rf.display_name}
-            for rf in self.object.related_files.all()
-            if rf.pk not in removed
-        ]
-        rows += [{"kind": "staged_add", "id": None, "name": ref["original_name"]} for ref in bucket["add"]]
-        return rows
+        """一括編集画面の[3]関連書類の表示行。そのページで関連書類を編集済み（ステージあり）なら
+        ステージ内容を、未編集なら現在の紐付けを表示する（他のフォーム欄と同じ「ステージ優先・
+        なければ現状」方式）。"""
+        staged_ids = bulk_edit_services.staged_related_ids_for(state, self.object.pk)
+        if staged_ids is None:
+            return _related_rows_for_contract(self.object)
+        return _resolve_related_rows(staged_ids)
 
     def _build_form(self, obj, data=None, marked_delete=False):
         form = UploadStep2Form(
@@ -976,6 +973,69 @@ class EditDeleteView(DeleteView):
 
 def _strip_ext(filename):
     return filename.rsplit(".", 1)[0] if "." in filename else filename
+
+
+# --- 関連書類（紐付け先契約書）の再描画用ヘルパー（Rev1.6） --------------------------------
+# フォーム再描画（GET・バリデーションエラー・「削除」後・一括編集のページ移動）で、hidden input
+# の pk 並びをテンプレートの表示行へ解決する。保存時の実在・権限チェックは
+# contracts.services.filter_valid_related_ids が担い、ここは見た目のみ（存在しないpkは黙って落とす）。
+
+def _related_rows_for_contract(contract):
+    """`contract.related_links`（related_contract を prefetch 済み前提）を編集画面の表示行へ。"""
+    return [
+        {
+            "id": link.related_contract_id,
+            "title": link.related_contract.title,
+            "is_deleted": link.related_contract.is_deleted,
+        }
+        for link in contract.related_links.all()
+    ]
+
+
+def _resolve_related_rows(raw_ids):
+    """契約書pk（文字列可・順序保持・重複可）のリストを表示行 `[{id, title, is_deleted}]` に解決する。"""
+    int_ids = []
+    for tok in raw_ids:
+        try:
+            int_ids.append(int(tok))
+        except (TypeError, ValueError):
+            continue
+    by_pk = {c.pk: c for c in Contract.objects.filter(pk__in=int_ids)}
+    rows = []
+    seen = set()
+    for pk in int_ids:
+        contract = by_pk.get(pk)
+        if contract is not None and pk not in seen:
+            seen.add(pk)
+            rows.append({"id": contract.pk, "title": contract.title, "is_deleted": contract.is_deleted})
+    return rows
+
+
+def _merge_related_into_field_sets(field_sets, per_file_related_ids):
+    """`core.upload_views.file_field_sets` の各要素に、そのファイルの関連書類表示行
+    （`related_contracts`）を足し込む。`per_file_related_ids` はファイルごとの契約書pkリストの
+    リスト（None＝全ファイル空）。storage2.html はメタデータ欄と同じ添字で [3] 関連書類を描く。"""
+    for i, field_set in enumerate(field_sets):
+        raw = (
+            per_file_related_ids[i]
+            if per_file_related_ids and i < len(per_file_related_ids)
+            else []
+        )
+        field_set["related_contracts"] = _resolve_related_rows(raw)
+    return field_sets
+
+
+def _remap_related_ids_after_remove(post_data, *, removed_index, new_count):
+    """「削除」（表示中ファイルの取り消し）で残ったファイルの related_contract_ids を添字詰め直し。
+    remap_step2_initial_after_remove の関連書類版（あちらは単一値フォーム欄のみ扱う）。"""
+    out = []
+    src = 0
+    for _dst in range(new_count):
+        if src == removed_index:
+            src += 1
+        out.append(post_data.getlist(f"related_contract_ids_{src}"))
+        src += 1
+    return out
 
 
 def _pending_preview_context(request, pending):

@@ -184,7 +184,8 @@ def remap_step2_initial_after_remove(post_data, *, removed_index, new_count, per
 
     削除位置より後ろのファイルの値を1つ前の添字へずらす。空文字・未送信キーは入れず、
     フォーム側の既定値・プレースホルダ（部署＝自部署、年＝当年、タイトル＝ファイル名等）に任せる。
-    ファイル入力（contracts の `related_files_N`）はブラウザ仕様で値を復元できないため対象外。
+    単一値のフォーム欄のみ扱う。契約書の関連書類（`related_contract_ids_N`、複数値）は
+    `contracts.views._remap_related_ids_after_remove` が別途詰め直す。
     """
     initial = {}
     src = 0

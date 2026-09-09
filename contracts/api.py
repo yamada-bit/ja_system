@@ -11,12 +11,18 @@ from django.views import View
 from contracts.models import Contract
 from contracts.services import can_delete
 from contracts.views import PENDING_SESSION_KEY, RequiresContractEditMixin
+from core import search_services
 from core.api import BaseOptionListAPIView
 from core.file_type_services import get_preview_kind
+from core.forms import MATCH_AND, MATCH_OR
 from core.notice_services import is_expiring_soon
 from core.upload_views import BaseChunkUploadAPIView
 from masters.models import DocKbn
 from permissions.services import can_download, can_edit_contract, contract_searchable_department_ids
+
+# 関連書類ポップアップ検索の1回あたり最大返却件数（xlsx 保管!B480「簡易的に検索」に沿って
+# 大量ヒット時も上限で打ち切る。popup-select の一覧描画コストの目安に合わせた）。
+RELATED_SEARCH_LIMIT = 50
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +54,7 @@ class DetailAPIView(LoginRequiredMixin, View):
     def get(self, request, pk):
         contract = get_object_or_404(
             Contract.objects.select_related("department", "group", "category", "uploader").prefetch_related(
-                "related_files"
+                "related_links__related_contract"
             ),
             pk=pk,
         )
@@ -83,7 +89,25 @@ class DetailAPIView(LoginRequiredMixin, View):
                 "contract_partner": contract.contract_partner,
                 "expiry_date": str(contract.expiry_date),
                 "memo": contract.memo,
-                "related_files": [rf.display_name for rf in contract.related_files.all()],
+                # xlsx 検索・閲覧・変更!B677-680(Rev1.6)「関連資料」：紐付け先契約書1件ごとに
+                # {title, is_deleted, preview_url}。preview_url は「削除されておらず、かつダウンロード
+                # 権限がある」ときだけ埋める。common.js renderDetailPopup() が
+                #  ・preview_url あり  → ファイル名をリンク化しクリックで別タブにPDFプレビュー
+                #  ・is_deleted=true   → 赤フォント＋クリックで「既に削除されている関連資料です」
+                #  ・どちらでもない    → 素テキスト（権限不足）
+                # に振り分ける。
+                "related_contracts": [
+                    {
+                        "title": link.related_contract.title,
+                        "is_deleted": link.related_contract.is_deleted,
+                        "preview_url": (
+                            reverse("contracts:preview", args=[link.related_contract_id])
+                            if can_dl and not link.related_contract.is_deleted
+                            else None
+                        ),
+                    }
+                    for link in contract.related_links.all()
+                ],
                 "uploader": contract.uploader.name,
                 # documents.api.DetailAPIViewと同じ理由（xlsx検索・閲覧画面の詳細ポップアップ
                 # 「保存日時」欄、Rev1.1で追加）。
@@ -132,3 +156,53 @@ class DetailAPIView(LoginRequiredMixin, View):
                 ),
             }
         )
+
+
+class RelatedSearchAPIView(RequiresContractEditMixin, View):
+    """関連書類ポップアップ（保管画面２／編集画面の[3]関連書類「ファイルの選択」）用の契約書検索API。
+
+    xlsx 保管!B478-484(Rev1.6)：「関連する(紐付ける)契約書を選択する。既に保存済みの契約書を
+    検索してセットする」「検索画面はポップアップ形式とし『契約書タイトル』『フリーワード』で
+    簡易的に検索できるものとする」「検索範囲はログインユーザーの閲覧権限範囲と同等とする」。
+
+    - `title` / `freeword` クエリパラメータで絞り込む（両方空なら閲覧範囲の全件を上限まで）。
+      マッチ方式は検索画面と揃えず、簡易検索として OR 固定（スペース区切りのいずれかを含む）。
+    - `exclude` に自分自身の契約書pkを渡すと結果から外す（編集画面での自己紐付け防止）。
+    - 削除済み（is_deleted=True）は対象外。並びは更新日時の新しい順、`RELATED_SEARCH_LIMIT` 件まで。
+
+    保存・編集画面と同じ `RequiresContractEditMixin`（＝「契約書-契約書-契約書情報変更」権限）で
+    保護する。閲覧範囲は検索一覧と同じ `contract_searchable_department_ids`。
+    """
+
+    def get(self, request):
+        qs = Contract.objects.filter(is_deleted=False).select_related("department")
+        allowed_department_ids = contract_searchable_department_ids(request.user)
+        if allowed_department_ids is not None:
+            qs = qs.filter(department_id__in=allowed_department_ids)
+
+        exclude_raw = request.GET.get("exclude", "")
+        if exclude_raw:
+            try:
+                qs = qs.exclude(pk=int(exclude_raw))
+            except ValueError:
+                logger.warning(
+                    "関連書類検索APIに不正なexcludeが指定されました: value=%r user=%s",
+                    exclude_raw, request.user.employee_no,
+                )
+
+        title = request.GET.get("title", "").strip()
+        freeword = request.GET.get("freeword", "").strip()
+        if title:
+            qs = search_services.apply_word_filter(qs, "title", title, MATCH_OR, match_and=MATCH_AND)
+        if freeword:
+            qs = search_services.apply_freeword_filter(qs, freeword, MATCH_OR, match_and=MATCH_AND)
+
+        items = [
+            {
+                "value": c.pk,
+                "label": c.title,
+                "sub": f"{c.department.section_name}／{c.year}年",
+            }
+            for c in qs.order_by("-updated_at")[:RELATED_SEARCH_LIMIT]
+        ]
+        return JsonResponse({"items": items})

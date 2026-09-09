@@ -137,45 +137,6 @@ def remove_pending_file(session, session_key, index):
     return removed
 
 
-def stash_files_to_tmp(files):
-    """アップロードされたファイル群を `MEDIA_ROOT/tmp_uploads/` へ退避し、
-    `[{"temp_name", "original_name"}, ...]` を返す（セッションには結びつけない）。
-
-    一括編集ウィザード（`core.bulk_edit_services`）が、契約書の関連書類の「追加」を
-    「更新」ボタン押下まで確定させずにステージしておくために使う。実際の `RelatedFile` への
-    移動は確定時に `open_pending_file()` で開き直して行う。`save_pending_files` と同じ
-    ファイルI/O例外方針（`OSError` は `PendingFileStorageError` にラップ、ループ途中失敗時は
-    このループで書いた分だけロールバック）。
-    """
-    tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
-    try:
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.exception("一時アップロード領域の作成に失敗しました: %s", tmp_dir)
-        raise PendingFileStorageError("一時アップロード領域を作成できませんでした。") from exc
-
-    refs = []
-    written = []
-    for uploaded_file in files:
-        temp_name = f"{uuid.uuid4().hex}_{uploaded_file.name}"
-        temp_path = tmp_dir / temp_name
-        try:
-            with open(temp_path, "wb") as dest:
-                for chunk in uploaded_file.chunks():
-                    dest.write(chunk)
-        except OSError as exc:
-            logger.exception("関連書類の一時退避に失敗しました: %s", temp_path)
-            for p in written:
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    logger.exception("失敗ロールバック中の一時ファイル削除にも失敗しました: %s", p)
-            raise PendingFileStorageError("ファイルの保存に失敗しました。") from exc
-        written.append(temp_path)
-        refs.append({"temp_name": temp_name, "original_name": uploaded_file.name})
-    return refs
-
-
 def open_pending_file(temp_name):
     """一時保存されたファイルをDjangoのFileオブジェクトとして開く（モデルのFileFieldへ割り当てる用）。
     呼び出し側でクローズすること。

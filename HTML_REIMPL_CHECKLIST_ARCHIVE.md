@@ -1222,3 +1222,159 @@ CSV所属長フラグ降格）しか塞いでおらず、**同じ Rev1.5 の 職
   のまま＝原本と同じ上寄せ）。文書・契約書 search.html が同一 id を使うため1ルールで両対応。
 - **確認**：`seed_test_data` の管理者（9005）でログインし実プレビュー。枠 320px に対し
   左右の余白が 43px / 43px で一致（修正前は左 0 相当）。コンソールエラーなし。
+
+## 簡易設計指示書 Rev1.6 改訂の反映（2026-09-09〜、ユーザー依頼）
+
+原本HTMLの改訂は**なし**（html6 が最新のまま、style.css も無変更）。xlsx 単独改訂。差分の
+洗い出しは作業用の差分レポート（反映完了後に削除。内容は本節に統合済み）で行った。変更は全16シート中
+`表紙`／`保管`／`検索・閲覧・変更` の3シートのみで、すべて**契約書モード限定**。画像（スクショ）は
+1枚も変化なし（`drawing13.xml` の差分は行挿入に伴うアンカー +2 シフトのみ）。
+
+本質的な変更は「契約書の**関連書類**機能の仕様転換」：
+
+| No. | シート | 内容 |
+|---|---|---|
+| R6-1 | 保管（契約書） | 関連書類を「物理ファイルのアップロード」→「既に保管済みの契約書をポップアップ検索して複数紐付け」へ転換 |
+| R6-2 | 保管（契約書） | (X)ボタン説明文言：「選択したファイルの**紐付け**を取り止める」→「**関連付け**を取り止める」（文言修正のみ） |
+| R6-3 | 検索・閲覧・変更（契約書） | 新規項目「関連資料」＝紐付けた契約書をファイル名リンク化しクリックでPDFを開く。削除済みは赤フォント＋「既に削除されている関連資料です」 |
+
+ユーザー判断（2026-09-09、`AskUserQuestion`）：
+- **R6-1 のモデル**：`RelatedFile`（物理ファイル）を**完全置換**（`t_contract_attachment` 廃止、
+  契約書same-to-same の自己参照リンクへ）。本番リリース前のため既存アップロード済みデータは破棄。
+- **R6-3 のリンク先**：紐付け先契約書の PDF を新規タブで開く（既存 `PreviewView`）。
+- html6 が未改訂の点はユーザーが差分レポートを確認の上で反映を指示。
+
+### R6-2 (X)ボタン説明文言の修正 — ja_pj では実装変更なし（2026-09-09）
+
+xlsx 保管!（契約書）「関連書類「ファイルの選択」後の(X)ボタン」の説明文が Rev1.6 で
+「選択したファイルの**紐付け**を取り止める。(行削除)」→「選択したファイルの**関連付け**を
+取り止める。(行削除)」に変わった（AI注記「Rev1.6 文言修正」）。
+
+- ja_pj の (X) ボタン（`btn-delete-file`）はキャプションが「×」のみで、xlsx の説明文に対応する
+  ユーザー可視文字列を画面に持たない（原本 html6 も同様）。よって**コード変更は不要**。
+- 「(行削除)」＝選択済み行をその場で取り消す挙動は、R6-1 の新モデル（紐付け先契約書のリスト
+  から1行外す）でそのまま踏襲する。
+- CLAUDE.md「ユーザー指示で意図的に見送った原本との差異…実装せず理由付きで記録」の方針に沿って
+  ここに記録。テスト追加も無し（挙動変更が無いため）。
+
+### R6-1 関連書類：物理ファイルアップロード → 既存契約書のポップアップ検索・複数紐付けへ（2026-09-09）
+
+xlsx 保管!B478-484（契約書モード）：関連書類を「関連する(紐付ける)契約書を選択する。既に保存済みの
+契約書を検索してセットする」「検索画面はポップアップ形式とし『契約書タイトル』『フリーワード』で
+簡易的に検索」「検索範囲はログインユーザーの閲覧権限範囲と同等」「複数選択し、関連確定出来る」に
+転換。原本 html6 は未改訂（file input のまま）だが、ユーザーが差分レポート確認の上で反映を指示。
+
+**モデル（`AskUserQuestion` で「完全置換」を選択）**：
+- `contracts.models.RelatedFile`（物理ファイル `FileField`、`t_contract_attachment`）を撤去し、
+  `ContractRelation`（`contract` / `related_contract` の2FK＋`display_order`、`t_contract_relation`）を新設。
+  両FKとも `on_delete=CASCADE`。`UniqueConstraint(contract, related_contract)` と
+  `CheckConstraint(contract != related_contract)` を付与。
+- **マイグレーション**：本番リリース前のため、旧 `RelatedFile`（`t_contract_attachment`）の履歴は
+  残さず `0001_initial` の当該 `CreateModel` を `ContractRelation`（＋2つの `AddConstraint`）に
+  直接置き換えて畳み込んだ（2026-09-09、ユーザー依頼「マイグレーションは0001_だけにして」）。
+  contracts の運用マイグレーションは `0001_initial` の1本のみ。`contracts.storage_paths.
+  related_file_upload_path` も撤去。フレッシュ環境は `migrate` 一発で最終スキーマになる。
+- 既存アップロード済み関連書類データは破棄。切替時に運用側で `MEDIA_ROOT/contracts/related/` を
+  手動削除すること（0001 のコメントにも明記）。
+- （経緯：当初は破壊的な別マイグレーション `0002_rev16_related_contract_link` として作成し dev DB に
+  適用済みだったが、上記ユーザー依頼で 0001 へ畳み込み。dev DB は `manage.py migrate contracts 0001
+  --fake` 相当＋`django_migrations` の 0002 レコード削除でスキーマそのままに履歴だけ整理した。）
+
+**新API**：`contracts:api_related_search`（`contracts.api.RelatedSearchAPIView`、`RequiresContractEditMixin`
+で保護）。`title` / `freeword`（簡易検索のため OR 固定）で `contract_searchable_department_ids` の
+範囲内・`is_deleted=False`・`exclude`（自分自身）を除いた契約書を更新日時の新しい順に最大
+`RELATED_SEARCH_LIMIT`（50）件返す。タイトル/フリーワードのマッチは検索一覧と同じ
+`core.search_services.apply_word_filter` / `apply_freeword_filter` を流用。
+
+**ポップアップ UI**：`templates/base.html` に `#popup-related-search`（`popup-select` と同じ
+`style-popup-select` クラス。契約書タイトル／フリーワード入力＋「検索」＋結果チェックボックス＋
+「確定」）を新設。`common.js` は `openRelatedSearchPopup` / `runRelatedSearch` /
+`renderRelatedSearchResults` / `submitRelatedSearchSelection` を追加。確定は「結果ページで
+チェックしたものを追加、外したものを削除、結果に出ていない既存の紐付けは維持」で複数回検索を
+またいで累積できる。`popup-select` のドラッグ/リサイズ IIFE は `makePopupMovable()` に、
+`positionPopupPopup` は `positionPopupPopupEl(btn, el)` に切り出して両ポップアップで共用。
+`handleRelatedFileChange` / `removeRelatedFileRow` / `removeExistingRelatedFile`（file input 時代の
+関数）は撤去。
+
+**送信形式**：選んだ契約書1件につき hidden input を1つ。保管画面は `related_contract_ids_{index}`
+（ファイルごと）、編集・一括編集は `related_contract_ids`。`request.POST.getlist()` で受ける。
+サーバー側は `contracts.services.filter_valid_related_ids(ids, employee, exclude_pk)` で実在・
+閲覧範囲内・自分以外に絞る（改ざん対策。外れた値は `logger.warning`）。同期は
+`sync_related_contracts(contract, related_ids)`（全量リストに一致させる：外れた行を削除、新規を追加、
+`display_order` を並びに合わせる）。
+
+**ビュー**：
+- `UploadStep2View`：`RelatedFile.objects.create` ループ → `sync_related_contracts`。関連書類の
+  ファイルI/Oが無くなったため `created_related` の孤児ファイル後始末を撤去。「削除」（表示中ファイルの
+  取り消し）でも `_remap_related_ids_after_remove` で hidden input を添字詰め直し＝選び直し不要に。
+  再描画は `_merge_related_into_field_sets` で `file_field_sets` の各要素に `related_contracts` を注入。
+- `ContractEditView`：`apply_contract_edit(contract, cleaned_data, employee, related_ids)`（差分
+  `remove_ids`/`new_related_files` → 全量 `related_ids`）。ファイルI/O例外が無くなり `except OSError`
+  を撤去（`except DBError` は維持）。`related_rows`（`{id,title,is_deleted}`）をテンプレートへ。
+- `BulkEditView`：`core.bulk_edit_services` の `stage_related`（tmp退避）→ `stage_related_ids`
+  （pkリストを丸ごと上書き）、`staged_related_for` → `staged_related_ids_for`。
+  `discard_staged_related_files` と `core.upload_services.stash_files_to_tmp` は未使用になり撤去
+  （`discard_bulk_edit` は state 破棄のみに）。確定パスの `opened_files` / `PendingFileStorageError`
+  ハンドリングも撤去。
+- `core.management.commands.purge_expired_deleted_records`：契約書の `extra_files_fn`
+  （related_files のファイル実体退避）を撤去。ContractRelation は CASCADE で自動削除。
+
+**編集テンプレート**：`edit.html` の [3] は bulk / 単独 の分岐を廃し `related_rows` の1ループに統一。
+`storage2.html` の [3] は `#storage-related-container-{index}`＋「ファイルの選択」ボタンへ。
+`remove_related_ids` hidden・file input・「関連書類は選び直しが必要です」の注記を撤去。
+
+**テスト**：`contracts/tests.py` の関連書類テスト群を全面改修（`RelatedSearchAPIViewTests` 新規3件、
+`RelatedFilesMultiUploadTests`・`BulkEditViewTests`・`ContractEditViewFileHandlingTests`・
+`DetailAPIViewTests`・`DeleteViewAjaxTests` を ContractRelation ベースに書き換え、
+`StoragePathTests` の related_file_upload_path 2件は削除）。`core/tests.py` の
+`BulkEditServicesStagingTests` 2件・`PurgeExpiredDeletedRecordsCommandTests` 1件も書き換え。
+`manage.py test` 全846件 PASS（R6-3 まで反映後の最終値）。
+
+**ブラウザ確認**（seed_test_data、9005 管理四郎）：契約書編集 [3]「ファイルの選択」→ ポップアップで
+「Book1」を検索・チェック・確定 → 行「📎 Book1 ×」表示 → 更新 → `ContractRelation(6→5)` が永続化。
+検索・閲覧の詳細ポップアップ「関連書類」欄に紐付け先タイトル「📎 Book1」表示。コンソールエラー無し。
+（seed の契約書pk1・3・7 は category が doc_kbn=document の不正データで編集フォームが元々
+バリデーションエラーになる別問題。R6-1 とは無関係。）
+
+**detail API**：R6-1 では `related_files` キーで紐付け先契約書タイトルの配列を返すだけ（表示は
+素テキスト踏襲）。リンク化・削除済み赤表示は R6-3 で対応。
+
+### R6-3 検索・閲覧・変更（契約書）「関連書類」欄をリンク化・削除済みは赤表示（2026-09-09）
+
+xlsx 検索・閲覧・変更!B677-680（Rev1.6 仕様追加、原本ラベルは「関連資料」だが html6 の詳細
+ポップアップは「関連書類」で未改訂＝そのまま踏襲）：
+- 関連資料が設定されている場合はファイル名にリンクを設定し、クリックでPDFファイルが開ける。
+- 関連資料が既に削除されている場合は赤フォントで表示し、クリック時に「既に削除されている
+  関連資料です」とメッセージを表示する。
+
+ユーザー判断（`AskUserQuestion`）：リンク先は**紐付け先契約書のPDFを新規タブで開く**（既存
+`contracts:preview` / `PreviewView`）。
+
+- **`contracts.api.DetailAPIView`**：`related_files`（タイトル配列）→ `related_contracts`
+  （`[{title, is_deleted, preview_url}]`）。`preview_url` は「紐付け先が削除されておらず、かつ
+  閲覧者に契約書ダウンロード権限がある」ときだけ `reverse("contracts:preview", args=[pk])` を入れ、
+  それ以外は `None`。
+- **`static/js/common.js`**：詳細ポップアップのプロパティ表「関連書類」行を
+  `renderRelatedResourceLink(rc)` で組む。
+  - `preview_url` あり → `<a target="_blank" rel="noopener">📎 タイトル</a>`
+  - `is_deleted` → `<a href="#" style="color:#c0392b" onclick="alertDeletedRelatedResource();return false;">`
+    （`alertDeletedRelatedResource()` は `alert("既に削除されている関連資料です")` のみ）
+  - どちらでもない（権限不足）→ 素テキスト
+  タイトルは `escapeHtml` 済みの整形済みHTMLとして innerHTML へ（従来の複数ファイル名 `<br>` 連結と
+  同じ扱い）。
+- ついでに Rev1.6 で不要になったコメント・引数を整理：`core.upload_views.
+  remap_step2_initial_after_remove` の docstring、`core.management.commands.
+  purge_expired_deleted_records._purge` の `extra_files_fn` 引数（関連書類がファイルを持たなくなり
+  未使用に）と `_delete_file` の `related_pk` 引数を撤去。
+
+**テスト**：`contracts/tests.py DetailAPIViewTests` に `related_contracts` の3ケース
+（権限ありでpreview_url／削除済みで is_deleted=true・preview_url=null／権限なしで preview_url=null）。
+`core/tests.py` の物理削除バッチのpkログ検証は末尾スペース依存だったのを緩めた。
+`manage.py test` 全846件 PASS。
+
+**ブラウザ確認**（seed_test_data、9005）：契約書「Print」に「Book1」（有効）と「削除済み旧契約
+2020」（is_deleted=True）を紐付け → 検索・閲覧の詳細ポップアップで「📎 Book1」が
+`/contracts/5/preview/` への別タブリンク、「📎 …削除済み旧契約2020」が赤字＋クリックで
+「既に削除されている関連資料です」。コンソールエラー無し。
+
+これで Rev1.6（R6-1／R6-2／R6-3）の反映は完了。

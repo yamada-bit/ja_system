@@ -29,6 +29,30 @@
     <div class="resize-handle" id="popup-select-resize"></div>
   </div>
 
+  {# popup-related-search: 契約書「関連書類」欄の紐付け先契約書を検索するポップアップ（Rev1.6、 #}
+  {# xlsx 保管!B478-484。契約書保管／編集画面の[3]関連書類「ファイルの選択」から使う）。 #}
+  <div id="popup-related-search" class="style-popup-select hidden-popup">
+    <div class="popup-select-header">
+      <span>関連書類の選択（契約書検索）</span>
+      <button type="button" onclick="closeRelatedSearchPopup()">&times;</button>
+    </div>
+    <div class="popup-select-body">
+      <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;">
+        <input type="text" id="related-search-title" placeholder="契約書タイトル"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();runRelatedSearch();}">
+        <input type="text" id="related-search-freeword" placeholder="フリーワード"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();runRelatedSearch();}">
+        <button type="button" class="btn-popup-submit" onclick="runRelatedSearch()">検索</button>
+      </div>
+      <div id="related-search-results"></div>
+    </div>
+    <div class="popup-select-footer">
+      <button type="button" class="btn-cancel" onclick="closeRelatedSearchPopup()">キャンセル</button>
+      <button type="button" class="btn-popup-submit" onclick="submitRelatedSearchSelection()">確定</button>
+    </div>
+    <div class="resize-handle" id="popup-related-search-resize"></div>
+  </div>
+
   {# popup-detail: 検索結果詳細ポップアップ（共通、既定非表示。documents/contracts双方の検索画面から使う） #}
   <div id="popup-detail" class="popup-window" style="display:none;">
     <div class="popup-header-alert" id="detail-alert-banner" style="display:none;"></div>

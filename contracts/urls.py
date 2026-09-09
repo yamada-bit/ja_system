@@ -11,6 +11,7 @@ urlpatterns = [
     path("upload/step2/preview/<int:index>/", views.PendingPreviewView.as_view(), name="upload_step2_preview"),
     path("search/", views.SearchView.as_view(), name="search"),
     path("api/options/", api.OptionListAPIView.as_view(), name="api_options"),
+    path("api/related-search/", api.RelatedSearchAPIView.as_view(), name="api_related_search"),
     path("api/<int:pk>/", api.DetailAPIView.as_view(), name="api_detail"),
     path("<int:pk>/edit/", views.ContractEditView.as_view(), name="edit"),
     path("<int:pk>/download/", views.DownloadView.as_view(), name="download"),

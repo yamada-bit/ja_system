@@ -13,21 +13,16 @@ HTML_REIMPL_CHECKLIST_ARCHIVE.md「一括編集を全ページ一括確定モデ
         "index": int,                # 現在表示中のページ位置
         "staged": {"<pk>": {<フォームフィールド名>: "<生値>"}},  # 入力欄に触れたページ
         "to_delete": [int, ...],     # 「削除」ボタンでマークされた削除予定pk
-        "staged_related": {"<pk>": {"add": [{"temp_name", "original_name"}], "remove": [int]}},
+        "staged_related": {"<pk>": {"related_ids": [int, ...]}},  # 関連書類を編集したページ
     }
 
 `staged` のキーは `str(pk)`（Djangoのセッションは既定でJSONシリアライズし、dictの整数キーは
 文字列化されるため、最初から文字列で統一する）。`staged_related` は契約書の関連書類専用で、
-追加ファイルは `MEDIA_ROOT/tmp_uploads/` に退避し `temp_name` だけを持つ（キャンセル・確定後に
-`discard_staged_related_files()` で実体を掃除する）。
+Rev1.6で「紐付け先契約書pkの全量リスト」だけを持つ（Rev1.5までは物理ファイルを tmp_uploads/ に
+退避していたが、関連書類が既存契約書への参照になったためファイルI/Oは消えた）。
 """
 
 import logging
-from pathlib import Path
-
-from django.conf import settings
-
-from core.upload_services import TMP_UPLOAD_SUBDIR
 
 logger = logging.getLogger(__name__)
 
@@ -136,51 +131,29 @@ def is_marked_for_delete(state, pk):
     return bool(state) and pk in state.get("to_delete", [])
 
 
-def stage_related(session, session_key, pk, *, add_refs=None, remove_ids=None):
-    """契約書の関連書類の増減をステージする。`add_refs`は tmp_uploads/ へ退避済みの
-    `[{"temp_name", "original_name"}]`、`remove_ids`は既存RelatedFileのpkリスト。
-    同じページで複数回呼ばれても累積する（×は既存行、file inputは新規追加）。"""
+def stage_related_ids(session, session_key, pk, related_ids):
+    """契約書の関連書類（紐付け先契約書pkの並び）をステージする。`related_ids`はそのページで
+    最終的に紐付けたい契約書pkの全量リスト（差分ではない）。ページを送信するたびに丸ごと
+    上書きする（Rev1.6：ポップアップ検索で選び直した結果をそのまま反映する方式）。"""
     state = session.get(session_key)
     if state is None:
         return
-    bucket = state.setdefault("staged_related", {}).setdefault(str(pk), {"add": [], "remove": []})
-    if add_refs:
-        bucket["add"].extend(add_refs)
-    if remove_ids:
-        for rid in remove_ids:
-            if rid not in bucket["remove"]:
-                bucket["remove"].append(rid)
+    state.setdefault("staged_related", {})[str(pk)] = {"related_ids": list(related_ids)}
     session[session_key] = state
     session.modified = True
 
 
-def staged_related_for(state, pk):
-    """`{"add": [...], "remove": [...]}`（無ければ空の同型dict）。"""
+def staged_related_ids_for(state, pk):
+    """そのページでステージ済みの紐付け先契約書pkリスト、無ければ `None`（＝未編集＝現状維持）。"""
     if not state:
-        return {"add": [], "remove": []}
-    return state.get("staged_related", {}).get(str(pk), {"add": [], "remove": []})
-
-
-def discard_staged_related_files(state):
-    """`staged_related`の全 add エントリの一時ファイル実体を tmp_uploads/ から削除する
-    （キャンセル時、および「更新」確定でRelatedFileへ移し終えた後に呼ぶ）。削除失敗は
-    `clear_pending_files`と同じく握りつぶしてログに残し、処理は止めない。"""
-    if not state:
-        return
-    tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
-    for bucket in state.get("staged_related", {}).values():
-        for ref in bucket.get("add", []):
-            try:
-                (tmp_dir / ref["temp_name"]).unlink(missing_ok=True)
-            except OSError:
-                logger.exception(
-                    "一括編集ステージの関連書類一時ファイル削除に失敗しました: %s", ref.get("temp_name")
-                )
+        return None
+    bucket = state.get("staged_related", {}).get(str(pk))
+    return bucket["related_ids"] if bucket else None
 
 
 def discard_bulk_edit(session, session_key):
-    """「キャンセル」ボタン。ステージした関連書類の一時ファイルを掃除してからstateを破棄する。"""
-    discard_staged_related_files(session.get(session_key))
+    """「キャンセル」ボタン。stateを破棄する（Rev1.6で関連書類の一時ファイルが無くなったため
+    掃除処理は不要になった）。"""
     clear_bulk_edit_state(session, session_key)
 
 

@@ -75,9 +75,9 @@
           <div style="flex-grow:1; overflow-y:auto; max-height:380px; padding-right:5px;">
             {# 2026-08-31ユーザー確定：複数ファイル一括登録時、メタデータは「全件共通」ではなく #}
             {# ページャーで表示中のファイルごとに個別入力する（documents/storage2.htmlと同じ）。 #}
-            {# file_field_sets（core.upload_views）がファイル単位のフィールド束を渡し、JS が #}
-            {# data-doc-index で .doc-fieldset の表示/非表示を切り替える。関連書類も同じ添字で #}
-            {# ファイルごとに独立（related_files_{index}、以前から一括登録対応済み）。 #}
+            {# file_field_sets（core.upload_views、Rev1.6で各要素に related_contracts も同梱）が #}
+            {# ファイル単位のフィールド束を渡し、JS が data-doc-index で .doc-fieldset の表示/非表示を #}
+            {# 切り替える。関連書類も同じ添字でファイルごとに独立（related_contract_ids_{index}）。 #}
             {% for fs in file_field_sets %}
             <div class="doc-fieldset" data-doc-index="{{ fs.index }}"{% if fs.index != active_doc_index %} style="display:none;"{% endif %}>
               <div class="form-section">
@@ -125,17 +125,26 @@
               <div class="form-section">
                 <h4>[3] 関連書類</h4>
                 {% comment %}
-                  原本index.html:1567-1589のsetupStorageFormForActiveDoc()は、アクティブ文書を
-                  切り替えるたびに関連書類欄のコンテナをリセットする＝一括登録の各契約書ごとに
-                  個別の関連書類を添付できる想定。契約書タイトル欄と同じdata-doc-index方式で
-                  文書ごとに独立したコンテナ・inputを用意する（.doc-fieldset内へ移設）。
+                  Rev1.6（xlsx 保管!B478-484）：関連書類は「既に保存済みの契約書をポップアップ検索して
+                  複数紐付ける」方式。ファイルごとに独立したコンテナ（data-doc-index方式）を持ち、
+                  選んだ契約書1件につき hidden input related_contract_ids_{index} を1つ持つ。
+                  「ファイルの選択」ボタンで base.html の #popup-related-search を開く。
                   ※ 複数行コメントは {# #} だと画面に生表示される（CLAUDE.md 既知の罠）。
                 {% endcomment %}
                 <div class="form-row" style="flex-direction:column; align-items:flex-start; gap:5px;">
                   <label style="width:100%;">関連書類</label>
-                  <div id="storage-file-inputs-container-{{ fs.index }}" style="width:100%;">
-                    <div class="related-file-row">
-                      <input type="file" name="related_files_{{ fs.index }}" onchange="handleRelatedFileChange(this)">
+                  <div id="storage-related-container-{{ fs.index }}" style="width:100%;"
+                       data-field-name="related_contract_ids_{{ fs.index }}"
+                       data-api-url="{{ related_search_url }}">
+                    {% for c in fs.related_contracts %}
+                      <div class="related-file-row">
+                        <span class="related-file-name">📎 {{ c.title }}</span>
+                        <input type="hidden" class="related-contract-id" name="related_contract_ids_{{ fs.index }}" value="{{ c.id }}">
+                        <button type="button" class="btn-delete-file" onclick="this.closest('.related-file-row').remove()">×</button>
+                      </div>
+                    {% endfor %}
+                    <div class="related-file-row related-select-row">
+                      <button type="button" class="btn-select-file" onclick="openRelatedSearchPopup(this)">ファイルの選択</button>
                     </div>
                   </div>
                 </div>
@@ -249,15 +258,13 @@
     };
 
     // [4]メモ欄「削除」ボタン＝表示中ファイルのアップロード取り消し（documents/storage2.htmlと同じ）。
-    // メインフォームごと送信し、他ファイルの入力値はサーバー側で詰め直して保持する
-    // （UploadStep2View._handle_remove）。関連書類（file input）はブラウザ仕様で復元できないため、
-    // 破棄されるファイルの分だけでなく残るファイルの添付も送信前に無効化して二重アップロードを避ける
-    // （どのみち再描画後に選び直しになる）。
+    // メインフォームごと送信し、他ファイルの入力値（関連書類のhidden inputを含む）はサーバー側で
+    // 詰め直して保持する（UploadStep2View._handle_remove）。Rev1.6で関連書類がfile inputから
+    // hidden inputになったため「選び直し」は不要になった。
     document.getElementById('btn-remove-upload').addEventListener('click', function () {
       if (!confirm('「' + fileNames[activeDocIndex] + '」のアップロードを取り消します。'
-          + '（他のファイルの入力内容は保持されます。関連書類は選び直しが必要です）よろしいですか？')) return;
+          + '（他のファイルの入力内容は保持されます）よろしいですか？')) return;
       const mainForm = document.querySelector('form.meta-input-form');
-      mainForm.querySelectorAll('input[type="file"]').forEach(function (inp) { inp.disabled = true; });
       document.getElementById('remove-upload-index').value = activeDocIndex;
       document.getElementById('storage-action').value = 'remove';
       if (mainForm.requestSubmit) mainForm.requestSubmit(); else mainForm.submit();

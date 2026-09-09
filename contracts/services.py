@@ -2,7 +2,6 @@ import datetime
 import logging
 
 from django.conf import settings
-from django.db import Error as DBError
 from django.db import transaction
 
 from core import deletion_services, scoping_services, zip_services
@@ -57,22 +56,23 @@ def build_zip_archive(contracts) -> tuple[bytes, int]:
     return zip_services.build_zip_archive(contracts, entity_label="contract")
 
 
-def apply_contract_edit(contract, cleaned_data, employee, remove_ids, new_related_files):
+def apply_contract_edit(contract, cleaned_data, employee, related_ids):
     """編集フォーム（`UploadStep2Form`, edit_mode=True）のcleaned_dataをcontractに反映して保存する。
     `contracts.views.ContractEditView.post`と一括編集`BulkEditView.post`の両方から呼ばれる
-    共通処理（documents.services.apply_document_editと同じ位置付け）。関連書類の追加・削除も
-    本体保存と同じトランザクションにまとめる（元のContractEditView.postの設計をそのまま踏襲）。
-    ファイルI/O・DB境界の例外（OSError/DBError）は握りつぶさずそのまま呼び出し元に伝播させる。
-    単体編集とBulkEditViewとでは失敗時に取るべき応答（リダイレクトvs同じステップの再描画）が
-    異なるため、対応は呼び出し側の責務とする。
+    共通処理（documents.services.apply_document_editと同じ位置付け）。関連書類（紐付け先契約書）の
+    同期も本体保存と同じトランザクションにまとめる。DB境界の例外（DBError）は握りつぶさず
+    そのまま呼び出し元に伝播させる（単体編集とBulkEditViewとで失敗時に取るべき応答が異なるため）。
+
+    `related_ids` は「この契約書に紐付けたい契約書pkの並び順つき全量リスト」（差分ではない）。
+    Rev1.5までのRelatedFile方式（add/removeの差分＋物理ファイルI/O）から、Rev1.6の「ポップアップ
+    検索で選び直した結果を丸ごと確定する」方式に合わせて全量同期にした。呼び出し側で
+    `filter_valid_related_ids()` を通し、実在・閲覧権限内・自分自身でない pk だけに絞ってから渡すこと。
 
     `expiry_date`（保存満了日）は編集時に一切触らない。契約書は保存期間が選択式ではなく
     `settings.CONTRACT_RETENTION_YEARS`固定で、編集で変えられる要素が無いため引き直す理由が
     無い（文書側`apply_document_edit`が「保存期間変更時のみ引き直す」に整理されたのと同じ考え方。
     2026-08-28ユーザー確定、レビュー指摘C-1）。
     """
-    from contracts.models import RelatedFile
-
     department = cleaned_data["department"]
     if not can_select_department(employee):
         department = employee.department
@@ -90,32 +90,71 @@ def apply_contract_edit(contract, cleaned_data, employee, remove_ids, new_relate
     contract.contract_partner = cleaned_data["contract_partner"]
     contract.memo = cleaned_data["memo"]
 
-    created_related = []
     with transaction.atomic():
         contract.save()
-        if remove_ids:
-            RelatedFile.objects.filter(contract=contract, pk__in=remove_ids).delete()
-        if new_related_files:
-            next_order = RelatedFile.objects.filter(contract=contract).count()
-            try:
-                for i, related in enumerate(new_related_files):
-                    created_related.append(
-                        RelatedFile.objects.create(
-                            contract=contract, file=related, display_order=next_order + i
-                        )
-                    )
-            except (OSError, DBError):
-                # RelatedFile.objects.create()は生成時点でストレージへファイル実体を書き込む。
-                # 2件目以降のcreate()やこの先の処理でDBError等が発生すると、transaction.atomic()は
-                # RelatedFile行・Contract行をロールバックするが、既に書き込まれた物理ファイルは
-                # DBトランザクションの対象外で残り、孤児化する（MEDIA_ROOT配下の孤児は
-                # core.upload_services.clear_pending_filesのような定期クリーンアップが無く蓄積する）。
-                # contracts.views.UploadStep2Viewの「登録」経路が明示的に対処している孤児ファイル
-                # 問題と同型のため、編集経路（単体・一括とも）でも同じ後始末をする（レビュー指摘C-2）。
-                for related_file in created_related:
-                    related_file.file.delete(save=False)
-                raise
+        sync_related_contracts(contract, related_ids)
     return contract
+
+
+def sync_related_contracts(contract, related_ids):
+    """`contract` の関連書類（ContractRelation）を `related_ids`（並び順つき全量リスト）に一致させる。
+    リストから外れた行は削除、新規は追加、既存は `display_order` を並び順に合わせる。
+    呼び出し側で `filter_valid_related_ids()` を通したpkリストを渡す前提（重複除去・順序保持済み）。
+    """
+    from contracts.models import ContractRelation
+
+    ContractRelation.objects.filter(contract=contract).exclude(
+        related_contract_id__in=related_ids
+    ).delete()
+    existing = {
+        r.related_contract_id: r
+        for r in ContractRelation.objects.filter(contract=contract)
+    }
+    for order, rid in enumerate(related_ids):
+        row = existing.get(rid)
+        if row is None:
+            ContractRelation.objects.create(
+                contract=contract, related_contract_id=rid, display_order=order
+            )
+        elif row.display_order != order:
+            row.display_order = order
+            row.save(update_fields=["display_order"])
+
+
+def filter_valid_related_ids(ids, *, employee, exclude_pk=None):
+    """関連書類として紐付けてよい契約書pkだけに絞る（並び順は維持、重複は除去）。
+
+    ポップアップ検索API（`contracts.api.RelatedSearchAPIView`）は元々「閲覧権限内・削除されて
+    いない・自分自身でない」契約書しか返さないが、hidden inputは生POST値なので改ざんで任意の
+    pkが混入し得る。保存前にサーバー側でも同じ条件で検証し、外れた値は不正アクセス試行の兆候
+    として警告ログに残す（`core.bulk_edit_services.resolve_ordered_pks` と同じ方針）。
+    """
+    from contracts.models import Contract
+
+    int_ids = []
+    for raw in ids:
+        try:
+            int_ids.append(int(raw))
+        except (TypeError, ValueError):
+            logger.warning("関連書類の指定に非数値が含まれていたため除外しました: value=%r", raw)
+
+    allowed_department_ids = contract_searchable_department_ids(employee)
+    qs = Contract.objects.filter(pk__in=int_ids, is_deleted=False)
+    if allowed_department_ids is not None:
+        qs = qs.filter(department_id__in=allowed_department_ids)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    valid = set(qs.values_list("pk", flat=True))
+
+    seen = set()
+    result = []
+    for pk in int_ids:
+        if pk in valid and pk not in seen:
+            seen.add(pk)
+            result.append(pk)
+        elif pk not in valid:
+            logger.warning("紐付け不可の契約書pkが関連書類に指定されたため除外しました: pk=%s", pk)
+    return result
 
 
 def contract_edit_is_dirty(contract, cleaned_data, employee, *, related_changed=False) -> bool:
@@ -142,25 +181,6 @@ def contract_edit_is_dirty(contract, cleaned_data, employee, *, related_changed=
         or (contract.contract_partner or "") != (cleaned_data["contract_partner"] or "")
         or (contract.memo or "") != (cleaned_data["memo"] or "")
     )
-
-
-def parse_remove_related_ids(raw_value, *, employee_no):
-    """remove_related_ids（JS側でhidden inputにカンマ区切りで積まれる想定）を数値のリストに
-    変換する。フォーム改ざんで非数値が混じってもpk__inクエリの評価時に例外を出さないよう、
-    数値変換できるものだけ採用し、できなかったものは不正アクセス試行の兆候としてログに残す
-    （元のContractEditView.postのロジックをBulkEditViewと共有するために抽出）。
-    """
-    remove_ids = []
-    for raw_id in [i for i in raw_value.split(",") if i]:
-        try:
-            remove_ids.append(int(raw_id))
-        except ValueError:
-            logger.warning(
-                "remove_related_idsに不正な値が指定されました: employee_no=%s, value=%r",
-                employee_no,
-                raw_id,
-            )
-    return remove_ids
 
 
 def calculate_expiry_date(save_date: datetime.date) -> datetime.date:

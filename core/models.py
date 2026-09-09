@@ -4,9 +4,9 @@ from django.db import models
 class UuidPrefixedFilenameMixin(models.Model):
     """storage_paths.*_upload_pathが付与する重複防止UUIDプレフィックス（"{uuid}_{filename}"形式）
     を除いた、元のアップロードファイル名部分だけを返す`display_name`プロパティ。
-    documents.Document.display_name/contracts.Contract.display_name/contracts.RelatedFile.
-    display_nameの3箇所が完全に同一実装のまま重複していたため集約した（品質レビューで発見、
-    2026-08-25修正）。`file`フィールドを持つモデルで継承する。
+    documents.Document.display_name/contracts.Contract.display_nameが完全に同一実装のまま
+    重複していたため集約した（品質レビューで発見、2026-08-25修正。Rev1.6でcontracts.RelatedFileは
+    廃止）。`file`フィールドを持つモデルで継承する。
     """
 
     class Meta:

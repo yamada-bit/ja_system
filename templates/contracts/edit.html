@@ -68,7 +68,6 @@
         <form method="post" id="meta-input-form" enctype="multipart/form-data" class="meta-input-form" style="background:#fafafa; display:flex; flex-direction:column; justify-content:space-between; height:490px; box-sizing:border-box;">
           {% csrf_token %}
           <input type="hidden" name="token" value="{{ token }}">
-          <input type="hidden" name="remove_related_ids" id="id_remove_related_ids" value="">
 
           <div class="pager-top" style="flex-shrink:0;">
             <button type="submit" name="bulk_nav" value="prev" id="btn-prev-doc" {% if not bulk or not bulk.has_prev %}disabled{% endif %}>＜</button>
@@ -116,36 +115,27 @@
 
             <div class="form-section">
               <h4>[3] 関連書類</h4>
+              {# Rev1.6（xlsx 保管!B478-484）：関連書類＝紐付け先の既存契約書。related_rows は #}
+              {# {id, title, is_deleted}。選択済み1件ごとに hidden input related_contract_ids を1つ持ち、 #}
+              {# 「ファイルの選択」で base.html の #popup-related-search（契約書検索）を開く。 #}
+              {# 一括編集も単独編集も同じ（一括はページ移動時にそのページの hidden input を丸ごと #}
+              {# ステージ、「更新」で確定。marked_delete のページは編集不可）。 #}
               <div class="form-row" style="flex-direction:column; align-items:flex-start; gap:5px;">
                 <label style="width:100%;">関連書類</label>
-                <div id="storage-file-inputs-container" style="width:100%;">
-                  {% if bulk %}
-                    {# 一括編集では関連書類の増減も「更新」までステージ（追加ファイルは一時領域へ #}
-                    {# 退避、削除はマーク）。related_rows = 既存（削除マークを除外）＋追加予定。 #}
-                    {% for row in related_rows %}
-                      <div class="related-file-row">
-                        {% if row.kind == "staged_add" %}
-                          <span class="related-file-name">📎 {{ row.name }}（追加予定）</span>
-                        {% else %}
-                          <span class="related-file-name">📎 {{ row.name }}</span>
-                          {% if not marked_delete %}<button type="button" class="btn-delete-file" onclick="removeExistingRelatedFile(this, {{ row.id }})">×</button>{% endif %}
-                        {% endif %}
-                      </div>
-                    {% endfor %}
-                    {% if not marked_delete %}
-                      <div class="related-file-row">
-                        <input type="file" name="related_files" onchange="handleRelatedFileChange(this)">
-                      </div>
-                    {% endif %}
-                  {% else %}
-                    {% for rf in contract.related_files.all %}
-                      <div class="related-file-row">
-                        <span class="related-file-name">📎 {{ rf.display_name }}</span>
-                        <button type="button" class="btn-delete-file" onclick="removeExistingRelatedFile(this, {{ rf.pk }})">×</button>
-                      </div>
-                    {% endfor %}
+                <div id="storage-related-container" style="width:100%;"
+                     data-field-name="related_contract_ids"
+                     data-api-url="{{ related_search_url }}"
+                     data-exclude-pk="{{ contract.pk }}">
+                  {% for row in related_rows %}
                     <div class="related-file-row">
-                      <input type="file" name="related_files" onchange="handleRelatedFileChange(this)">
+                      <span class="related-file-name"{% if row.is_deleted %} style="color:#c0392b;"{% endif %}>📎 {{ row.title }}{% if row.is_deleted %}（削除済み）{% endif %}</span>
+                      <input type="hidden" class="related-contract-id" name="related_contract_ids" value="{{ row.id }}">
+                      {% if not marked_delete %}<button type="button" class="btn-delete-file" onclick="this.closest('.related-file-row').remove()">×</button>{% endif %}
+                    </div>
+                  {% endfor %}
+                  {% if not marked_delete %}
+                    <div class="related-file-row related-select-row">
+                      <button type="button" class="btn-select-file" onclick="openRelatedSearchPopup(this)">ファイルの選択</button>
                     </div>
                   {% endif %}
                 </div>

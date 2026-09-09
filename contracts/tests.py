@@ -685,15 +685,19 @@ class DeleteViewAjaxTests(TestCase):
         と同じ理由。Rev1.2（xlsx 検索・閲覧・変更!B659,B663「削除されている契約書は、ボタンを
         非表示とする」）で、2026-08-12にユーザー依頼で追加した「ゴミ箱保管中の契約書を削除
         ボタンで完全削除する」機能は2026-08-24に廃止された（contracts.services.can_delete
-        docstring参照）。既に削除済みの契約書への削除操作はサーバー側でも拒否し、本体・関連書類
-        （RelatedFile）ともレコード・ファイルが残ることを確認する。"""
-        from contracts.models import Contract, RelatedFile
+        docstring参照）。既に削除済みの契約書への削除操作はサーバー側でも拒否し、本体レコード・
+        ファイル・関連書類（ContractRelation）が残ることを確認する。"""
+        from contracts.models import Contract, ContractRelation
 
-        related = RelatedFile.objects.create(
-            contract=self.contract, file=ContentFile(b"REL", name="付属資料.pdf"), display_order=0
+        other = Contract.objects.create(
+            title="関連先", department=self.department, group=self.contract.group,
+            category=self.contract.category, year=2025, uploader=self.employee,
+            expiry_date=datetime.date(2035, 1, 1), file=ContentFile(b"o", name="o.pdf"),
+        )
+        relation = ContractRelation.objects.create(
+            contract=self.contract, related_contract=other, display_order=0
         )
         contract_file_name = self.contract.file.name
-        related_file_name = related.file.name
 
         self.contract.is_deleted = True
         self.contract.save(update_fields=["is_deleted", "deleted_at"])
@@ -704,9 +708,8 @@ class DeleteViewAjaxTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertFalse(response.json()["success"])
         self.assertTrue(Contract.objects.filter(pk=self.contract.pk).exists())
-        self.assertTrue(RelatedFile.objects.filter(pk=related.pk).exists())
+        self.assertTrue(ContractRelation.objects.filter(pk=relation.pk).exists())
         self.assertTrue(self.contract.file.storage.exists(contract_file_name))
-        self.assertTrue(self.contract.file.storage.exists(related_file_name))
 
     def test_non_ajax_request_still_redirects(self):
         response = self.client.post(f"/contracts/{self.contract.pk}/delete/")
@@ -1022,9 +1025,9 @@ class ContractWriteViewsRequireContractEditPermissionTests(TestCase):
 
 
 class RelatedFilesMultiUploadTests(TestCase):
-    """契約書の複数件一括登録時、原本index.html:1567-1589のsetupStorageFormForActiveDoc()通り
-    文書ごとに独立した関連書類を添付できる（原本フィデリティ監査で発見：以前は1件登録時のみ
-    許可していた）。"""
+    """契約書の複数件一括登録時、ファイルごとに独立した関連書類（紐付け先契約書）を選べる。
+    Rev1.6でファイルアップロードから既存契約書のポップアップ検索・紐付けへ転換
+    （related_contract_ids_{index} の hidden input で送信）。"""
 
     def setUp(self):
         self.department = Department.objects.create(
@@ -1046,12 +1049,26 @@ class RelatedFilesMultiUploadTests(TestCase):
             code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
         )
 
-    def test_each_document_gets_its_own_related_files(self):
+    def _existing_contract(self, title):
+        from contracts.models import Contract
+
+        c = Contract(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2024, uploader=self.employee, expiry_date=datetime.date(2034, 1, 1),
+        )
+        c.file.save(f"{title}.pdf", ContentFile(b"X"), save=False)
+        c.save()
+        return c
+
+    def test_each_document_gets_its_own_related_contracts(self):
         import re
 
         from django.core.files.uploadedfile import SimpleUploadedFile
 
         from contracts.models import Contract
+
+        rel_a = self._existing_contract("関連先A")
+        rel_b = self._existing_contract("関連先B")
 
         self.client.post("/contracts/upload/step1/", {"files": [
             SimpleUploadedFile("a.pdf", b"AAAA", content_type="application/pdf"),
@@ -1071,14 +1088,90 @@ class RelatedFilesMultiUploadTests(TestCase):
             "category_1": self.category.pk, "year_1": 2026,
             "title_0": "契約書A",
             "title_1": "契約書B",
-            "related_files_0": SimpleUploadedFile("rel_a.txt", b"REL-A"),
-            "related_files_1": SimpleUploadedFile("rel_b.txt", b"REL-B"),
+            "related_contract_ids_0": [str(rel_a.pk)],
+            "related_contract_ids_1": [str(rel_b.pk)],
         })
-        created = list(Contract.objects.exclude(pk__in=before).order_by("pk"))
+        created = list(
+            Contract.objects.exclude(pk__in=before).exclude(title__startswith="関連先").order_by("pk")
+        )
         self.assertEqual(len(created), 2)
-        self.assertIn("rel_a", created[0].related_files.get().file.name)
-        self.assertIn("rel_b", created[1].related_files.get().file.name)
+        self.assertEqual(
+            list(created[0].related_links.values_list("related_contract_id", flat=True)), [rel_a.pk]
+        )
+        self.assertEqual(
+            list(created[1].related_links.values_list("related_contract_id", flat=True)), [rel_b.pk]
+        )
         self.assertEqual([created[0].year, created[1].year], [2025, 2026])
+
+
+class RelatedSearchAPIViewTests(TestCase):
+    """関連書類ポップアップの契約書検索API（contracts:api_related_search、Rev1.6）。
+    xlsx 保管!B478-484：タイトル／フリーワードで簡易検索、閲覧権限範囲内、削除除外、自分自身除外。"""
+
+    def setUp(self):
+        self.dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.other_dept = Department.objects.create(
+            branch_code="999", branch_name="他店", section_code="99", section_name="他部署"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True
+        )
+        self.client.login(username="1", password="pass1234")
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+
+    def _c(self, title, *, dept=None, is_deleted=False, extracted_text=""):
+        from contracts.models import Contract
+
+        c = Contract(
+            title=title, department=dept or self.dept, group=self.group, category=self.category,
+            year=2025, uploader=self.employee, expiry_date=datetime.date(2035, 1, 1),
+            is_deleted=is_deleted, extracted_text=extracted_text,
+        )
+        c.file.save(f"{title}.pdf", ContentFile(b"X"), save=False)
+        c.save()
+        return c
+
+    def test_title_filter_and_scope_and_deleted_and_exclude(self):
+        hit = self._c("賃貸借契約書")
+        self._c("賃貸借契約書（削除済み）", is_deleted=True)
+        self._c("賃貸借契約書（他部署）", dept=self.other_dept)
+        myself = self._c("賃貸借契約書（自分）")
+
+        resp = self.client.get(
+            "/contracts/api/related-search/", {"title": "賃貸借", "exclude": myself.pk}
+        )
+        self.assertEqual(resp.status_code, 200)
+        values = {item["value"] for item in resp.json()["items"]}
+        self.assertEqual(values, {hit.pk})
+
+    def test_freeword_matches_extracted_text(self):
+        hit = self._c("A契約", extracted_text="重要な覚書の本文がここにある")
+        self._c("B契約", extracted_text="無関係な内容")
+        resp = self.client.get("/contracts/api/related-search/", {"freeword": "覚書"})
+        values = {item["value"] for item in resp.json()["items"]}
+        self.assertEqual(values, {hit.pk})
+
+    def test_requires_contract_edit_permission(self):
+        Employee.objects.create_user(
+            employee_no="2", name="権限なし", password="pass1234",
+            department=self.dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(
+            employee=Employee.objects.get(employee_no="2"), role=PermissionRole.STAFF, contract_edit=False
+        )
+        self.client.logout()
+        self.client.login(username="2", password="pass1234")
+        resp = self.client.get("/contracts/api/related-search/", {"title": "x"})
+        self.assertEqual(resp.status_code, 403)
 
 
 class SearchAuditLogTests(TestCase):
@@ -1542,29 +1635,6 @@ class BulkEditViewTests(TestCase):
         self.assertEqual(cs[0].title, "c0")
         self.assertIsNotNone(self.client.session.get("contracts_bulk_edit"))
 
-    def test_related_file_stash_failure_shows_error_and_redirects(self):
-        """指摘 M-1（後半）：post() 内で related_files をアップロードしたページの
-        stash_files_to_tmp() が PendingFileStorageError → messages.error + redirect の
-        フォールバックが未検証だった。"""
-        from django.contrib.messages import get_messages
-
-        from core.upload_services import PendingFileStorageError
-
-        cs = [self._create_contract(f"c{i}") for i in range(2)]
-        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
-        data = self._page_data(cs[0], action=None, bulk_nav="next")
-        with mock.patch(
-            "core.upload_services.stash_files_to_tmp",
-            side_effect=PendingFileStorageError("disk full"),
-        ):
-            resp = self.client.post(
-                "/contracts/bulk-edit/",
-                {**data, "related_files": SimpleUploadedFile("c0-rel.pdf", b"AAAA")},
-            )
-        self.assertRedirects(resp, "/contracts/bulk-edit/")
-        texts = [str(m) for m in get_messages(resp.wsgi_request)]
-        self.assertTrue(any("ファイルの保存に失敗しました" in t for t in texts))
-
     def test_update_does_not_touch_expiry_date(self):
         """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 H-1）／memory
         expiry_date_edit_recalc_spec：契約書は保存期間が固定で編集で変えられる要素が
@@ -1579,62 +1649,58 @@ class BulkEditViewTests(TestCase):
         self.assertEqual(c.title, "c0-new")
         self.assertEqual(c.expiry_date, original_expiry)
 
-    def test_related_files_add_is_staged_and_cancellable(self):
-        from pathlib import Path
-
-        from django.conf import settings
-
-        from contracts.models import RelatedFile
-        from core.upload_services import TMP_UPLOAD_SUBDIR
+    def test_related_contracts_change_is_staged_and_cancellable(self):
+        """Rev1.6：一括編集で関連書類（紐付け先契約書）を変えても「更新」までDB未反映。
+        ステージはセッションの staged_related に pk リストとして載り、「キャンセル」で破棄される。"""
+        from contracts.models import ContractRelation
 
         cs = [self._create_contract(f"c{i}") for i in range(2)]
+        target = self._create_contract("rel-target")
         self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
 
         # 1件目に関連書類を追加してステージ（＞で移動）
         data = self._page_data(cs[0], action=None, bulk_nav="next")
         self.client.post(
             "/contracts/bulk-edit/",
-            {**data, "related_files": SimpleUploadedFile("c0-rel.pdf", b"AAAA")},
+            {**data, "related_contract_ids": [str(target.pk)]},
         )
-        # まだ RelatedFile には反映されていない（ステージのみ）
-        self.assertFalse(RelatedFile.objects.filter(contract=cs[0]).exists())
+        # まだ ContractRelation には反映されていない（ステージのみ）
+        self.assertFalse(ContractRelation.objects.filter(contract=cs[0]).exists())
         state = self.client.session["contracts_bulk_edit"]
-        add_refs = state["staged_related"][str(cs[0].pk)]["add"]
-        self.assertEqual(len(add_refs), 1)
-        tmp_path = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR / add_refs[0]["temp_name"]
-        self.assertTrue(tmp_path.exists())
+        self.assertEqual(state["staged_related"][str(cs[0].pk)]["related_ids"], [target.pk])
 
-        # 追加予定として表示される
-        self.client.get("/contracts/bulk-edit/")  # index=1
+        # 紐付け予定として表示される（index=0 へ戻る）
         back = self.client.post("/contracts/bulk-edit/", self._page_data(cs[1], action=None, bulk_nav="prev"))
         self.assertRedirects(back, "/contracts/bulk-edit/")
-        page1 = self.client.get("/contracts/bulk-edit/")
-        self.assertContains(page1, "c0-rel.pdf（追加予定）")
+        page0 = self.client.get("/contracts/bulk-edit/")
+        self.assertContains(page0, "rel-target")
 
-        # キャンセルで一時ファイルごと破棄
+        # キャンセルで破棄
         self.client.post("/contracts/bulk-edit/", {"bulk_action": "cancel"})
-        self.assertFalse(tmp_path.exists())
-        self.assertFalse(RelatedFile.objects.filter(contract=cs[0]).exists())
+        self.assertFalse(ContractRelation.objects.filter(contract=cs[0]).exists())
+        self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
 
-    def test_related_files_add_and_remove_commit_on_update(self):
-        from contracts.models import RelatedFile
+    def test_related_contracts_commit_on_update(self):
+        """Rev1.6：関連書類は「紐付け先契約書pkの全量リスト」を送り、「更新」で同期される
+        （リストから外れた既存行は削除、新規は追加）。関連書類の変更だけでも「更新」扱い。"""
+        from contracts.models import ContractRelation
 
         c1 = self._create_contract("c1")
-        existing = RelatedFile.objects.create(
-            contract=c1, file=ContentFile(b"OLD", name="old.pdf"), display_order=0
-        )
+        old_target = self._create_contract("old-target")
+        new_target = self._create_contract("new-target")
+        ContractRelation.objects.create(contract=c1, related_contract=old_target, display_order=0)
+
         self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk]})
         data = self._page_data(c1)
-        data["remove_related_ids"] = str(existing.pk)
         resp = self.client.post(
             "/contracts/bulk-edit/",
-            {**data, "related_files": SimpleUploadedFile("new.pdf", b"NEW")},
+            {**data, "related_contract_ids": [str(new_target.pk)]},
         )
         self.assertEqual(resp.status_code, 200)
-        names = [rf.display_name for rf in RelatedFile.objects.filter(contract=c1)]
-        self.assertEqual(names, ["new.pdf"])
-        self.assertFalse(RelatedFile.objects.filter(pk=existing.pk).exists())
-        # 関連書類の変更だけでも「更新」として扱われる
+        linked = list(
+            ContractRelation.objects.filter(contract=c1).values_list("related_contract_id", flat=True)
+        )
+        self.assertEqual(linked, [new_target.pk])
         self.assertEqual(resp.context["complete"]["counts"]["updated"], 1)
 
 
@@ -2313,20 +2379,59 @@ class DetailAPIViewTests(TestCase):
         self.assertEqual(data["preview_url"], f"/contracts/{self.contract.pk}/preview/")
         self.assertEqual(data["preview_kind"], "image")
 
-    def test_related_files_returns_display_name_not_full_path(self):
-        """監査で発見：以前はrf.file.name（MEDIA_ROOT基準のフルパス）をそのまま返しており、
-        詳細ポップアップの「関連書類」欄が長いパス表示になっていた。"""
-        from contracts.models import RelatedFile
+    def _link_related(self, title, *, is_deleted=False, order=0):
+        from contracts.models import Contract, ContractRelation
 
-        related = RelatedFile.objects.create(
-            contract=self.contract,
-            file=ContentFile(b"REL", name="付属資料.pdf"),
-            display_order=0,
+        rel = Contract(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2025, uploader=self.employee, expiry_date=datetime.date(2035, 1, 1),
+            is_deleted=is_deleted,
         )
-        response = self.client.get(f"/contracts/api/{self.contract.pk}/")
-        data = response.json()
-        self.assertEqual(data["related_files"], ["付属資料.pdf"])
-        self.assertNotIn(related.file.name, data["related_files"])
+        rel.file.save(f"{title}.pdf", ContentFile(b"R"), save=False)
+        rel.save()
+        ContractRelation.objects.create(
+            contract=self.contract, related_contract=rel, display_order=order
+        )
+        return rel
+
+    def test_related_contracts_with_download_permission_returns_preview_url(self):
+        """Rev1.6（xlsx 検索・閲覧・変更!B677-680）：関連資料は紐付け先契約書。ダウンロード権限が
+        あれば preview_url（別タブでPDFプレビュー）を返す。display_order 順。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
+        )
+        a = self._link_related("関連A", order=0)
+        b = self._link_related("関連B", order=1)
+
+        data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
+        self.assertEqual(
+            data["related_contracts"],
+            [
+                {"title": "関連A", "is_deleted": False, "preview_url": f"/contracts/{a.pk}/preview/"},
+                {"title": "関連B", "is_deleted": False, "preview_url": f"/contracts/{b.pk}/preview/"},
+            ],
+        )
+
+    def test_related_contracts_deleted_has_flag_and_no_preview_url(self):
+        """削除済みの関連資料は is_deleted=true・preview_url=null（common.js側で赤字＋
+        「既に削除されている関連資料です」表示）。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
+        )
+        self._link_related("削除された関連", is_deleted=True)
+
+        data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
+        self.assertEqual(
+            data["related_contracts"],
+            [{"title": "削除された関連", "is_deleted": True, "preview_url": None}],
+        )
+
+    def test_related_contracts_without_download_permission_no_preview_url(self):
+        """ダウンロード権限が無ければリンク化しない（preview_url=null、素テキスト表示）。"""
+        self._link_related("関連C")
+        data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
+        self.assertEqual(data["related_contracts"][0]["preview_url"], None)
+        self.assertEqual(data["related_contracts"][0]["is_deleted"], False)
 
     def test_contract_amount_zero_is_returned_as_string_not_blank(self):
         """コードレビューC-5：契約金額0円はDecimal('0')でfalsyのため、以前は`if amount`判定で
@@ -2743,11 +2848,10 @@ class UploadStep2ImmediateExtractionTests(TestCase):
 
 
 class ContractEditViewFileHandlingTests(TestCase):
-    """ContractEditView.postの関連書類追加・削除まわり（原本index.html:1567-1589の
-    handleRelatedFileChange/removeExistingRelatedFile対応）を監査で発見・修正した2点、
-    (1) remove_related_idsへの改ざん値混入でValueErrorが伝播しないこと、
-    (2) 関連書類のファイルI/O失敗時にtransaction.atomic()で本体更新までロールバックされ、
-    利用者にわかるエラーメッセージが出ることを確認する。"""
+    """ContractEditView.postの関連書類（紐付け先契約書）まわり。
+    (1) related_contract_ids への改ざん値混入で例外が伝播せず有効なpkだけ同期されること、
+    (2) 保存中のDBエラー時に transaction.atomic() で本体更新までロールバックされ、
+    利用者にわかるエラーメッセージが出ること（DBErrorモックのテストは末尾）を確認する。"""
 
     def setUp(self):
         self.department = Department.objects.create(
@@ -2800,88 +2904,69 @@ class ContractEditViewFileHandlingTests(TestCase):
             r'name="token" value="([^"]+)"', get_response.content.decode("utf-8")
         ).group(1)
 
-    def test_remove_related_ids_with_non_numeric_value_is_ignored(self):
-        from contracts.models import RelatedFile
+    def _linked_contract(self, title="紐付け先"):
+        from contracts.models import Contract
+
+        return Contract.objects.create(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2025, uploader=self.employee,
+            expiry_date=calculate_expiry_date(datetime.date(2025, 1, 1)),
+            file=ContentFile(b"L", name="linked.pdf"),
+        )
+
+    def test_related_contract_ids_with_non_numeric_value_is_ignored(self):
+        """related_contract_ids に改ざんで非数値が混じっても例外を出さず、有効なpkだけ紐付ける
+        （contracts.services.filter_valid_related_ids）。"""
+        from contracts.models import ContractRelation
 
         contract = self._create_contract()
-        related = RelatedFile.objects.create(
-            contract=contract, file=ContentFile(b"BBBB", name="related.pdf"), display_order=0
-        )
+        linked = self._linked_contract()
         data = self._edit_form_data(contract)
         data["token"] = self._get_token(contract)
-        data["remove_related_ids"] = f"abc,{related.pk}"
+        data["related_contract_ids"] = ["abc", str(linked.pk)]
 
         response = self.client.post(f"/contracts/{contract.pk}/edit/", data)
 
         self.assertEqual(response.status_code, 200)
         contract.refresh_from_db()
         self.assertEqual(contract.title, "更新後タイトル")
-        self.assertFalse(RelatedFile.objects.filter(pk=related.pk).exists())
+        self.assertEqual(
+            list(ContractRelation.objects.filter(contract=contract).values_list("related_contract_id", flat=True)),
+            [linked.pk],
+        )
 
-    def test_related_file_save_failure_rolls_back_and_shows_error(self):
-        from contracts.models import Contract, RelatedFile
+    def test_out_of_scope_related_contract_id_is_dropped(self):
+        """改ざんで閲覧範囲外の契約書pkを混ぜても紐付かない（filter_valid_related_ids）。"""
+        from contracts.models import Contract, ContractRelation
+
+        other_dept = Department.objects.create(
+            branch_code="999", branch_name="他店", section_code="99", section_name="他部署"
+        )
+        outsider = Contract.objects.create(
+            title="他部署契約書", department=other_dept, group=self.group, category=self.category,
+            year=2025, uploader=self.employee,
+            expiry_date=calculate_expiry_date(datetime.date(2025, 1, 1)),
+            file=ContentFile(b"O", name="o.pdf"),
+        )
+        contract = self._create_contract()
+        data = self._edit_form_data(contract)
+        data["token"] = self._get_token(contract)
+        data["related_contract_ids"] = [str(outsider.pk)]
+
+        self.client.post(f"/contracts/{contract.pk}/edit/", data)
+        self.assertFalse(ContractRelation.objects.filter(contract=contract).exists())
+
+    def test_self_link_is_rejected(self):
+        """自分自身を関連書類に指定しても弾かれる（exclude_pk＋DB CheckConstraint）。"""
+        from contracts.models import ContractRelation
 
         contract = self._create_contract()
         data = self._edit_form_data(contract)
         data["token"] = self._get_token(contract)
+        data["related_contract_ids"] = [str(contract.pk)]
 
-        with mock.patch(
-            "contracts.models.RelatedFile.objects.create", side_effect=OSError("disk full")
-        ):
-            response = self.client.post(
-                f"/contracts/{contract.pk}/edit/",
-                {**data, "related_files": [ContentFile(b"CCCC", name="new.pdf")]},
-                format="multipart",
-            )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response["Location"], f"/contracts/{contract.pk}/edit/")
-        contract.refresh_from_db()
-        # transaction.atomic()により本体タイトルの更新もロールバックされていること
-        self.assertEqual(contract.title, "元のタイトル")
-        self.assertFalse(RelatedFile.objects.filter(contract=contract).exists())
-
-    def test_related_file_partial_failure_cleans_up_orphan_files(self):
-        """レビュー指摘C-2：関連書類を複数追加し2件目以降で失敗した場合、transaction.atomic()が
-        DB行をロールバックするだけでなく、既にストレージへ書き込まれた1件目のファイル実体も
-        apply_contract_edit側で削除され孤児化しないこと（「登録」経路と同じ後始末）。"""
-        from django.core.files.storage import default_storage
-
-        from contracts.models import RelatedFile
-
-        contract = self._create_contract()
-        data = self._edit_form_data(contract)
-        data["token"] = self._get_token(contract)
-
-        real_create = RelatedFile.objects.create
-        created_names = []
-
-        def flaky_create(*args, **kwargs):
-            if created_names:
-                raise OSError("disk full")
-            rf = real_create(*args, **kwargs)
-            created_names.append(rf.file.name)
-            return rf
-
-        with mock.patch("contracts.models.RelatedFile.objects.create", side_effect=flaky_create):
-            response = self.client.post(
-                f"/contracts/{contract.pk}/edit/",
-                {
-                    **data,
-                    "related_files": [
-                        ContentFile(b"C1", name="a.pdf"),
-                        ContentFile(b"C2", name="b.pdf"),
-                    ],
-                },
-                format="multipart",
-            )
-
-        self.assertEqual(response.status_code, 302)
-        contract.refresh_from_db()
-        self.assertEqual(contract.title, "元のタイトル")
-        self.assertFalse(RelatedFile.objects.filter(contract=contract).exists())
-        self.assertEqual(len(created_names), 1)
-        self.assertFalse(default_storage.exists(created_names[0]))
+        self.client.post(f"/contracts/{contract.pk}/edit/", data)
+        self.assertFalse(ContractRelation.objects.filter(contract=contract).exists())
 
     def test_edit_view_db_failure_shows_error_and_does_not_update_contract(self):
         """テストカバレッジ棚卸し（review_test_doc_contract.txt指摘1）で発見：
@@ -3131,10 +3216,10 @@ class ContractSaveNormalizationTests(TestCase):
 
 class StoragePathTests(TestCase):
     """contracts.storage_paths（CLAUDE.md規約準拠監査で発見：documents.tests.StoragePathTestsと
-    同じ観点のテストがcontracts側に無かった。related_file_upload_pathはcontracts固有のため
-    documents側に対応物は無いが、同じ集約先（core.storage_paths.build_hierarchical_upload_path）
-    を使うcontract_upload_path/contract_searchable_upload_pathと合わせてここで検証する。
-    review_rule_doc_contract.txt指摘1参照、2026-08-25追加）。
+    同じ観点のテストがcontracts側に無かった。同じ集約先〈core.storage_paths.
+    build_hierarchical_upload_path〉を使うcontract_upload_path/contract_searchable_upload_pathを
+    検証する。review_rule_doc_contract.txt指摘1参照、2026-08-25追加。related_file_upload_pathは
+    Rev1.6でRelatedFileごと廃止）。
     """
 
     def setUp(self):
@@ -3172,26 +3257,6 @@ class StoragePathTests(TestCase):
         instance = mock.Mock(year=2026, department=self.department, category=self.category)
         path1 = contract_upload_path(instance, "同名.pdf")
         path2 = contract_upload_path(instance, "同名.pdf")
-        self.assertNotEqual(path1, path2)
-
-    def test_related_file_upload_path_structure(self):
-        from contracts.storage_paths import related_file_upload_path
-
-        instance = mock.Mock(contract_id=42)
-        path = related_file_upload_path(instance, "添付.pdf")
-        prefix = "contracts/related/42/"
-        self.assertTrue(path.startswith(prefix), path)
-        remainder = path[len(prefix):]
-        uuid_part, _, filename_part = remainder.partition("_")
-        self.assertEqual(len(uuid_part), 32)
-        self.assertEqual(filename_part, "添付.pdf")
-
-    def test_related_file_upload_path_is_unique_per_call_via_uuid(self):
-        from contracts.storage_paths import related_file_upload_path
-
-        instance = mock.Mock(contract_id=42)
-        path1 = related_file_upload_path(instance, "同名.pdf")
-        path2 = related_file_upload_path(instance, "同名.pdf")
         self.assertNotEqual(path1, path2)
 
 

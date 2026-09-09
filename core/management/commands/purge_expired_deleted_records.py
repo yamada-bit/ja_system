@@ -61,26 +61,22 @@ class Command(BaseCommand):
         )
 
     def _purge_contracts(self, since):
-        queryset = (
-            Contract.objects.filter(is_deleted=True, deleted_at__date__lt=since)
-            .prefetch_related("related_files")
-            .order_by("pk")
-        )
+        queryset = Contract.objects.filter(is_deleted=True, deleted_at__date__lt=since).order_by("pk")
         return self._purge(
             queryset,
             kind="contract",
             event_label="契約書",
-            # RelatedFileはon_delete=CASCADEでDBレコードは一緒に消えるが、ファイル実体までは
-            # 自動削除されないため、delete()前に一覧を確保しておく必要がある
-            # （prefetch_related済みのためクエリは増えない）。
-            extra_files_fn=lambda obj: [(related.file, related.pk) for related in obj.related_files.all()],
+            # 関連書類はRev1.6で既存契約書への参照（ContractRelation）になり物理ファイルを持たない。
+            # ContractRelationは両FKとも on_delete=CASCADE なので obj.delete() で自動的に消える
+            # （この契約書を related_contract として参照している他契約書の行も同様）。
         )
 
-    def _purge(self, queryset, *, kind, event_label, personal_info_flag_fn=None, extra_files_fn=None):
+    def _purge(self, queryset, *, kind, event_label, personal_info_flag_fn=None):
         """is_deleted=Trueのqueryset1件ずつをDBレコード・ファイル実体ごと完全削除する共通処理。
         documents/contractsで構造（クエリ→ループ→ファイル欄退避→delete()→ファイル削除→監査ログ）が
-        同一だったため集約した（documents側にはprivacy_flagが、contracts側にはrelated_filesが
-        それぞれ固有のため、personal_info_flag_fn/extra_files_fnで差分だけ注入する）。
+        同一だったため集約した（documents側のprivacy_flagだけ personal_info_flag_fn で差分注入する。
+        Rev1.6までは契約書の関連書類ファイル退避も extra_files_fn で注入していたが、関連書類が
+        既存契約書への参照〈ContractRelation, CASCADE〉になりファイル実体を持たなくなったため撤去）。
 
         1件ずつdelete()する設計は意図的に維持している（バルクdelete()にまとめると、1件のDB制約
         違反等で全体がロールバックされ、ゴミ箱保管中の全対象が一切物理削除されなくなる。日次実行の
@@ -96,7 +92,6 @@ class Command(BaseCommand):
             obj_pk = obj.pk
             file_field = obj.file
             searchable_file_field = obj.searchable_file
-            extra_files = extra_files_fn(obj) if extra_files_fn else []
             try:
                 obj.delete()
             except DBError:
@@ -109,8 +104,6 @@ class Command(BaseCommand):
             self._delete_file(file_field, kind, obj_pk)
             if searchable_file_field:
                 self._delete_file(searchable_file_field, f"{kind}(searchable_file)", obj_pk)
-            for related_file, related_pk in extra_files:
-                self._delete_file(related_file, f"{kind} related_file", obj_pk, related_pk=related_pk)
             # documents/contracts.views.DeleteView（廃止前）が完全削除時に残していた監査ログを、
             # 唯一の完全削除経路になった本バッチでも引き続き記録する（CLAUDE.md「監査が必要な
             # イベント...は一元的な記録機構（auditアプリ）を通す」）。
@@ -126,11 +119,8 @@ class Command(BaseCommand):
         return purged, failed
 
     @staticmethod
-    def _delete_file(file_field, label, pk, related_pk=None):
+    def _delete_file(file_field, label, pk):
         try:
             file_field.delete(save=False)
         except OSError:
-            logger.exception(
-                "物理削除時のファイル実体削除に失敗しました: kind=%s pk=%s related_pk=%s",
-                label, pk, related_pk,
-            )
+            logger.exception("物理削除時のファイル実体削除に失敗しました: kind=%s pk=%s", label, pk)

@@ -6,7 +6,6 @@ from django.db import models
 from contracts.storage_paths import (
     contract_searchable_upload_path,
     contract_upload_path,
-    related_file_upload_path,
 )
 from core.models import NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin
 
@@ -26,8 +25,9 @@ class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
     `extracted_text`はdocuments.Documentと同様の理由で追加（screen-search「フリーワード」全文検索、
     2026-08-07ユーザー指示）。抽出処理自体もdocuments.Documentと同じ2段階方式
     （core.text_extraction_services／core.management.commands.extract_pending_pdf_text、
-    2026-08-10追加）。関連書類(RelatedFile)は「AI-OCRでの処理は不要」とxlsxに明記されている
-    （保管!B480）ため対象外、契約書本体ファイルのみを抽出対象とする。
+    2026-08-10追加）。関連書類(ContractRelation)はRev1.6で「既に保管済みの契約書を検索して
+    紐付ける」方式に変わったため物理ファイル自体を持たず（Rev1.5までのRelatedFileは廃止）、
+    全文抽出は契約書本体ファイルのみを対象とする。
     """
 
     title = models.CharField("契約書タイトル", max_length=255)
@@ -131,31 +131,52 @@ class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
     # （documents.Documentとの重複をコード監査で発見、2026-08-25修正）。
 
 
-class RelatedFile(UuidPrefixedFilenameMixin, models.Model):
-    """契約書の関連書類（screen-storage2契約書モード「関連書類」欄）。文書管理とは別の物理ファイル
-    紐付けのみで、AI-OCR等の処理対象ではない（xlsx 保管!B480）。1ファイル選択ごとに次の行が
-    自動追加される形でUI上は複数選択されるため、契約書1件に対し複数レコードを持つ。
+class ContractRelation(models.Model):
+    """契約書の関連書類（screen-storage2契約書モード「関連書類」欄）。
+
+    Rev1.5までは物理ファイルをアップロードする`RelatedFile`だったが、Rev1.6（xlsx 保管!B478-484）で
+    「関連する(紐付ける)契約書を選択する。既に保存済みの契約書を検索してセットする」方式に転換した
+    ため、ファイルではなく**既存Contractへの参照**を保持する。契約書1件に対し複数レコードを持ち、
+    UI上の並び順（「ファイルの選択」で確定した順）を`display_order`で保存する。
+
+    `RelatedFile`（`t_contract_attachment`）は本番リリース前のためユーザー判断で完全撤去した
+    （2026-09-09、HTML_REIMPL_CHECKLIST_ARCHIVE.md「R6-1」節）。
+
+    両FKとも`on_delete=CASCADE`：紐付け先契約書が日次バッチ（purge_expired_deleted_records）で
+    物理削除されたら関連行も静かに消える。論理削除（is_deleted=True）の場合は行は残り、検索・閲覧
+    画面で「既に削除されている関連資料です」と赤表示する（R6-3、xlsx 検索・閲覧・変更!B677-680）。
     """
 
     contract = models.ForeignKey(
         "contracts.Contract",
         verbose_name="契約書",
         on_delete=models.CASCADE,
-        related_name="related_files",
+        related_name="related_links",
     )
-    file = models.FileField("ファイル", upload_to=related_file_upload_path)
+    related_contract = models.ForeignKey(
+        "contracts.Contract",
+        verbose_name="関連書類（契約書）",
+        on_delete=models.CASCADE,
+        related_name="linked_from",
+    )
     display_order = models.PositiveIntegerField("表示順", default=0)
 
     class Meta:
-        db_table = "t_contract_attachment"
+        db_table = "t_contract_relation"
         verbose_name = "関連書類"
         verbose_name_plural = "関連書類"
         ordering = ["display_order", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["contract", "related_contract"], name="uniq_contract_relation"
+            ),
+            # 自分自身を関連書類に指定させない（フォーム改ざん対策。サービス層でも除外するが
+            # DB制約でも二重に防ぐ）。
+            models.CheckConstraint(
+                check=~models.Q(contract=models.F("related_contract")),
+                name="no_self_contract_relation",
+            ),
+        ]
 
     def __str__(self):
-        # 生のストレージパス（"{uuid}_元名"）ではなくUUIDプレフィックスを除いた元名を返す。
-        # admin一覧・監査ログでの可読性のため（コードレビューで発見、2026-08-28修正）。
-        return self.display_name
-
-    # display_nameプロパティの実体はcore.models.UuidPrefixedFilenameMixinに集約済み
-    # （Document/Contractとの重複をコード監査で発見、2026-08-25修正）。
+        return f"{self.contract_id} → {self.related_contract_id}"

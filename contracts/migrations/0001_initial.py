@@ -55,20 +55,33 @@ class Migration(migrations.Migration):
                 'db_table': 't_contract',
             },
         ),
+        # 関連書類（screen-storage2契約書モード）。簡易設計指示書 Rev1.6（xlsx 保管!B478-484）で
+        # 「物理ファイルのアップロード（旧 RelatedFile）」→「既に保管済みの契約書をポップアップ検索して
+        # 複数紐付ける」方式に転換。本番リリース前のため旧 RelatedFile（t_contract_attachment）の
+        # マイグレーション履歴は残さず、この 0001 に ContractRelation として直接畳み込んだ
+        # （2026-09-09、ユーザー依頼。詳細は HTML_REIMPL_CHECKLIST_ARCHIVE.md「R6-1」節）。
         migrations.CreateModel(
-            name='RelatedFile',
+            name='ContractRelation',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('file', models.FileField(upload_to=contracts.storage_paths.related_file_upload_path, verbose_name='ファイル')),
                 ('display_order', models.PositiveIntegerField(default=0, verbose_name='表示順')),
-                ('contract', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='related_files', to='contracts.contract', verbose_name='契約書')),
+                ('contract', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='related_links', to='contracts.contract', verbose_name='契約書')),
+                ('related_contract', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='linked_from', to='contracts.contract', verbose_name='関連書類（契約書）')),
             ],
             options={
                 'verbose_name': '関連書類',
                 'verbose_name_plural': '関連書類',
-                'db_table': 't_contract_attachment',
+                'db_table': 't_contract_relation',
                 'ordering': ['display_order', 'id'],
             },
+        ),
+        migrations.AddConstraint(
+            model_name='contractrelation',
+            constraint=models.UniqueConstraint(fields=('contract', 'related_contract'), name='uniq_contract_relation'),
+        ),
+        migrations.AddConstraint(
+            model_name='contractrelation',
+            constraint=models.CheckConstraint(condition=models.Q(('contract', models.F('related_contract')), _negated=True), name='no_self_contract_relation'),
         ),
         migrations.AddIndex(
             model_name='contract',
