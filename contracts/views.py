@@ -543,6 +543,7 @@ class BulkEditView(RequiresContractEditMixin, bulk_edit_views.BaseBulkEditView):
     search_url_name = "contracts:search"
     bulk_edit_url_name = "contracts:bulk_edit"
     scoped_lookup = staticmethod(scoped_get_object_or_404)
+    dept_ids_resolver = staticmethod(contract_searchable_department_ids)
 
     def base_queryset(self):
         return Contract.objects.prefetch_related("related_links__related_contract").filter(

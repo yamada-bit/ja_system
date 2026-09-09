@@ -41,7 +41,9 @@ class BaseBulkEditView(View):
     サブクラスが指定するクラス変数:
       model / template_name / form_id / session_key / entity_name / kind /
       context_object_name / form_field_names / search_url_name / bulk_edit_url_name /
-      scoped_lookup（`staticmethod()` でラップした scoped_get_object_or_404）
+      scoped_lookup（`staticmethod()` でラップした scoped_get_object_or_404）/
+      dept_ids_resolver（`staticmethod()` でラップした *_searchable_department_ids。
+      「更新」確定直前の部署スコープ再検証に使う。詳細は `_committable_pks`）
     オーバーライドするフック:
       build_form(obj, data=None, marked_delete=False)          … 必須
       commit_one_update(request, obj, form, state) -> bool      … 必須（dirty判定＋反映、更新したらTrue）
@@ -63,6 +65,7 @@ class BaseBulkEditView(View):
     search_url_name = None
     bulk_edit_url_name = None
     scoped_lookup = None
+    dept_ids_resolver = None
     audit_update_action = "保管画面２　更新"
     audit_delete_action = "保管画面２　削除"
 
@@ -189,12 +192,49 @@ class BaseBulkEditView(View):
         # 「更新」ボタン（bulk_action=update）：全ページ一括確定。
         return self._commit(request)
 
+    def _committable_pks(self, request, pks):
+        """「更新」確定の直前に、ウィザード開始後の状況変化を反映して「いま確定してよい」pk集合を
+        絞り直す。`resolve_ordered_pks` が開始時に保証する「is_deleted=False ＋ 部署スコープ」を
+        確定経路でも再適用する（コードレビュー audit/core No.1、2026-09-10）。
+
+        `_current_object`（各ページ表示）は `scoped_lookup` と `base_queryset()` を通すが、
+        確定経路の `commit_queryset(pks)` は既定が pk__in だけで、表示中でない他ページの pk は
+        一切再検証されなかった。想定シナリオ:
+          (a) ウィザード開始後に管理者が当該職員の閲覧部署範囲を縮小 → もう閲覧できない他部署
+              レコードへのステージ済み編集/削除がそのまま確定される。
+          (b) 別タブ／他ユーザーが対象を論理削除した後に「更新」 → ゴミ箱内のレコードに編集が
+              走り「更新」監査ログまで残る。
+        CLAUDE.md「ボタンの表示/非表示とサーバー側権限チェックは別物」「URL直打ち／セッション
+        改ざんを想定してサーバー側も確認する」。`dept_ids_resolver` 未設定のサブクラス
+        （保管画面２等）では is_deleted のみ再確認する。
+        """
+        qs = self.model.objects.filter(pk__in=pks, is_deleted=False)
+        if self.dept_ids_resolver is not None:
+            allowed_department_ids = self.dept_ids_resolver(request.user)
+            if allowed_department_ids is not None:
+                qs = qs.filter(department_id__in=allowed_department_ids)
+        return set(qs.values_list("pk", flat=True))
+
     def _commit(self, request):
         state = bulk_edit_services.get_bulk_edit_state(request.session, self.session_key)
         pks = state["pks"]
         to_delete = set(state.get("to_delete", []))
         staged = state.get("staged", {})
-        objs_by_pk = {o.pk: o for o in self.commit_queryset(pks)}
+        committable = self._committable_pks(request, pks)
+        # 開始後に部署スコープ外・論理削除済みになった pk は確定対象から静かに除外する
+        # （resolve_ordered_pks と同じく「選択した覚えのない対象」を確定に紛れ込ませない）。
+        objs_by_pk = {
+            o.pk: o for o in self.commit_queryset(pks) if o.pk in committable
+        }
+        dropped = [pk for pk in pks if pk not in committable]
+        if dropped:
+            logger.warning(
+                "%sの一括編集確定時に、開始後スコープ外/論理削除済みになった対象を除外しました: "
+                "employee_no=%s pks=%s",
+                self.entity_name,
+                request.user.employee_no,
+                dropped,
+            )
 
         # --- 検証パス：ステージ済みで削除予定でない全ページを検証。1つでもNGなら全体を止める。 ---
         forms_by_pk = {}

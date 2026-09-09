@@ -453,6 +453,7 @@ class BulkEditView(LoginRequiredMixin, bulk_edit_views.BaseBulkEditView):
     search_url_name = "documents:search"
     bulk_edit_url_name = "documents:bulk_edit"
     scoped_lookup = staticmethod(scoped_get_object_or_404)
+    dept_ids_resolver = staticmethod(document_searchable_department_ids)
 
     def build_form(self, obj, data=None, marked_delete=False):
         form = UploadStep2Form(
