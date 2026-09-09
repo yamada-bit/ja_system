@@ -8,6 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 
+from audit import services as audit_services
 from contracts.models import Contract
 from contracts.services import can_delete
 from contracts.views import PENDING_SESSION_KEY, RequiresContractEditMixin
@@ -64,6 +65,12 @@ class DetailAPIView(LoginRequiredMixin, View):
                 "他部署の契約書への不正アクセス試行: employee_no=%s contract_id=%s",
                 request.user.employee_no,
                 pk,
+            )
+            # このビューはscoped_get_object_or_404を経由せず部署スコープ判定を直書きしているため、
+            # 操作履歴ログ（audit）への記録もここで明示的に行う（review_rule_doc_contract.txt No.1、
+            # 2026-09-09ユーザー確定。contracts.services.scoped_get_object_or_404側と同じ扱い）。
+            audit_services.log_denied_cross_department_access(
+                employee=request.user, entity_name="契約書", pk=pk
             )
             raise PermissionDenied("この契約書を閲覧する権限がありません。")
 

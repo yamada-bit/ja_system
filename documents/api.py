@@ -8,6 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 
+from audit import services as audit_services
 from core.api import BaseOptionListAPIView
 from core.file_type_services import get_preview_kind
 from core.notice_services import is_expiring_soon
@@ -48,6 +49,12 @@ class DetailAPIView(LoginRequiredMixin, View):
                 "他部署の文書への不正アクセス試行: employee_no=%s document_id=%s",
                 request.user.employee_no,
                 pk,
+            )
+            # このビューはscoped_get_object_or_404を経由せず部署スコープ判定を直書きしているため、
+            # 操作履歴ログ（audit）への記録もここで明示的に行う（review_rule_doc_contract.txt No.1、
+            # 2026-09-09ユーザー確定。documents.services.scoped_get_object_or_404側と同じ扱い）。
+            audit_services.log_denied_cross_department_access(
+                employee=request.user, entity_name="文書", pk=pk
             )
             raise PermissionDenied("この文書を閲覧する権限がありません。")
 

@@ -786,6 +786,31 @@ class DepartmentScopeAccessControlTests(TestCase):
         response = self.client.get(f"/contracts/{self.other_contract.pk}/preview/")
         self.assertEqual(response.status_code, 404)
 
+    def test_cross_department_direct_access_is_recorded_in_audit_log(self):
+        """部署スコープ外pkへの直打ちアクセス試行は logger.warning に加えて操作履歴ログ（audit）
+        にも記録する（review_rule_doc_contract.txt No.1、2026-09-09ユーザー確定。
+        scoped_get_object_or_404 の on_denied 経由）。"""
+        self.assertFalse(AuditLog.objects.filter(action="アクセス拒否").exists())
+        self.client.get(f"/contracts/{self.other_contract.pk}/download/")
+        entry = AuditLog.objects.get(action="アクセス拒否")
+        self.assertEqual(entry.employee_no, "1")
+        self.assertIn("契約書", entry.event_message)
+        self.assertIn(f"（ID:{self.other_contract.pk}）", entry.event_message)
+
+    def test_own_department_access_does_not_write_audit_denial(self):
+        """自部署リソースへの正常アクセスでは「アクセス拒否」ログを残さない（回帰防止）。"""
+        from contracts.models import Contract
+
+        own = Contract(
+            title="自部署の契約書", department=self.own_department, group=self.other_contract.group,
+            category=self.other_contract.category, year=2026, uploader=self.employee,
+            expiry_date=datetime.date(2036, 1, 1),
+        )
+        own.file.save("own.pdf", ContentFile(b"dummy"), save=False)
+        own.save()
+        self.client.get(f"/contracts/{own.pk}/download/")
+        self.assertFalse(AuditLog.objects.filter(action="アクセス拒否").exists())
+
     def test_edit_screen_of_other_department_contract_returns_404(self):
         response = self.client.get(f"/contracts/{self.other_contract.pk}/edit/")
         self.assertEqual(response.status_code, 404)
@@ -2519,6 +2544,13 @@ class DetailAPIViewTests(TestCase):
 
         response = self.client.get(f"/contracts/api/{other_contract.pk}/")
         self.assertEqual(response.status_code, 403)
+        # 他部署リソースへの直打ちアクセス試行は操作履歴ログ（audit）にも残す
+        # （review_rule_doc_contract.txt No.1、2026-09-09ユーザー確定）。
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="アクセス拒否", event_message__contains=f"（ID:{other_contract.pk}）"
+            ).exists()
+        )
 
 
 class CanDeleteBoundaryTests(TestCase):

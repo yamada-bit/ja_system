@@ -5,6 +5,7 @@ from django.conf import settings
 from django.db.models import Case, F, IntegerField, Value, When
 from django.utils import timezone
 
+from audit import services as audit_services
 from core import deletion_services, scoping_services, zip_services
 from masters.models import RetentionPeriod, RetentionPeriodUnit
 from organizations.services import visible_department_ids
@@ -77,9 +78,19 @@ def scoped_get_object_or_404(base_qs, employee, pk):
 
     実体はcore.scoping_services.scoped_get_object_or_404に集約済み（contracts.services.
     scoped_get_object_or_404との重複をコード監査で発見、2026-08-25修正）。
+
+    部署スコープ外pkへの直打ちアクセス試行はlogger.warningに加えて操作履歴ログ（audit）へも
+    記録する（`on_denied`、review_rule_doc_contract.txt No.1、2026-09-09ユーザー確定）。
     """
     return scoping_services.scoped_get_object_or_404(
-        base_qs, employee, pk, dept_ids_resolver=document_searchable_department_ids, entity_name="文書"
+        base_qs,
+        employee,
+        pk,
+        dept_ids_resolver=document_searchable_department_ids,
+        entity_name="文書",
+        on_denied=lambda: audit_services.log_denied_cross_department_access(
+            employee=employee, entity_name="文書", pk=pk
+        ),
     )
 
 

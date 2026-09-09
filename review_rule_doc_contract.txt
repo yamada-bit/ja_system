@@ -1,254 +1,222 @@
-documents/contracts アプリ CLAUDE.md コーディング規約準拠監査
-対象: documents/{models,views,api,services,search_services,storage_paths,forms,urls,admin,apps,tests}.py
-      contracts/{models,views,api,services,search_services,storage_paths,forms,urls,admin,apps,tests}.py
-      templates/documents/*.html, templates/contracts/*.html
-実施日: 2026-08-28（前回 2026-08-25 版を現状に合わせて再実施・上書き）
-方式: CLAUDE.md「コーディング規約」「原本フィデリティに関する運用方針」の各項目ごとに
-      全ファイルを読み込み突き合わせ。あわせて下記を実行:
-        - pyflakes documents/ contracts/         （未使用import・未定義参照の機械検出）
-        - manage.py makemigrations --check --dry-run documents contracts
-        - manage.py test documents contracts      （290件）
-      本レポートは棚卸しのみで、修正は行っていない。
+================================================================================
+documents/ ・ contracts/ アプリ  CLAUDE.md コーディング規約準拠監査レポート
+================================================================================
+実施日        : 2026-09-09
+対象ブランチ  : feat/storage2-per-file-metadata
+対象ファイル  : documents/*.py, contracts/*.py（models / views / api / forms /
+                services / search_services / storage_paths / urls / admin /
+                apps / tests）、および両アプリ専用テンプレート（templates/documents,
+                templates/contracts）を補助的に確認
+判定方式      : CLAUDE.md「コーディング規約」全13項目に照合。レポートのみ・修正なし。
 
-※ 前回監査（2026-08-25）以降の主な変更:
-   - commit 9358b6d 一括編集をステージング型（更新ボタンで全ページ一括確定）へ改修
-   - 未コミット分: 保存満了日の編集時再計算ルール整理（レビュー指摘C-1）、契約書編集の
-     関連書類追加失敗時の孤児ファイル後始末（C-2）、templates/documents/edit.html のJS追随
-   - 原本 html5 / 簡易設計指示書 Rev1.3・Rev1.4 の反映（documents/contracts 実装への影響は無し）
-   本監査はこの状態に対して規約準拠の観点のみで棚卸しした結果。正しさのバグ探しは対象外
-   （/code-review 相当は review_code_doc_contract_full.txt / review_code_documents_contracts.txt 参照）。
+--------------------------------------------------------------------------------
+総評
+--------------------------------------------------------------------------------
+両アプリは過去の複数回のコード監査・フィデリティ監査・品質レビューを反映済みで、
+規約準拠度は非常に高い。CBV限定・日本語 verbose_name/docstring・core への共通化・
+Paginator・具体例外型の捕捉・logger.exception・二重送信トークンなど、主要項目は
+おおむね遵守されている。以下は残存する軽微な逸脱・不統一のみ。高優先度の逸脱は
+検出されなかった。
+
+凡例  優先度: 高 = 早期対応推奨 / 中 = 計画的に対応 / 低 = 気付いた時に対応・任意
 
 ================================================================================
-■ 総合評価
-================================================================================
-重大な規約違反は検出せず。CLAUDE.md「コーディング規約」「原本フィデリティ運用方針」の各項目は
-おおむね遵守されている。指摘は5件、すべて[低]（「違反」ではなく「改善余地」レベル）。
-前回[中]だった「contracts側のテスト観点不足」は解消済み（下記「前回指摘の状況」参照）。
-
-================================================================================
-■ 規約項目ごとのチェック結果
-================================================================================
-
-[OK] ビューはCBVのみ
-  documents/views.py・contracts/views.py・documents/api.py・contracts/api.py とも、全て
-  django.views.View / UpdateView / core側Base*View を継承したクラスベースビュー。
-  urls.py に登録される関数ビューは無し。views.py 内の def は _strip_ext() /
-  _expiry_preview_context() / _pending_preview_context() / _edit_delete_context() の
-  プライベートヘルパーのみ。commit 9358b6d で追加された一括編集も BulkEditView（CBV）内の
-  _commit()/_render_complete()/_context()/_build_form() メソッドとして実装されている。
-
-[OK] verbose_name/help_text/エラーメッセージ/docstring の日本語統一
-  documents/models.py・contracts/models.py（RelatedFile 含む）の全フィールドで
-  verbose_name/help_text が日本語。forms.py の label、views.py の messages.error()／
-  PermissionDenied() 文言、監査ログの action/event_message もすべて日本語で統一。
-
-[対象外] 設定の config/settings/base.py 集約・.env経由読み込み
-  両アプリ自体に新規設定値の追加は無し。settings.CONTRACT_RETENTION_YEARS /
-  RETENTION_PERMANENT_YEARS / NOTICE_*_THRESHOLD_MONTHS / OCR_* は config/settings 側で
-  完結し、両アプリからは settings 経由で参照するのみ。
-
-[対象外] アップロードファイル本体の分離・Argon2優先
-  MEDIA_ROOT・PASSWORD_HASHERS は config/settings 側の管轄。両アプリの storage_paths.py は
-  core.storage_paths.build_hierarchical_upload_path に委譲し、パス生成のみを担う。
-
-[OK] 監査ログの一元化（auditアプリ経由）
-  登録（UploadStep2View.post）・更新（EditView.post / BulkEditView._commit）・検索
-  （SearchView.get）は audit_services.log を直接呼ぶ。ダウンロード・プレビュー・削除は
-  core.record_views.BaseFileServeView / BaseBulkDownloadView / BaseDeleteView が内部で
-  audit_services.log を呼ぶ。一括編集の確定時も「更新」「削除」1件ごとに個別記録し、
-  「更新なし」ページは記録しない（2026-08-28ユーザー確定に沿う）。記録漏れは検出せず。
-
-[OK] core相当の共通基底クラス・サービス関数への集約（重複排除）
-  documents/contracts 間の実装重複はほぼ全て core 側に集約済み（deletion_services /
-  scoping_services / zip_services / storage_paths / record_views / bulk_edit_services /
-  upload_views / search_services / forms / models.NormalizedTextFieldsMixin・
-  UuidPrefixedFilenameMixin）。各委譲関数の docstring に集約理由・発見経緯が記録されている。
-  documents.services.document_searchable_department_ids のみ permissions.services 側の
-  contract_searchable_department_ids と配置が非対称だが、依存データの違い（契約書側のみ
-  permissions アプリ固有の PermissionProfile.contract_visible_departments に依存し、
-  循環import回避も兼ねる）が docstring に明記されており、意図的な設計判断として妥当
-  （documents/services.py:41-60）。→ 残る細かな重複は指摘3。
-
-[OK] コメントは「なぜ」を詳しく書く
-  全編にわたり、原本HTML/xlsxの該当セル番地、過去の監査での発見経緯、他ファイルとの
-  対称性の理由、ステージング型改修の背景等、非自明な設計判断の「なぜ」が丁寧に記録されている。
-  RequiresContractEditMixin の docstring（MRO とLoginRequiredMixin継承順の落とし穴）などは
-  特に手厚い。「何をしているか」の説明に留まるコメントはほぼ無し。
-
-[OK] ログの整備
-  documents/contracts の views.py・api.py・services.py・search_services.py はいずれも
-  logger = logging.getLogger(__name__) を用意。権限拒否（RequiresContractEditMixin.dispatch、
-  DeleteView.extra_permission_check）、不正アクセス試行（scoping_services 経由、
-  DetailAPIView の他部署アクセス、pks/remove_related_ids の不正値）、想定外のI/O失敗
-  （logger.exception）を適切なレベルで記録している。models.py は logger 定義のみで発火箇所が
-  無いが、リクエスト処理を持たないモジュールのため妥当。
-
-[OK] 例外処理の完成度
-  bare except: ／ except Exception ／ print() は documents/contracts 配下に0件（grep・pyflakes確認）。
-  ファイルI/O・DB境界は OSError / DBError / PendingFileStorageError を具体的に捕捉し、
-  logger.exception で記録した上で messages.error でユーザーに案内
-  （UploadStep2View.post、DocumentEditView.post、ContractEditView.post、
-  BulkEditView._commit、apply_contract_edit）。ロールバック済みファイル実体の孤児化防止
-  （file.delete(save=False)）も登録経路・編集経路（C-2で今回追加）の双方で実装されている。
-  「本質的でない処理の失敗を握りつぶす」箇所（_commit finally の fh.close() の except OSError: pass 等）
-  には理由コメントが付いている。
-
-[OK] 一覧画面のDjango Paginator
-  SearchView（documents/contracts両方）は Django Paginator を使用（PAGE_SIZE=100）。
-  templates/{documents,contracts}/search.html の «/＜/＞/» ボタンは page_obj.has_previous /
-  has_next の条件分岐で、先頭・末尾ページのときだけ disabled にする実装。「機能しない
-  静的ページャー」には該当しない（edit.html の ＜/＞ も bulk.has_prev/has_next 連動）。
-
-[OK] 未実装機能のdisabled+title、alert()誤魔化しの禁止
-  UIボタンを alert() で偽装している箇所は無し。storage1.html の alert(String(err.message||err))
-  はチャンクアップロード失敗時の実エラー通知であり該当しない。documents/contracts 単体には
-  未実装・対象外のUI要素は見当たらない（電子決裁関連は permissions/masters のスコープ）。
-
-[OK] ファイル役割分担
-  両アプリとも models.py / views.py / api.py（JsonResponse直返し・DRF不使用）/ services.py /
-  search_services.py / storage_paths.py / forms.py / urls.py / admin.py / apps.py の標準構成。
-  validators.py は必要が生じていないため未作成（規約上は「必要なら」）。ZIP構築等の
-  ビジネスロジックの views.py 直書きは前回までに解消済み。→ 一括編集 _commit の位置付けは指摘5。
-
-[OK] 原本フィデリティ運用方針
-  - パスワード等の機微情報を扱うフォームは両アプリのスコープ外。
-  - 「同一注記が複数箇所」（削除済み文書/契約書はボタン非表示）: api.py の edit_url /
-    download_url / preview_url / delete_url の4つすべてで is_deleted ゲーティングが揃っており、
-    対応するサーバー側ビュー（DownloadView/PreviewView/EditView/DeleteView）も
-    is_deleted=False 限定・scoped_get_object_or_404 でURL直打ちを塞いでいる。表示方式
-    （None化）とサーバー側検証の両輪が両アプリで対称に実装されている。
-  - 一括編集はステージング型（プロジェクトメモ project_storage2_delete_button_spec /
-    expiry_date_edit_recalc_spec のユーザー確定仕様）に沿う。
-  - ユーザー指示で原本から意図的に外している点（一括編集開始時の alert → messages 機構化、
-    保存満了日の再計算ルール）は docstring・チェックリストに理由付きで記録済み。
-
-[OK] マイグレーション整合
-  makemigrations --check --dry-run → "No changes detected in apps 'contracts', 'documents'"。
-  モデル定義とマイグレーションの間に差分なし。
-
-[OK] テスト
-  manage.py test documents contracts → Ran 290 tests, OK（前回228→290に増加）。
-  標準エラー出力のトレースバックは disk full 等を意図的に起こす例外系テストの mock 出力で、
-  結果には影響なし。
-
-================================================================================
-■ 指摘一覧（すべて[低]）
+指摘一覧
 ================================================================================
 
 --------------------------------------------------------------------------------
-[低] 指摘1: 未使用import
---------------------------------------------------------------------------------
-対象（pyflakes 検出）:
-  - documents/views.py:3   from django.conf import settings          … ファイル内で未参照
-  - documents/views.py:6   from django.core.exceptions import PermissionDenied … 未参照
-                           （契約書側 RequiresContractEditMixin のような権限拒否分岐が
-                            documents 側には無いため。過去に存在した名残と見られる）
-  - contracts/views.py:3   from django.conf import settings          … 未参照
-  - documents/admin.py:1 / contracts/admin.py:1  from django.contrib import admin … 未参照
-                           （"# Register your models here." だけの Django 初期スタブ。
-                            admin 登録が不要なら import ごと削除、または pass を残す）
-
-内容:
-  CLAUDE.md に「未使用importを避ける」の明文規約は無いため厳密には違反ではないが、
-  コード監査で重複ロジックを core へ集約した際の置き土産と見られる。可読性のため除去してよい。
-  admin.py の2件は Django の初期テンプレートそのものなので優先度は最も低い。
-
---------------------------------------------------------------------------------
-[低] 指摘2: MATCH_AND の再エクスポート経由参照
+No.1  【中】 権限拒否イベントが audit（操作履歴ログ）に記録されない
 --------------------------------------------------------------------------------
 対象:
-  - documents/forms.py:7  ・ contracts/forms.py:8   … core.forms.MATCH_AND を import しているが
-    forms.py 内では未使用（pyflakes が「imported but unused」を検出）
-  - documents/search_services.py:4  from documents.forms import MATCH_AND
-  - contracts/search_services.py:5  from contracts.forms import MATCH_AND
+  - contracts/views.py:89-98  RequiresContractEditMixin.dispatch
+  - contracts/views.py:742-757 DeleteView.extra_permission_check
+  - contracts/api.py:62-68     DetailAPIView.get（他部署アクセス拒否）
+  - contracts/api.py           RelatedSearchAPIView（Mixin経由）
+  - contracts/services.py:124-169 filter_valid_related_ids（紐付け不可pyの除外）
+  - documents/api.py:46-52     DetailAPIView.get（他部署アクセス拒否）
+  - documents/search_services.py:78-83 / contracts/search_services.py:72-77
+    （pks 改ざん検出）
+  - documents/services.py / contracts/services.py の scoped_get_object_or_404
+    （core.scoping_services 経由の warning のみ）
 
-内容:
-  search_services.py は MATCH_AND を「core.forms → {app}.forms → search_services」という
-  2段経由で取り込んでいる。forms.py は中継しているだけで自身は使っていない。
-  search_services.py が core.forms.MATCH_AND を直接 import すれば、forms.py 側の
-  未使用import（指摘1に含めた MATCH_AND 分）も同時に解消でき、依存の向きも素直になる
-  （apply_word_filter / apply_freeword_filter も既に core.search_services の実体を呼ぶだけ）。
+根拠:
+  CLAUDE.md 規約「監査が必要なイベント（ログイン/ログアウト、権限に関わる操作等）は
+  一元的な記録機構（audit アプリ）を通す」。
+  上記はいずれも「契約書情報変更権限が無い職員の保存・削除操作」「他部署文書/契約書への
+  URL 直打ちアクセス試行」「フォーム改ざんによる不正 pk 混入」という“権限に関わる操作”
+  だが、記録は logger.warning のみで audit.AuditLog（＝操作履歴ログ画面・CSV出力の対象）
+  には残らない。accounts/permissions 側では権限変更・ログイン等を audit_services.log で
+  記録しており、拒否イベントだけ可観測性が一段低い。
+
+補足（対応要否の判断材料）:
+  - コードベース全体で「拒否試行は logger.warning、成功操作は AuditLog」という運用が
+    一貫しており、documents/contracts 固有の逸脱ではない。
+  - 操作履歴ログはエンドユーザー向け画面であり、拒否試行を意図的に除外している可能性も
+    ある（その場合は本指摘は「規約文言の解釈の明文化」で足りる）。
+  → 少なくとも「他部署リソースへの直打ちアクセス試行」はセキュリティ監査上価値が高いため、
+    audit 記録の要否をユーザーに確認し、方針を CLAUDE.md か
+    HTML_REIMPL_CHECKLIST_ARCHIVE 系に明記することを推奨。
+
+対応済み（2026-09-09、ユーザー確定＝「他部署直打ちのみ記録」）:
+  「他部署リソースへの URL 直打ちアクセス試行」だけを AuditLog（操作履歴ログ画面・CSV出力の
+  対象）へ記録するようにした。権限不足の保存・削除操作やフォーム改ざんによる不正 pk 混入は
+  従来どおり logger.warning 止まり（監査価値と操作履歴ログのノイズ増加のトレードオフ判断）。
+  - 新設: audit.services.log_denied_cross_department_access（action="アクセス拒否"、
+    event_message="部署スコープ外の{文書|契約書}（ID:n）へのアクセスを拒否しました。"）。
+  - core.scoping_services.scoped_get_object_or_404 に任意コールバック on_denied を追加。
+    documents.services / contracts.services のラッパーがこれを渡し、DownloadView /
+    PreviewView / Edit / Delete / 一括編集の直打ちを一括カバー。masters（分類・カテゴリー）側は
+    管理者用画面で監査価値が相対的に低いため on_denied を渡さず warning のみ据え置き。
+  - documents/api.py・contracts/api.py の DetailAPIView.get は scoped_get_object_or_404 を
+    経由しない直書き判定のため、同関数呼び出しを個別に追加。
+  - テスト追加: documents/contracts の DepartmentScopeAccessControlTests に
+    test_cross_department_direct_access_is_recorded_in_audit_log /
+    test_own_department_access_does_not_write_audit_denial、DetailAPI テストにも AuditLog 検証。
+  - 方針を CLAUDE.md「監査が必要なイベント」節に明記。
 
 --------------------------------------------------------------------------------
-[低] 指摘3: 閏年ずれ対策のコピー（アプリ間の小重複）
+No.2  【低】 views.py に DB アクセスを伴う業務ロジックのヘルパー関数が残存
 --------------------------------------------------------------------------------
 対象:
-  - documents/services.py:195-200  _add_years()
-      try: base.replace(year=base.year+years)
-      except ValueError: base.replace(month=2, day=28, year=...)
-  - contracts/services.py:172-175  calculate_expiry_date() 内に同じ3行を再インライン
+  - contracts/views.py:792-808  _resolve_related_rows（Contract.objects.filter を実行）
+  - contracts/views.py:780-789  _related_rows_for_contract
+  - contracts/views.py:811-835  _merge_related_into_field_sets / _remap_related_ids_after_remove
 
-内容:
-  「2/29起点 + N年」の閏年ずれを 2/28 に丸める同一ロジックが documents 側のヘルパーと
-  contracts 側の calculate_expiry_date にそれぞれ書かれている。core.notice_services には
-  既に add_months があるため、同じ場所に add_years（または date 加算ヘルパー）を置いて
-  両アプリから使えば「アプリ間で重複するロジックを増やさない」により沿う。
-  行数は少なく緊急性は低い。
+根拠:
+  CLAUDE.md「各アプリ内のファイル役割分担パターン」＝「services.py（ビューから分離した
+  ビジネスロジック）」。関連書類 pk リスト → 表示行への解決や再描画時のインデックス
+  詰め直しは、hidden input のパースと DB 引き当てを含む再利用可能なロジックで、
+  contracts/services.py もしくは core 側（documents に対称物が無いので services で可）に
+  置く方が役割分担の慣習に沿う。保存時の検証ロジック filter_valid_related_ids /
+  sync_related_contracts は既に services.py に分離されており、再描画側だけ views.py に
+  残っている非対称。
 
---------------------------------------------------------------------------------
-[低] 指摘4: api.py → views.py への import 方向
---------------------------------------------------------------------------------
-対象:
-  - documents/api.py:17  from documents.views import PENDING_SESSION_KEY
-  - contracts/api.py:13  from contracts.views import PENDING_SESSION_KEY, RequiresContractEditMixin
+補足:
+  純粋に「表示のための整形」であり副作用は無い（コメントでもその旨明記）。影響は小さく、
+  緊急性は無い。同種の整形ヘルパー（_strip_ext, _edit_delete_context, _pending_preview_context）
+  は documents 側にも views.py 直書きで存在するため、統一方針を決めてまとめて移すのが望ましい。
 
-内容:
-  api.py が views.py の定数・ミックスインを取り込む形で、通常の依存方向（views → api ではなく
-  api → views）とは逆になっている。循環importにはなっておらず（views.py は api.py を import
-  しない、urls.py が両方を import）動作上の問題は無いが、セッションキー定数や
-  RequiresContractEditMixin を中立な場所（例: 各アプリの services.py、または定数モジュール）に
-  置く方が構成として素直。CLAUDE.md のファイル役割分担に「api はビュー内AJAX用」とあり、
-  ビューへの逆依存を禁じてはいないため[低]。
+見送り／理由: 優先度「低」。副作用の無い表示用整形であり動作・保守性への実害が小さい。
+  documents/contracts 双方の同種ヘルパー（_strip_ext 等）をまとめて services へ移す横断作業と
+  して扱うべきで、_resolve_related_rows だけ単独で移すと逆に非対称が増える。別タスクで一括対応。
 
 --------------------------------------------------------------------------------
-[低] 指摘5: BulkEditView._commit のオーケストレーションが view 側に集中
+No.3  【低】 フォームの非自明メソッドに docstring が無い
 --------------------------------------------------------------------------------
 対象:
-  - documents/views.py:472-546  BulkEditView._commit
-  - contracts/views.py:552-646  BulkEditView._commit
+  - documents/forms.py  UploadStep2Form.__init__（127-199行）, clean は無いが SearchForm.__init__（310-348）, SearchForm.clean（350-354）
+  - contracts/forms.py  UploadStep2Form.__init__（137-191）, UploadStep2Form.clean（193-204）,
+    SearchForm.__init__（300-357）, SearchForm.clean（358-362）
+  - contracts/api.py  CommaNumberInput.value_from_datadict / format_value（クラス docstring はあるがメソッド単位は無し）
 
-内容:
-  一括編集の確定処理は「ステージ済み全ページの検証ループ → transaction.atomic() 内で
-  削除マーク適用 / dirty判定 / apply_*_edit / 監査ログ / status集計」という一連のビジネス
-  ロジックを _commit メソッド（view 内）に持っている。フィールドコピーと dirty 判定自体は
-  services.py（apply_document_edit / document_edit_is_dirty ほか）に分離済みだが、
-  トランザクション制御と一括確定のフロー本体は view に残る。
-  単体編集経路も transaction 制御を view 側に置いているため既存の慣習とは一貫しており、
-  「規約違反」とまでは言えない。ただし _commit は分岐が多く、
-  review_code_doc_contract_full.txt の C-6（確定パスの対象再取得にスコープ条件が無い等）とも
-  重なる領域なので、services 側に bulk_commit(...) 相当を切り出すとテスト容易性・
-  責務分離の両面で改善余地がある。
+根拠:
+  CLAUDE.md「クラス・非自明なメソッドにはdocstringを付ける」。
+  各 __init__ はフィールドのファイル数ぶん複製、部署 disabled 化、queryset 差し替え、
+  検索部署デフォルト補完など 40〜60 行の非自明な処理を持つが、説明は行内コメントのみで
+  メソッドの目的・責務を要約する docstring が無い。file_data / first_error_file_index には
+  docstring が付いており、同一ファイル内で粒度が不統一。
 
-（参考・スコープ境界）
-  templates/documents/edit.html の C-1 対応で追加された
-  data-current-expiry="{{ document.expiry_date|date:'Y-n-j' }}"（ゼロ埋め無し）は、
-  expiry_date_previews が返す .isoformat()（ゼロ埋めあり "YYYY-MM-DD"）と表示フォーマットが
-  食い違う。span.textContent への表示のみで機能影響は無いが、保存期間を変えたときと
-  変えないときで満了日の見た目（"2026-8-3" / "2026-08-03"）が変わる。これは規約準拠ではなく
-  コードレビュー範疇の軽微な表示不整合のため参考記載に留める。
+見送り／理由: 優先度「低」。各 __init__/clean には既に「なぜ」を説明する行内コメントが
+  十分に付いており、機能・可読性への実害は無い。docstring 粒度の統一は documents/contracts
+  両 forms.py をまとめて見直す軽微整形タスクとして別途対応。
+
+--------------------------------------------------------------------------------
+No.4  【低】 例外の握りつぶしに「なぜ」コメントが無い箇所
+--------------------------------------------------------------------------------
+対象:
+  - contracts/api.py:46-51  CommaNumberInput.format_value
+        except InvalidOperation:
+            return value           # ← 理由コメント無し
+  - contracts/services.py:204-207  calculate_expiry_date
+        except ValueError:
+            return save_date.replace(month=2, day=28, ...)   # ← 理由コメント無し
+
+根拠:
+  CLAUDE.md「失敗を握りつぶして良いが、その場合は必ずコメントで理由を明記する」。
+  - format_value は「不正な数値文字列はそのまま素で表示に回す」という意図だが明記が無い。
+  - calculate_expiry_date の ValueError は 2/29 起点の閏年ずれ対策。対になる
+    documents/services.py:201-206 _add_years には「2/29起点の場合の閏年ずれ対策」という
+    コメントがあるが、contracts 側の同型コードには無く不統一。
+
+補足:
+  どちらも意図はコードから比較的読み取れるため実害は小さいが、規約が明示的に要求している
+  項目であり、documents 側との対称性の観点でも 1 行追記が望ましい。
+
+見送り／理由: 優先度「低」。挙動に影響せず、意図もコードから読み取れる。コメント 1 行の
+  追記のみで独立してテストが伴わないため、次に当該ファイルを触る際に併せて対応する。
+
+--------------------------------------------------------------------------------
+No.5  【低】 models.py の logger が未使用
+--------------------------------------------------------------------------------
+対象:
+  - documents/models.py:9   logger = logging.getLogger(__name__)
+  - contracts/models.py:12  logger = logging.getLogger(__name__)
+
+根拠:
+  CLAUDE.md「新しいモジュールでは logger = logging.getLogger(__name__) を用意する」に
+  従った定義だが、両モジュールとも実際には一度も参照していない（save 等のロジックは
+  core.models のミックスインにあり、models.py 本体に警告すべき分岐が無い）。
+  規約準拠としては「用意する」を満たしているが、未使用ローカル/シンボルとして lint 上は
+  ノイズになる。documents/services.py は同じ状況に対し
+  「現状このモジュールに警告すべき分岐は無い」と明示コメントを付けて意図を示しているため、
+  models.py 側にも同様の一言を添えるか、実際に使うまで定義を保留するかで統一するとよい。
+
+見送り／理由: 優先度「低」。規約「新しいモジュールでは logger を用意する」は満たしており、
+  lint ノイズという程度の指摘。挙動・テストに影響しないコメント追記のみのため見送り。
 
 ================================================================================
-■ 前回指摘（2026-08-25版）の状況
+規約項目別 チェック結果サマリ
 ================================================================================
-[中] contracts側のユニットテスト観点不足（Normalization / StoragePath）
-  → 解消済み。contracts/tests.py:2382 ContractSaveNormalizationTests、
-    contracts/tests.py:2433 StoragePathTests が追加され、update_fields 指定時の
-    *_normalized 追従、contract_upload_path / contract_searchable_upload_path /
-    related_file_upload_path の生成パス、UUID による一意性を検証している
-    （docstring に「CLAUDE.md規約準拠監査で発見」と経緯記載あり）。
-
-[低] 未使用import SEARCH_RADIO_DEFAULTS（documents/forms.py・contracts/forms.py）
-  → 解消済み。現在の import からは除去され、apply_radio_defaults() の呼び出しのみが残る。
+1. ビューはCBVのみ / FBV追加禁止 ........................ 準拠（全ビュー CBV、FBV無し）
+2. verbose_name/help_text/エラー文言/docstring は日本語 .. 準拠（英語混入なし。
+                                                          粒度の不統一のみ→No.3）
+3. 設定は base.py 集約・django-environ 経由・.env.example . 準拠（両アプリで新規設定の
+                                                          追加は無し。既存 settings 参照のみ）
+4. パスワードハッシュは Argon2 優先 .................... 対象外（両アプリにハッシュ処理なし）
+5. 監査イベントは audit アプリ経由 .................... 概ね準拠（成功操作は AuditLog 記録。
+                                                          拒否イベントは logger.warning 止まり→No.1）
+6. 共通処理は core に集約・重複を増やさない ............ 準拠（record_views/bulk_edit_views/
+                                                          scoping_services/zip_services/
+                                                          search_services 等へ徹底集約済み。
+                                                          再描画ヘルパーのみ views 残置→No.2）
+7. コメントは「なぜ」・非自明メソッドに docstring ...... 概ね準拠（コメント品質は高い。
+                                                          docstring 粒度→No.3、握りつぶし
+                                                          理由→No.4）
+8. logger 整備・logger.warning で権限拒否等を記録 ...... 準拠（各モジュールに logger。
+                                                          権限拒否・改ざん検出は warning 記録。
+                                                          models.py の未使用→No.5）
+9. 例外処理の完成・具体例外型・logger.exception・
+   bare except 禁止 ................................... 準拠（bare except 無し。
+                                                          OSError/DBError/ValueError/
+                                                          InvalidOperation 等を型指定で捕捉、
+                                                          logger.exception 併用。
+                                                          握りつぶし理由の明記漏れ→No.4）
+10. ページネーションは Django Paginator ............... 準拠（documents/contracts SearchView
+                                                          とも core.paginator.Paginator 使用、
+                                                          テンプレートも page_obj ベース。
+                                                          機能しない静的ページャー無し）
+11. 未実装UIは disabled + title で理由明示 ............ 準拠（保管画面2「削除」ボタン等は
+                                                          実機能に置換済み。alert() 誤魔化し無し。
+                                                          storage1.html の alert は
+                                                          アップロードエラー通知で正当）
 
 ================================================================================
-■ 実行した確認コマンドと結果
+確認したが問題なしと判断した項目（誤検知防止の記録）
 ================================================================================
-- pyflakes documents/ contracts/
-  → 検出は指摘1・指摘2に挙げた7件のみ（すべて未使用import。未定義参照・シャドウ等は0件）。
-    tests.py 側の検出は無し。
+- documents/contracts の UploadStep2View.post で commit 後に呼ぶ
+  try_immediate_text_layer_extraction は core 側で広域 except＋logger.exception＋
+  「アップロード自体を失敗させない」設計判断コメントを持つため、ビュー側の未捕捉は問題なし。
+- transaction.atomic() ロールバック時の孤児ファイル削除（created ループの file.delete）は
+  両ビューで実装済み。
+- multi-line の {# ... #} コメントは各行が {# で始まり #} で終わる自己完結形で、
+  CLAUDE.md が警告する「.が改行にマッチせず生表示される」パターンには該当しない。
+- documents.services.document_searchable_department_ids と
+  permissions.services.contract_searchable_department_ids の配置非対称は、
+  依存データ（権限管理アプリ固有データの有無）と循環 import 回避の理由が docstring に
+  明記されており意図的。
+- 二重送信対策は core.double_submit のトークン方式で両アプリ横断実装済み（規約の
+  「共通処理は core 集約」に合致）。
 
-- manage.py makemigrations --check --dry-run documents contracts
-  → "No changes detected in apps 'contracts', 'documents'"
-
-- manage.py test documents contracts
-  → Ran 290 tests in 42.128s — OK（全件PASS、System check 0 issues）
+================================================================================
+以上
+================================================================================

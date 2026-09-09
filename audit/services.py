@@ -124,6 +124,26 @@ def build_diff_message(subject_label, changes):
     return subject_label + "," + ",".join(diff_parts)
 
 
+def log_denied_cross_department_access(*, employee, entity_name, pk):
+    """部署スコープ外の文書・契約書へのURL直打ちアクセス試行を操作履歴ログ（screen-log-list）に
+    記録する。
+
+    従来この種の拒否は logger.warning のみで、エンドユーザー向けの操作履歴ログ画面・CSV出力には
+    残らなかった。「他部署リソースへのURL直打ちアクセス試行」はIDOR的な不正アクセスの一次情報
+    として監査価値が高いため AuditLog にも残す（review_rule_doc_contract.txt No.1、2026-09-09
+    ユーザー確定）。一方、権限不足の保存・削除操作やフォーム改ざんによる不正pk混入は従来どおり
+    logger.warning 止まりとする（同確定）。
+
+    `action` は「ログイン失敗」（accounts.views.LoginView.form_invalid）と同じく、画面名＋ボタン名
+    形式（xlsx 操作履歴ログ!B63）ではない拒否イベント名を用いる。
+    """
+    log(
+        employee=employee,
+        action="アクセス拒否",
+        event_message=f"部署スコープ外の{entity_name}（ID:{pk}）へのアクセスを拒否しました。",
+    )
+
+
 def log_raw(*, employee_no, employee_name, department_name, action, event_message, personal_info_flag=False):
     """`log()`のうち、認証済みEmployeeインスタンスを経由できない場面向けの下位関数。
 
