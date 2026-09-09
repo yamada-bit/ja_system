@@ -22,15 +22,25 @@ class GroupFormTests(TestCase):
         self.existing = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
 
     def test_duplicate_code_rejected_on_create(self):
-        """xlsx 分類管理!B119「分類コードの重複登録は出来ないように制御」。"""
-        form = GroupForm(data={"code": "1", "name": "別の分類", "doc_kbn": DocKbn.DOCUMENT})
+        """xlsx 分類管理!B119「分類コードの重複登録は出来ないように制御」。
+        show_department=False（=部署未解決）のときは、同じくdepartment未設定の既存コードと
+        の重複を弾く（_effective_departmentのNULLフォールバック）。"""
+        form = GroupForm(
+            data={"code": "1", "name": "別の分類", "doc_kbn": DocKbn.DOCUMENT}, show_department=False
+        )
         self.assertFalse(form.is_valid())
+        self.assertIn("code", form.errors)
 
     def test_duplicate_code_rejected_on_update_against_other_record(self):
         """xlsx B161「分類コード変更時の重複更新は出来ないように制御」。"""
         other = Group.objects.create(code="2", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT)
-        form = GroupForm(data={"code": "1", "name": "分類Ｂ改", "doc_kbn": DocKbn.DOCUMENT}, instance=other)
+        form = GroupForm(
+            data={"code": "1", "name": "分類Ｂ改", "doc_kbn": DocKbn.DOCUMENT},
+            instance=other,
+            show_department=False,
+        )
         self.assertFalse(form.is_valid())
+        self.assertIn("code", form.errors)
 
     def test_keeping_own_code_on_update_is_allowed(self):
         # show_department=False: これらのテストは分類コードのバリデーションのみを検証する
@@ -49,6 +59,68 @@ class GroupFormTests(TestCase):
         self.existing.save()
         form = GroupForm(
             data={"code": "1", "name": "新しい分類Ａ", "doc_kbn": DocKbn.DOCUMENT}, show_department=False
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_same_code_allowed_in_different_department(self):
+        """2026-09-10 No.1（ユーザー確認済み）：Rev1.2で分類は部署単位管理になったため、
+        コードの一意性は同一部署内のみ。別部署なら同じ分類コードを登録できる。"""
+        dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        Group.objects.create(code="10", name="総務分類", doc_kbn=DocKbn.DOCUMENT, department=dept_a)
+        form = GroupForm(
+            data={
+                "code": "10", "name": "経理分類", "doc_kbn": DocKbn.DOCUMENT, "department": dept_b.pk,
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_same_code_rejected_within_same_department(self):
+        """2026-09-10 No.1：同一部署内では従来どおり重複を弾く。"""
+        dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        Group.objects.create(code="10", name="総務分類", doc_kbn=DocKbn.DOCUMENT, department=dept_a)
+        form = GroupForm(
+            data={
+                "code": "10", "name": "総務分類2", "doc_kbn": DocKbn.DOCUMENT, "department": dept_a.pk,
+            }
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("code", form.errors)
+
+    def test_non_admin_regist_duplicate_checked_against_own_department(self):
+        """非管理者の新規登録は登録画面に部署フィールドが無いため、_effective_departmentは
+        employee.departmentで重複判定する（viewが保存直前に同じ部署をinstanceへ入れる）。"""
+        dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=dept_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        Group.objects.create(code="10", name="総務分類", doc_kbn=DocKbn.DOCUMENT, department=dept_a)
+        Group.objects.create(code="20", name="経理分類", doc_kbn=DocKbn.DOCUMENT, department=dept_b)
+        # 自部署(dept_a)の既存コードは弾かれる
+        form = GroupForm(
+            data={"code": "10", "name": "別分類", "doc_kbn": DocKbn.DOCUMENT},
+            show_department=False,
+            employee=employee,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("code", form.errors)
+        # 他部署(dept_b)にしかないコードは自部署では登録できる
+        form = GroupForm(
+            data={"code": "20", "name": "新分類", "doc_kbn": DocKbn.DOCUMENT},
+            show_department=False,
+            employee=employee,
         )
         self.assertTrue(form.is_valid(), form.errors)
 
@@ -91,9 +163,37 @@ class CategoryFormTests(TestCase):
     def test_duplicate_code_rejected(self):
         """xlsx カテゴリー管理!B119「カテゴリーコードの重複登録は出来ないように制御」。"""
         form = CategoryForm(
-            data={"code": "001", "name": "別カテゴリー", "group": self.group.pk, "doc_kbn": DocKbn.DOCUMENT}
+            data={"code": "001", "name": "別カテゴリー", "group": self.group.pk, "doc_kbn": DocKbn.DOCUMENT},
+            show_department=False,
         )
         self.assertFalse(form.is_valid())
+        self.assertIn("code", form.errors)
+
+    def test_same_code_allowed_in_different_department(self):
+        """2026-09-10 No.1（ユーザー確認済み）：GroupFormと同じく、カテゴリーコードの一意性も
+        同一部署内のみ。別部署なら同じコードを登録できる。"""
+        dept_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        dept_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        group_a = Group.objects.create(
+            code="A1", name="総務分類", doc_kbn=DocKbn.DOCUMENT, department=dept_a
+        )
+        group_b = Group.objects.create(
+            code="A2", name="経理分類", doc_kbn=DocKbn.DOCUMENT, department=dept_b
+        )
+        Category.objects.create(
+            code="500", name="総務カテゴリ", group=group_a, doc_kbn=DocKbn.DOCUMENT, department=dept_a
+        )
+        form = CategoryForm(
+            data={
+                "code": "500", "name": "経理カテゴリ", "group": group_b.pk,
+                "doc_kbn": DocKbn.DOCUMENT, "department": dept_b.pk,
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
 
     def test_group_queryset_excludes_deleted(self):
         """xlsx B111「分類管理」で設定した分類名リストを表示。論理削除済みの分類は選べない。"""
@@ -452,6 +552,24 @@ class MasterDeleteViewTests(TestCase):
         self.group_empty.refresh_from_db()
         self.assertTrue(self.group_empty.is_deleted)
 
+    def test_trashed_document_is_excluded_from_count_and_delete_block(self):
+        """2026-09-10 No.2（ユーザー確認済み）：ゴミ箱保管中（is_deleted=True）の文書は
+        「文書件数」列に数えず、削除ボタンのブロック条件（blocking_count）からも外す。"""
+        # 一覧の「文書件数」列（item_count）に反映されないこと
+        response = self.client.get("/masters/class/")
+        counts = {g.pk: g.item_count for g in response.context["page_obj"]}
+        self.assertEqual(counts[self.group_with_docs.pk], 1)
+        self.document.is_deleted = True
+        self.document.save(update_fields=["is_deleted"])
+        response = self.client.get("/masters/class/")
+        counts = {g.pk: g.item_count for g in response.context["page_obj"]}
+        self.assertEqual(counts[self.group_with_docs.pk], 0)
+        # 削除もできること（xlsx 分類管理!B71「文書件数が0件のときのみ削除可」）
+        token = self.client.get(f"/masters/class/{self.group_with_docs.pk}/delete/").context["token"]
+        self.client.post(f"/masters/class/{self.group_with_docs.pk}/delete/", {"token": token})
+        self.group_with_docs.refresh_from_db()
+        self.assertTrue(self.group_with_docs.is_deleted)
+
     def test_retention_period_referenced_by_document_can_be_logically_deleted(self):
         """論理削除（is_deleted=True）は行を消さないため、documents.Document.retention_period
         （on_delete=PROTECT）から参照中でも削除できる。既存文書は参照を維持したまま残る。
@@ -561,6 +679,26 @@ class ContractSideMasterCountTests(TestCase):
         self.client.post(f"/masters/cat/{category.pk}/delete/", {"token": token})
         category.refresh_from_db()
         self.assertFalse(category.is_deleted)
+
+    def test_trashed_contract_is_excluded_from_count_and_delete_block(self):
+        """2026-09-10 No.2（ユーザー確認済み）：契約書側もゴミ箱保管中（is_deleted=True）は
+        「文書件数」列・削除ブロック条件から外す（MasterDeleteViewTestsの文書側と同じ）。"""
+        group = Group.objects.create(
+            code="C5", name="契約分類5", doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        category = Category.objects.create(
+            code="CC5", name="契約カテゴリ5", group=group, doc_kbn=DocKbn.CONTRACT, department=self.department
+        )
+        contract = self._create_contract(group, category)
+        contract.is_deleted = True
+        contract.save(update_fields=["is_deleted"])
+        response = self.client.get("/masters/class/", {"doc_kbn": DocKbn.CONTRACT})
+        item = {g.pk: g for g in response.context["page_obj"]}[group.pk]
+        self.assertEqual(item.item_count, 0)
+        token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
+        self.client.post(f"/masters/class/{group.pk}/delete/", {"token": token})
+        group.refresh_from_db()
+        self.assertTrue(group.is_deleted)
 
 
 class MasterListSortTests(TestCase):
@@ -866,9 +1004,9 @@ class MasterDefaultOrderByTests(TestCase):
     並び替えのみ検証されていた。テストカバレッジ棚卸しで発見、2026-08-26追加）。
 
     doc_kbnはorder_byの最終キー（_DOC_KBN_ORDER）だが、code自体がis_deleted=False同士で
-    グローバルに一意（models.Group/Category Meta.constraints）のため、同一部署・同一コードで
-    doc_kbnのみ異なる2件は作成できず、doc_kbnタイブレークが実際に効く場面は事実上無い。
-    そのため本テストは部課コード→コードの複合キー部分のみを検証する。
+    部署内一意（models.Group/Category Meta.constraints、fields=["department", "code"]）のため、
+    同一部署・同一コードでdoc_kbnのみ異なる2件は作成できず、doc_kbnタイブレークが実際に効く
+    場面は事実上無い。そのため本テストは部課コード→コードの複合キー部分のみを検証する。
     """
 
     def setUp(self):
@@ -942,7 +1080,11 @@ class MasterIntegrityErrorViewTests(TestCase):
         self.client.login(username="1", password="pass1234")
 
     def test_group_regist_integrity_error_shows_friendly_message(self):
-        Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        # 一意制約が (department, code) になったため、衝突させる既存行も同じ部署で作る
+        # （2026-09-10 No.1）。
+        Group.objects.create(
+            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
         response = self.client.get("/masters/class/regist/")
         token = response.context["token"]
         with (
@@ -962,8 +1104,12 @@ class MasterIntegrityErrorViewTests(TestCase):
         self.assertEqual(Group.objects.filter(code="A").count(), 1)
 
     def test_category_regist_integrity_error_shows_friendly_message(self):
-        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
-        Category.objects.create(code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        group = Group.objects.create(
+            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        Category.objects.create(
+            code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
         response = self.client.get("/masters/cat/regist/")
         token = response.context["token"]
         with (
@@ -1178,8 +1324,14 @@ class MasterEditIntegrityErrorViewTests(TestCase):
         self.client.login(username="1", password="pass1234")
 
     def test_group_edit_integrity_error_shows_friendly_message(self):
-        Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
-        target = Group.objects.create(code="B", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT)
+        # 一意制約が (department, code) になったため、衝突させる2件を同じ部署で作る
+        # （2026-09-10 No.1）。
+        Group.objects.create(
+            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        target = Group.objects.create(
+            code="B", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
         response = self.client.get(f"/masters/class/{target.pk}/edit/")
         token = response.context["token"]
         with (
@@ -1199,9 +1351,15 @@ class MasterEditIntegrityErrorViewTests(TestCase):
         self.assertEqual(target.code, "B")
 
     def test_category_edit_integrity_error_shows_friendly_message(self):
-        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
-        Category.objects.create(code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT)
-        target = Category.objects.create(code="002", name="カテゴリーＢ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        group = Group.objects.create(
+            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        Category.objects.create(
+            code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        target = Category.objects.create(
+            code="002", name="カテゴリーＢ", group=group, doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
         response = self.client.get(f"/masters/cat/{target.pk}/edit/")
         token = response.context["token"]
         with (
@@ -1258,6 +1416,9 @@ class MasterDeleteDatabaseErrorFallbackTests(TestCase):
     MasterDoubleSubmitTokenTestsと同じ判断（GroupDeleteView/CategoryDeleteViewは
     core.master_views.BaseScopedMasterDeleteViewの共通実装を完全共有）により、Group側のみ検証し
     Category側は重複テストとして省略する。
+
+    RetentionDeleteViewはBaseScopedMasterDeleteViewを使わない独自実装で、この例外処理の
+    横展開が漏れていた（2026-09-10 レビュー指摘 No.3）。同じ観点のテストを別途持つ。
     """
 
     def setUp(self):
@@ -1284,6 +1445,24 @@ class MasterDeleteDatabaseErrorFallbackTests(TestCase):
         self.assertTrue(any("削除に失敗しました" in m for m in messages))
         group.refresh_from_db()
         self.assertFalse(group.is_deleted)
+
+    def test_retention_delete_db_error_shows_friendly_message_and_does_not_delete(self):
+        """2026-09-10 No.3：RetentionDeleteView.postのperiod.save()にtry/except DBErrorを追加。
+        DB接続断・制約違反時に生の500ではなくユーザー向けメッセージ＋一覧へのredirectになる。"""
+        from django.db import DatabaseError
+
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        token = self.client.get(f"/masters/retention/{period.pk}/delete/").context["token"]
+        with patch.object(RetentionPeriod, "save", side_effect=DatabaseError("simulated db error")):
+            response = self.client.post(
+                f"/masters/retention/{period.pk}/delete/", {"token": token}, follow=True
+            )
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("削除に失敗しました" in m for m in messages))
+        period.refresh_from_db()
+        self.assertFalse(period.is_deleted)
 
 
 class RetentionRedirectPreservesSelectionTests(TestCase):

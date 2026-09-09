@@ -84,10 +84,10 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='group',
-            constraint=models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('code',), name='unique_group_code'),
+            constraint=models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('department', 'code'), name='unique_group_code'),
         ),
         migrations.AddConstraint(
             model_name='category',
-            constraint=models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('code',), name='unique_category_code'),
+            constraint=models.UniqueConstraint(condition=models.Q(('is_deleted', False)), fields=('department', 'code'), name='unique_category_code'),
         ),
     ]

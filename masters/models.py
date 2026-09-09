@@ -49,9 +49,16 @@ class Group(models.Model):
         verbose_name = "分類"
         verbose_name_plural = "分類マスタ"
         constraints = [
-            # is_deleted=Falseの行同士でのみ一意（forms.GroupForm.clean_codeの重複チェックと同じ
-            # 「論理削除済みのコードは再利用できる」という方針をDB制約でも保証する）。
-            models.UniqueConstraint(fields=["code"], condition=Q(is_deleted=False), name="unique_group_code"),
+            # is_deleted=Falseの行同士で、かつ同一部署内でのみ一意にする。Rev1.2で分類は部署単位
+            # 管理（非管理者は自部署のみ閲覧・編集）になったため、コードの一意性も部署内に限定する
+            # （2026-09-10 No.1、ユーザー確認済み。全社一意のままだと、非管理者が一覧にも表示され
+            # ない他部署の同一コードと衝突して理由の分からないエラーになる）。「論理削除済みのコードは
+            # 再利用できる」方針（forms.GroupForm.clean_codeと同じ）もconditionで維持する。
+            # departmentがNULL（Rev1.2移行前データ）の行同士はPostgresのNULL非同一仕様でこの制約の
+            # 対象外になるが、移行後の新規・編集データは必ずdepartmentを持つため許容する。
+            models.UniqueConstraint(
+                fields=["department", "code"], condition=Q(is_deleted=False), name="unique_group_code"
+            ),
         ]
 
     def __str__(self):
@@ -88,8 +95,11 @@ class Category(models.Model):
         verbose_name = "カテゴリー"
         verbose_name_plural = "カテゴリーマスタ"
         constraints = [
-            # Group同様、is_deleted=Falseの行同士でのみ一意にする。
-            models.UniqueConstraint(fields=["code"], condition=Q(is_deleted=False), name="unique_category_code"),
+            # Group同様、is_deleted=Falseの行同士で、かつ同一部署内でのみ一意にする
+            # （Group.Meta.constraints unique_group_codeのコメント参照。2026-09-10 No.1）。
+            models.UniqueConstraint(
+                fields=["department", "code"], condition=Q(is_deleted=False), name="unique_category_code"
+            ),
         ]
 
     def __str__(self):

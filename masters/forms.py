@@ -12,6 +12,36 @@ logger = logging.getLogger(__name__)
 DOC_KBN_CHOICES_WITH_ALL = [("", "(全て)")] + list(DocKbn.choices)
 
 
+def _effective_department(form):
+    """分類コード／カテゴリーコードの重複判定に使う「実効部署」を解決する。clean_codeは
+    departmentフィールドがcleaned_dataに載る前に実行されるため、ここで
+    「管理者＝送信値／編集＝instanceの現在値／非管理者の新規登録＝ログイン者の部署」の順に
+    たどる。解決できない場合（Rev1.2移行前のdepartment未設定データ等）はNoneを返し、
+    呼び出し側はdepartment=NULLの行同士での判定にフォールバックする。"""
+    if "department" in form.fields:
+        raw = form.data.get("department")
+        if not raw:
+            return None
+        try:
+            return Department.objects.get(pk=raw)
+        except (Department.DoesNotExist, ValueError, TypeError):
+            return None
+    if form.instance.pk:
+        return form.instance.department
+    return getattr(getattr(form, "_employee", None), "department", None)
+
+
+def _duplicate_master_code_exists(model, code, department, instance):
+    """分類・カテゴリーコードの重複判定（同一部署・is_deleted=Falseの範囲、編集時は自分自身を
+    除外）。Rev1.2で両マスタが部署単位管理になったため、一意性の範囲も部署内に限定する
+    （2026-09-10 No.1、ユーザー確認済み）。最終的な一意性はモデルのUniqueConstraint
+    （unique_group_code/unique_category_code、fields=["department", "code"]）に委ねる。"""
+    qs = model.objects.filter(code=code, department=department, is_deleted=False)
+    if instance.pk:
+        qs = qs.exclude(pk=instance.pk)
+    return qs.exists()
+
+
 class GroupSearchForm(forms.Form):
     """screen-class-list検索パネル（xlsx 分類管理!B35-36(Rev1.1)「分類名はカテゴリー名の部分一致
     検索とする(スペース区切りの複合検索は考慮しない)」。旧仕様は分類名がプルダウン選択だったが、
@@ -74,8 +104,11 @@ class GroupForm(forms.ModelForm):
         labels = {"code": "分類コード", "name": "分類名", "doc_kbn": "書類管理区分", "department": "部署"}
         widgets = {"code": forms.TextInput(attrs={"style": "width:100px;"})}
 
-    def __init__(self, *args, show_department=True, **kwargs):
+    def __init__(self, *args, show_department=True, employee=None, **kwargs):
         super().__init__(*args, **kwargs)
+        # 非管理者の新規登録時はdepartmentフィールドが外れる（viewが保存直前にログイン者の
+        # 部署をinstanceへセットする）。clean_codeの部署内重複判定で実効部署を引くために保持する。
+        self._employee = employee
         if not show_department:
             del self.fields["department"]
 
@@ -85,10 +118,9 @@ class GroupForm(forms.ModelForm):
         code = unicodedata.normalize("NFKC", code)
         if not code.isdigit():
             raise forms.ValidationError("分類コードは数字のみ入力してください。")
-        qs = Group.objects.filter(code=code, is_deleted=False)
-        if self.instance.pk:
-            qs = qs.exclude(pk=self.instance.pk)
-        if qs.exists():
+        # xlsx B120/B130/B164「既に存在している分類コードの場合はエラー」。Rev1.2の部署単位管理に
+        # 合わせ、重複判定は同一部署内に限定する（_duplicate_master_code_exists参照、2026-09-10 No.1）。
+        if _duplicate_master_code_exists(Group, code, _effective_department(self), self.instance):
             raise forms.ValidationError("この分類コードは既に登録されています。")
         return code
 
@@ -171,6 +203,8 @@ class CategoryForm(forms.ModelForm):
 
     def __init__(self, *args, show_department=True, employee=None, **kwargs):
         super().__init__(*args, **kwargs)
+        # GroupForm.__init__と同じ理由でログイン者を保持する（clean_codeの部署内重複判定用）。
+        self._employee = employee
         group_qs = Group.objects.filter(is_deleted=False)
         if employee is not None:
             # 「部署」フィールド（department）と同じ部署スコープを「分類」（group）の選択肢にも
@@ -192,10 +226,9 @@ class CategoryForm(forms.ModelForm):
         code = unicodedata.normalize("NFKC", code)
         if not code.isdigit():
             raise forms.ValidationError("カテゴリーコードは数字のみ入力してください。")
-        qs = Category.objects.filter(code=code, is_deleted=False)
-        if self.instance.pk:
-            qs = qs.exclude(pk=self.instance.pk)
-        if qs.exists():
+        # xlsx B113/B126/B154「既に存在しているカテゴリーコードの場合はエラー」。GroupForm.clean_code
+        # と同じく、Rev1.2の部署単位管理に合わせ重複判定は同一部署内に限定する（2026-09-10 No.1）。
+        if _duplicate_master_code_exists(Category, code, _effective_department(self), self.instance):
             raise forms.ValidationError("このカテゴリーコードは既に登録されています。")
         return code
 

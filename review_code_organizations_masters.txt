@@ -1,188 +1,288 @@
-organizations / masters アプリ コードレビュー結果
-対象: organizations/{models,views,services,forms,api,urls,admin}.py
-      masters/{models,views,services,forms,urls,admin}.py
-      （migrationsは対象外。修正は未実施、指摘一覧のみ）
+========================================================================
+コードレビュー: organizations / masters アプリ全体
+対象コミット: e6331ad (feat/storage2-per-file-metadata)
+実施日: 2026-09-10
+レビュー観点: 正しさのバグ / 再利用性・単純化・効率性 / CLAUDE.md 規約整合性
+修正は未実施。指摘一覧と優先度のみ。
+========================================================================
+
+対象範囲:
+  organizations/  models.py, services.py, views.py, api.py, forms.py, admin.py,
+                  urls.py, apps.py, migrations/0001_initial.py
+  masters/        models.py, services.py, views.py, forms.py, admin.py,
+                  urls.py, apps.py, migrations/0001_initial.py
+  参考: core/master_views.py, core/scoping_services.py, core/form_services.py,
+        core/double_submit.py, core/api.py, permissions/services.py,
+        templates/masters/*.html
 
 
-==================================================
-■ 正しさのバグ（Correctness Bugs）
-==================================================
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A. 正しさ（バグ・仕様不整合）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[高]
-1. organizations/views.py:164-177（呼び出し先: organizations/services.py:9-37 apply_dept_action）
-   部署の「統合・分割」処理が、DeptEditView.post内の他の保存処理（form.save()）と異なり、
-   トランザクション・IntegrityError捕捉のどちらも無いまま実行されている。
-   - apply_dept_action()は複数targetに対してDepartmentViewScope.update_or_create()を
-     ループで呼ぶが、ループ全体を包むtransaction.atomic()が無いため、途中で例外が発生すると
-     一部targetだけ反映された中途半端な状態になり得る。
-   - views.py側もこの呼び出しをtry/exceptで囲っていないため、何らかの理由でIntegrityError等が
-     発生した場合、DeptRegistView/DeptEditView本体の保存と違って未捕捉のまま500になる。
-   - さらに、この処理の直前（views.py:158-162）で「部署管理 更新」の監査ログを既に記録して
-     しまっているため、apply_dept_action側で失敗すると「更新は成功したとログにあるのに
-     統合・分割は反映されていない」という監査ログと実態の不整合が生じる。
-   - 発生条件は複数部署に対する統合・分割の同時実行など稀なケースだが、CLAUDE.mdの
-     「例外処理を完成させる」規約にも反する。同ファイル内で確立されている
-     try/except IntegrityError + transaction.atomic() のパターンをここにも揃えるべき。
+No.1 【中】 分類コード / カテゴリーコードの一意性が「部署」を無視した全体一意になっている
+  対象:
+    masters/models.py:54   UniqueConstraint(fields=["code"], condition=Q(is_deleted=False))
+    masters/models.py:92   同上（Category）
+    masters/forms.py:88    GroupForm.clean_code  → Group.objects.filter(code=code, is_deleted=False)
+    masters/forms.py:195   CategoryForm.clean_code → 同様
+  根拠:
+    Rev1.2 で分類・カテゴリーは「部署単位で管理」に変更され（models.py:24-29 の docstring、
+    xlsx 分類管理!B73-75）、非管理者は自部署の分類・カテゴリーしか一覧・編集できない
+    （masters.services.department_scope_ids、BaseScopedMasterEditView）。
+    ところが一意制約と clean_code は department を条件に含めず code だけで全体一意にしている。
+    このため部署Bの一般ユーザーが code="01" を登録しようとすると、部署Aが既に持つ
+    （B からは一覧にも表示されない）分類のせいで「この分類コードは既に登録されています。」
+    となり登録できない。ユーザーには理由が見えない不可解なエラーになる。
+    → xlsx B119/B161「重複登録・重複更新は不可」が全社一意なのか部署内一意なのか要確認。
+      部署内一意が正なら constraint を (department, code) に、clean_code も
+      scope_queryset_by_department で絞ってから重複判定する必要がある。
 
-[中]
-2. masters/forms.py:141-200（CategoryForm）
-   Category.doc_kbn（書類管理区分）と、選択したgroup（分類=Group）のdoc_kbnとの整合性を
-   検証する処理がどこにも無い（clean()にもテンプレート側JSにも無し、cat_regist.html/
-   cat_edit.htmlを確認済み）。そのため「書類管理区分=契約書管理」のカテゴリーに
-   「書類管理区分=文書管理」の分類（Group）を紐付ける、といった本来あり得ない組み合わせが
-   登録できてしまう。documents/contracts側は書類管理区分ごとにカテゴリー・分類を絞り込んで
-   選択させる前提のため、この不整合データが検索・登録画面で意図しない表示崩れを起こしうる。
-   ※原本HTML/xlsxがこの連動制御を実装していない可能性もあるため、原本フィデリティ方針
-   （「原本が実装していない動的制御を勝手に追加しない」）に従い、まず原本側の仕様を
-   確認した上で対応要否を判断すること。
+  【対応済み】2026-09-10、ユーザー確認の結果「部署内で一意」に確定。
+    - masters/models.py: Group/Category の UniqueConstraint を fields=["department","code"] に変更
+      （condition=Q(is_deleted=False) は維持）。制約変更は masters/migrations/0001_initial.py の
+      AddConstraint を直接書き換えて反映（本番リリース前のためマイグレーションは0001に集約する運用）。
+      department=NULL（Rev1.2移行前データ）同士は Postgres の NULL 非同一仕様で制約対象外になるが、
+      移行後の新規・編集は必ず department を持つため許容（コメントに明記）。
+    - masters/forms.py: _effective_department()（管理者=送信値／編集=instance／非管理者の新規登録=
+      ログイン者の部署 の順で実効部署を解決）と _duplicate_master_code_exists() を新設し、
+      GroupForm/CategoryForm.clean_code の重複判定を同一部署スコープに変更。
+    - masters/views.py: GroupRegistView/GroupEditView に extra_form_kwargs で employee を渡すよう追加
+      （CategoryRegistView/EditView は既存）。
+    - masters/tests.py: 部署別に同一コード可・同一部署内は不可・非管理者は自部署基準、の各テストを追加。
+      Master(Edit)IntegrityErrorViewTests の衝突フィクスチャを同一部署で作るよう修正。
 
-[低]
-3. masters/services.py:25-38（scope_queryset_by_department）
-   非管理者に対して「自部署のみ」（xlsx 分類管理!B73-75等）を意図しつつ、department未設定
-   （NULL、Rev1.2移行前のレガシー行）の全件を、部署に関わらず全非管理者に見せる実装になっている。
-   docstringに「移行前データの退行防止のための意図的な暫定措置」と明記されており、
-   バグというより設計判断だが、現状は「自部署のみ」という要件より広いスコープを非管理者全員に
-   許可している状態である。既存データの部署バックフィルが完了しているか、完了時期の見込みを
-   確認し、完了後はこの分岐を外す（またはスコープをさらに絞る）想定になっているか要確認。
+No.2 【中】 一覧の「文書件数」列・削除可否判定が、ゴミ箱保管中（is_deleted=True）の
+           文書・契約書まで数えている
+  対象:
+    masters/views.py:37-38    _group_queryset_with_counts()
+                              Count("documents", distinct=True) / Count("contracts", distinct=True)
+    masters/views.py:210-211  _category_queryset_with_counts() 同上
+    masters/views.py:203,387  GroupDeleteView/CategoryDeleteView.blocking_count()
+    core/master_views.py:310-316  BaseScopedMasterDeleteView.post の count>0 ブロック
+  根拠:
+    documents.Document / contracts.Contract は論理削除（is_deleted=True でゴミ箱保管、
+    最長1ヶ月後に日次バッチで物理削除）。Count に filter=Q(is_deleted=False) が無いため、
+    ゴミ箱にある文書もカウントされ、
+      ・一覧の「文書件数」列に実際には表示されない文書の数が出る
+      ・その分類・カテゴリーの「削除」ボタンが disabled のまま、サーバー側でも
+        「紐づくデータが存在するため削除できません」で弾かれる（xlsx B68「文書件数0件のとき
+        のみ有効」に反する）
+    という不整合が、対象文書を全てゴミ箱に入れてから物理削除されるまでの期間発生する。
+    比較: core/notice_services.py:83-87 は同種の集計で is_deleted=False を明示している。
+    → Count(..., filter=Q(documents__is_deleted=False)) 等に揃えるか、
+      仕様上ゴミ箱分も数えるのが正しいなら「文書件数」列表示と整合するようコメントで明記。
 
-[低]
-4. masters/services.py:9-22（department_scope_ids）
-   employee.department_idが未設定（None）の場合に{None}を返し、上記3.のNULL許容フィルタと
-   組み合わさると「department未設定の行のみが見える」という状態になる。エラーにも警告にも
-   ならず静かに発生するため、職員のdepartment必須制約が本当に保証されているか
-   （accounts.Employee側）を確認し、保証されているなら実害は無いが、防御的な一言コメント
-   もしくはガードがあると安全性が高まる。
+  【対応済み】2026-09-10、ユーザー確認の結果「ゴミ箱（is_deleted=True）は除外」に確定。
+    - masters/views.py: _group_queryset_with_counts()/_category_queryset_with_counts() の
+      doc_count/contract_count を Count(..., filter=Q(<rel>__is_deleted=False)) に変更（Q を import）。
+      blocking_count() はこの annotate を参照するため削除ブロック判定も同時に是正される。
+    - masters/tests.py: ゴミ箱の文書／契約書が item_count に数えられず、削除もできることを検証する
+      テストを MasterDeleteViewTests / ContractSideMasterCountTests に追加。
 
+No.3 【中】 RetentionDeleteView.post の論理削除 save() に例外処理が無い
+  対象:
+    masters/views.py:585-602  RetentionDeleteView.post
+      period.is_deleted = True
+      period.save(update_fields=["is_deleted", "updated_at"])   ← try/except 無し
+  根拠:
+    兄弟クラス core/master_views.py:318-327 の BaseScopedMasterDeleteView.post は
+    まったく同じ「is_deleted=True にして save」処理を try/except DBError で囲み、
+    失敗時は logger.exception + messages.error + 一覧へ redirect している
+    （コメント「品質レビューで発見、2026-08-26修正」）。
+    RetentionDeleteView は BaseScopedMasterDeleteView を使わない独自実装のため、この
+    横展開が漏れている。DB接続断・制約違反時に生の500になる。
+    CLAUDE.md コーディング規約「例外処理を完成させる…DBの制約違反等は try/except で
+    具体的な例外型を捕捉し…利用者にわかるエラー応答を返す」に反する。
 
-==================================================
-■ 再利用性・簡潔性・効率性の指摘（Reuse / Simplification / Efficiency）
-==================================================
+  【対応済み】2026-09-10。masters/views.py RetentionDeleteView.post の period.save() を
+    try/except DBError で囲み、失敗時は logger.exception + messages.error（「削除に失敗しました。
+    もう一度お試しください。」）+ 一覧へ redirect（BaseScopedMasterDeleteView.post と同一の挙動）。
+    from django.db import Error as DBError を追加。回帰テストを
+    MasterDeleteDatabaseErrorFallbackTests に追加。
 
-[高]
-1. masters/views.py 全体（Group系: 33-300行 / Category系: 303-566行）
-   分類（Group）とカテゴリー（Category）の一覧・登録・編集・削除の4画面が、モデル名以外
-   ほぼ完全に同一ロジックでコピペ実装されている（_xxx_queryset_with_counts、
-   search-form検証、department_scope_ids/scope_queryset_by_departmentの適用、
-   sort-key分岐、Paginator(qs, 100)、登録/編集のtoken発行・消費、非管理者の自部署自動設定、
-   transaction.atomic()+IntegrityError捕捉、audit_services.log、削除確認の紐づけ件数0件
-   チェック等）。documents/contracts側は既にcore（BaseDeleteView・scoped_get_object_or_404等、
-   2026-08-25集約）で同種の重複を解消済みの前例があるにも関わらず、masters内のGroup/Category
-   はその横展開が行われていない。約760行中350行規模の実質的な重複であり、実際に
-   「コード監査で発見」の修正が個別に2箇所へ適用された履歴がある＝将来の変更漏れリスクが
-   高い状態。core側にパラメータ化した基底クラス（model/form_class/template_name/
-   audit_action_prefix等）を用意し、Group/Category双方を薄いサブクラスにする横展開を推奨。
+No.4 【低】 RetentionRegistView._initial が kbn を検証していない
+  対象:
+    masters/views.py:443-446  RetentionRegistView._initial
+      kbn = request.GET.get("kbn", RetentionKbn.DOCUMENT)   ← 値の妥当性チェック無し
+  根拠:
+    同一ファイルの RetentionListView.get:410-415 は
+    「selected_kbn not in RetentionKbn.values なら DOCUMENT に戻す」と防御している。
+    _initial は同種のパラメータを扱うのに未検証で、?kbn=xxx のような不正値がそのまま
+    フォーム初期値 → hidden input に載る。POST 時は ModelForm の choices 検証で最終的に
+    弾かれるが、GET 描画時点で不正な hidden 値・タイトル表示になる。
+    あわせて doc_name も EAPPROVAL 指定時に空文字を許容している（電子決裁区分なのに
+    書類名なし）。RetentionPeriodForm.clean で kbn==eapproval のとき doc_name 必須の
+    検証を追加するのが望ましい。
 
-[中]
-2. organizations/views.py:74-77,131-134 および masters/views.py（Group/Category/Retentionの
-   regist/edit/deleteで計9箇所）
-   二重送信トークンの「チェック→失敗ならmessages.error+redirect」という4行パターンが
-   organizations/masters内だけで11箇所、プロジェクト全体では24箇所同一文言で重複している。
-   core.double_submitはissue_token/consume_tokenのプリミティブのみを提供しており、
-   このラッパー自体は未集約。core側に`reject_if_resubmitted(request, form_id, redirect_to)`
-   相当のヘルパーを追加すれば、この2アプリだけで約90行の重複削減になる。
+  【見送り／理由】優先度「低」。実害は「GET描画時点のhidden値・タイトル表示のみ」で、POST時は
+    ModelForm の choices 検証で確実に弾かれる（データ不整合は起きない）。電子決裁機能自体が
+    恒久的にスコープ外（CLAUDE.md「既知の未実装・保留事項」）で、この画面は管理者専用。
+    RetentionListView.get 側に同種の防御があるので揃える価値はあるが、今回のバッチ（高・中）の
+    対象外として見送る。
 
-[中]
-3. organizations/views.py:84-100,143-155 および masters/views.py（Group regist/edit、
-   Category regist/edit、Retention regist/editの計6箇所、上記2.と重なる範囲で計8箇所）
-   「transaction.atomic()内でform.save() → IntegrityError捕捉 → logger.exception →
-   form.add_error → token再発行 → 再描画」という定型パターンが8箇所で複製されている。
-   フィールド名・エラーメッセージ文言以外は完全に同一構造で、core側にヘルパー
-   （例: save_or_add_unique_error(form, field, message)）を用意する余地が大きい。
+No.5 【低】 organizations/api.py: exclude が非数値のとき警告を出しつつ全件（編集中の
+           部署を含む）を返す
+  対象:
+    organizations/api.py:53-63  OptionListAPIView._department_items
+  根拠:
+    exclude が "abc" 等だと except で warning ログのみ、qs は絞り込まれず編集中の部署自身も
+    統合・分割ポップアップの選択肢に出る。DeptEditForm.clean の自己参照チェックでサーバー側は
+    防げるため実害は小さいが、「改ざんの可能性」と警告しておきながらフォールバックが
+    「全件返す」＝要求を無視して緩い側に倒しており、ポップアップ表示とフォームの前提が食い違う。
+    不正時は空 or そのまま Http400 相当にするか、少なくとも編集中 pk は必ず除外する。
 
-[中]
-4. permissions/services.py:187-192、masters/views.py:92-99、masters/views.py:366-370
-   「sort_key=="department"のとき(branch_code, section_code)の複合キーでソートする」という
-   特殊分岐が3箇所で独立に手書きされている。masters/views.py自体のコメントが
-   「AUTHORITY_SORT_FIELDSのdepartment扱いと同じパターン」と明記し3つ目の複製であることを
-   認識しながらインライン実装しており、共通ヘルパー化（organizations.services等、
-   Department関連の共通ロジックを既に持つ場所）が望ましい。
+  【見送り／理由】優先度「低」。レビュー自身が「DeptEditForm.clean の自己参照チェックで
+    サーバー側は防げるため実害は小さい」と評価。exclude は同画面の JS が編集中 pk を必ず
+    数値で渡すため、非数値になるのはフォーム改ざん時のみ。今回のバッチ対象外として見送る。
 
-[低〜中]
-5. accounts/services.py（STAFF_SORT_FIELDS）、masters/views.py（GROUP_SORT_FIELDS/
-   CATEGORY_SORT_FIELDS）、organizations/views.py（SORT_FIELDS）、permissions/services.py
-   （AUTHORITY_SORT_FIELDS）の計5箇所で、「sort_key→ORMフィールドのdictマッピング＋
-   asc/desc接頭辞付与＋order_by」という同型パターンが繰り返されている。
-   core側に汎用ソートヘルパー（apply_sort(qs, sort_key, sort_dir, fields_map, tiebreaker)等）
-   を用意する余地。
+No.6 【低】 RetentionEditView / RetentionRegistView が kbn・doc_name を編集可能な
+           hidden フィールドとして受け取っている
+  対象:
+    masters/forms.py:242-244  RetentionPeriodForm.Meta.fields = ["kbn", "doc_name", ...]
+    masters/views.py:509-522  RetentionEditView.post（instance に POST 値を上書き）
+  根拠:
+    区分・書類名は「一覧の選択状態を引き継ぐ」文脈値のはずだが、ModelForm の通常フィールド
+    （HiddenInput）として保存対象に含まれるため、POST 改ざんで既存の保存期間設定を別区分へ
+    移し替えできる。管理者専用画面のため優先度は低いが、編集では kbn/doc_name を
+    disabled 表示にして instance 側の値を固定するのが安全。
 
-[中]
-6. masters/services.py:41-61（scoped_get_object_or_404） vs core/scoping_services.py:8-34
-   （同名の共通ヘルパー、2026-08-25にdocuments/contracts間の重複解消のために作成された経緯あり）。
-   両者はほぼ同一アルゴリズム（スコープ絞り込み→pk検索→無ければ無スコープで存在確認→
-   logger.warning→Http404）だが、シグネチャの違い（dept_ids_resolverコールバック方式か、
-   NULL許容のscope_queryset_by_department方式か）により再利用されず個別実装されている。
-   結果としてログの実装も微妙に乖離しており、core版はentity_nameを日本語（"文書"/"契約書"）で
-   出力するのに対し、masters版はbase_qs.model.__name__（"Group"/"Category"と英語）を
-   そのままlogger.warningに出している。セキュリティ関連ログの一貫性という観点でも、
-   core側のヘルパーをscope_queryset呼び出し可能な形に一般化し、masters側から再利用する形に
-   寄せることを推奨。
-
-[低]
-7. masters/views.py:33-47,303-312（_group_queryset_with_counts / _category_queryset_with_counts）
-   doc_count（Count("documents")）とcontract_count（Count("contracts")）を全行で毎回集計し、
-   doc_kbnに応じてCase/Whenでどちらか一方だけ採用、もう一方は捨てている。一覧画面は
-   1ページ100件表示のため、ページ表示のたびに不要なJOIN付き集計が2倍発生している。
-
-[低]
-8. core/views.py:140-143（OtherSettingsView._render_main、organizations.MenuItemSettingの一覧）
-   Department.objects.order_by(...)をselect_related("menu_item_setting")せずに
-   ループ内でdepartment.menu_item_settingへアクセスしており、部署件数分のN+1クエリになる。
-   coreアプリのファイルだが実質organizations.MenuItemSettingの一覧処理のため本レビューに含める。
-
-[低]
-9. organizations/api.py:38-47（OptionListAPIView.dispatch）
-   permissions.mixins.SettingsMenuAccessMixinが提供する認可チェックの流れを、MRO制約
-   （core.api.BaseOptionListAPIViewとの継承順の都合）を理由に手書きで再実装している。
-   現状はこの1箇所のみだが、同種の追加ゲーティングが必要な派生クラスが今後増えると
-   同じ回避パターンがコピーされる可能性がある。BaseOptionListAPIView.dispatchに
-   オーバーライド可能なフックを設ける等、根本側の一般化を検討の余地あり。
-
-[低]
-10. organizations/services.py:55-76（branch_choices / section_choices）
-    values_list(...).distinct()でDB側の重複排除を行った上で、さらにPython側で
-    dict(...).items()による重複排除を重ねており、無駄な変換が発生している
-    （部署マスタは件数が小さいため実害は軽微）。
+  【見送り／理由】優先度「低」。レビュー自身が「管理者専用画面のため優先度は低い」と評価。
+    改ざんしても別区分の有効な保存期間設定に付け替わるだけでデータ破壊は起きず、電子決裁側は
+    スコープ外。disabled 化には edit テンプレートと clean の両方の調整が要り、今回のバッチ
+    （高・中）対象外として見送る。
 
 
-==================================================
-■ CLAUDE.mdコーディング規約との整合性
-==================================================
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+B. 再利用性・単純化・効率性（重複ロジック含む）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-確認済みで違反なし: CBVのみ（関数ベースビュー無し）／verbose_name・help_text・エラー
-メッセージ・docstringの日本語統一／監査ログ記録（audit_services.log呼び出し）／
-Djangoテンプレートの複数行コメント{# #}の罠（該当箇所なし）／一覧画面のPaginator使用
-（部署管理一覧はxlsxの「ページャー不要」明記により対象外、分類/カテゴリー一覧は使用済み）。
+No.7 【中】 RetentionRegistView と RetentionEditView に同一コードが重複、共通基底が無い
+  対象:
+    masters/views.py:469-485   RetentionRegistView.post（save_or_none 呼び出し + log_args
+                               タプル + form.add_error(None, "保存期間または表示順が…") +
+                               token 再発行 + render）
+    masters/views.py:527-540   RetentionEditView.post 側にほぼバイト単位で同一のブロック
+  根拠:
+    Group/Category は core.master_views.BaseScopedMaster{List,Regist,Edit,Delete}View に
+    パラメータ化集約済み（views.py:59-387）なのに対し、Retention 系4画面は素の View の
+    ままで、二重送信トークン処理・save_or_none の log_message/log_args・重複エラー提示・
+    フォーム再描画が Regist/Edit/Delete 間で手書き重複している。
+    最低限、save_or_none の log_args 生成（kbn, doc_name, period_value, period_unit,
+    display_order のタプル）はヘルパー化、Regist/Edit は BaseRetentionSaveView 的な
+    小さな基底へ寄せられる。CLAUDE.md「共通処理は core 相当の共通基底クラス・サービス関数に
+    集約し、アプリ間で重複するロジックを増やさない」。
 
-[中]
-1. masters/services.py:41-61（scoped_get_object_or_404）
-   規約: 「共通処理はcore相当の共通基底クラス・サービス関数に集約し、アプリ間で重複する
-   ロジックを増やさない」
-   core/scoping_services.py:8-34に同名・同目的の共通ヘルパーが既に存在するにもかかわらず、
-   masters側は独自に再実装している（上記「再利用性」指摘6.と同一箇所、規約違反の観点として
-   再掲）。
+  【対応済み】2026-09-10。masters/views.py に集約：
+    - _save_retention_period(form)：save_or_none の log_message/log_args（5要素タプル）を1本化。
+    - BaseRetentionSaveView：settings_menu_key と、_render_form()（token 再発行＋render）/
+      _conflict_response()（重複時の非フィールドエラー提示＋再描画）を共通化。
+      RetentionRegistView/RetentionEditView はこれを継承し、post のフォーム無効時・重複時の
+      分岐がそれぞれ1行になった。挙動は不変（既存テスト160件で担保、追加変更なし）。
+    RetentionListView/RetentionDeleteView は form を持たず共有部分が薄いため今回は対象外。
+    core への移動は Retention 固有事情が多く見合いが悪いため masters 内に留めた（docstring に明記）。
 
-[低]
-2. masters/views.py:33-58, 303-323（_group_queryset_with_counts等のクエリ構築ロジックと
-   GROUP_SORT_FIELDS/CATEGORY_SORT_FIELDS）
-   規約: 各アプリのファイル役割分担「services.py（ビューから分離したビジネスロジック）」
-   一覧のソート・集計ロジックがviews.pyに直書きされている。同種のロジック
-   （AUTHORITY_SORT_FIELDS/filter_authority_queryset）はpermissions/services.pyに
-   正しく配置されており、masters/views.py自身のコメントもこの類似性を認識している
-   （「AUTHORITY_SORT_FIELDSのdepartment扱いと同じパターン」）にもかかわらず、
-   配置ルールが揃っていない。
+No.8 【低】 GroupForm.clean_code と CategoryForm.clean_code が実質同一
+  対象:
+    masters/forms.py:82-93    GroupForm.clean_code
+    masters/forms.py:189-200  CategoryForm.clean_code
+  根拠:
+    「NFKC 正規化 → isdigit() チェック → is_deleted=False かつ自 pk 除外で重複判定 →
+    ValidationError」の流れが、モデル名とメッセージ文言以外まったく同じ。
+    masters/validators.py（CLAUDE.md が挙げるファイル役割）に
+    validate_numeric_master_code(model, code, instance) のような共通バリデータとして
+    切り出せる。No.1 の部署スコープ対応を入れる場合も一箇所で済む。
 
-[低]
-3. masters/views.py:303-312（_category_queryset_with_counts）
-   規約: 「クラス・非自明なメソッドにはdocstringを付ける」
-   対になる_group_queryset_with_counts（33行目〜）には集計ロジックの理由を説明する
-   docstringがあるが、同一構造の_category_queryset_with_countsにはdocstringが無い。
+  【見送り／理由】優先度「低」。No.1 対応の副産物として、重複判定の本体は
+    masters/forms.py の _duplicate_master_code_exists()（＋_effective_department()）に共通化済み。
+    残る差分は NFKC 正規化＋isdigit チェックとエラー文言のみで、これは各フォームに1行ずつ
+    残る程度。完全な validate_numeric_master_code への切り出しは今回のバッチ対象外として見送る。
+
+No.9 【低】 更新監査メッセージの差分生成ループが3箇所に重複
+  対象:
+    masters/views.py:160-173  GroupEditView.audit_event_message
+    masters/views.py:345-358  CategoryEditView.audit_event_message
+    masters/views.py:544-556  RetentionEditView.post 内のインライン changes 構築
+  根拠:
+    「if obj.X != before.X: changes.append((ラベル, before.X, obj.X))」を各フィールド分
+    並べる定型。audit_services.build_diff_message は整形だけを担い、比較ループは各所に
+    残っている。フィールド定義（属性名・ラベル・表示変換関数）のリストを渡すと
+    changes を返す小ヘルパーを audit/services.py に置けば3箇所を1本化できる。
+
+  【見送り／理由】優先度「低」。純粋な可読性改善で挙動不変。3箇所の changes 構築は比較対象
+    フィールドが各モデルで異なり（Group=コード/名/区分/部署、Category=＋分類、Retention=保存期間/
+    表示順）、フィールド定義リストを渡す汎用ヘルパーにすると表示変換関数の受け渡しで
+    かえって読みにくくなる懸念がある。今回のバッチ対象外として見送る。
+
+No.10 【低】 core → organizations への依存方向
+  対象:
+    organizations/services.py:82-98  department_composite_order_by
+    それを import している側: core/master_views.py:13, permissions/services.py
+  根拠:
+    「本支所コード→部課コードの複合キーで並び替える」共通ヘルパーが末端アプリ
+    organizations に置かれ、core（基盤）と permissions がそれを import している。
+    docstring に「Department 関連の共通ロジックを持つ本モジュールに集約」と理由付けは
+    あるが、CLAUDE.md「共通処理は core に集約」および依存方向（core は各アプリに依存しない）
+    の観点では core 側（例: core/scoping_services.py 隣接）に置き、Department の
+    フィールドパスを引数で受ける形の方が一貫する。実害は無いため低。
+
+  【見送り／理由】優先度「低」。レビュー自身が「実害は無い」と明記。department_composite_order_by
+    は Department の本支所/部課コードという Department 固有知識に強く依存しており、
+    organizations/services.py に置くこと自体は「Department 関連ロジックの単一情報源」として
+    筋が通る（規約準拠監査 review_rule_organizations_masters.txt でも [OK] 判定）。移動は
+    import 経路の広い変更になるため今回のバッチ対象外として見送る。
+
+No.11 【低】 一覧テンプレートのページャー URL が page= を二重付与
+  対象:
+    templates/masters/class_list.html:98-113（cat_list.html も同型）
+      href='?{{ request.GET.urlencode }}&page={{ num }}'
+  根拠:
+    既にページ遷移した状態（GET に page=2 がある）から別ページボタンを押すと
+    ?…&page=2&page=3 となる。QueryDict は最後の値を採用するため動作はするが脆い。
+    request.GET を copy して page を差し替えてから urlencode するテンプレートタグ／
+    フィルタに寄せるのが望ましい（他アプリの一覧テンプレートと共通の想定）。
+
+  【見送り／理由】優先度「低」。レビュー自身が「QueryDict は最後の値を採用するため動作はする」
+    と明記（機能上のバグではない）。同じパターンは他アプリの一覧テンプレートにも広く存在し、
+    共通テンプレートタグ／フィルタ新設を伴う横断変更のため、この2アプリ限定のバッチではなく
+    別途まとめて対応すべき。今回は見送る。
 
 
-==================================================
-■ 補足
-==================================================
-- 正しさのバグ「高」1件は稀なレースコンディション条件下だが、監査ログとの不整合という
-  観点で優先度を高めに設定。
-- 再利用性の指摘「高」1件（masters/views.pyのGroup/Category重複）は、documents/contracts側で
-  既にcoreへ横展開済みの前例があるため、同様の対応がしやすい状況にある。
-- 対応方針・実装は別途指示のこと（本レビューは指摘一覧のみ、修正は未実施）。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+C. CLAUDE.md 規約整合性チェック結果（明確な違反のみ）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+・ビューは CBV のみ ......................... 準拠（module 関数は helper のみ、View は全て CBV）
+・モデルの verbose_name / docstring は日本語 . 準拠
+・設定は base.py 集約 / django-environ 経由 ... 対象2アプリで新規設定値の追加なし、準拠
+・例外処理の完成 ........................... 違反1件（No.3 RetentionDeleteView）
+・logger 整備 ............................. 準拠（各モジュール getLogger、warning/exception 使用）
+・共通処理は core 集約 .................... 弱い不整合（No.7 Retention 系、No.10 依存方向）
+・一覧ページネーションは Django Paginator ... 準拠（Group/Category は Paginator。
+                                            dept_list は xlsx B60「ページャー不要」の明示例外）
+・未実装機能は disabled + title ............ 対象範囲では該当なし
+・重複ロジックを増やさない ................. 不整合（No.7, No.8, No.9）
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+優先度サマリ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  中: No.1（部署スコープと code 一意性）................. 対応済み（2026-09-10、部署内一意に確定）
+      No.2（ゴミ箱文書を件数・削除判定に算入）........... 対応済み（2026-09-10、is_deleted=False で集計）
+      No.3（RetentionDeleteView の例外処理欠如）......... 対応済み（2026-09-10）
+      No.7（Retention 系ビューの重複・共通基底なし）..... 対応済み（2026-09-10）
+  低: No.4, No.5, No.6, No.8, No.9, No.10, No.11 ....... すべて見送り（各項目に理由を追記）
+
+※ No.1・No.2 は xlsx（分類管理!B68/B119/B161、カテゴリー管理 同等箇所）の
+  仕様意図の確認が必要だったため、2026-09-10 にユーザーへ確認。
+  No.1＝「部署内で一意」、No.2＝「ゴミ箱（is_deleted=True）は除外」に確定し、上記のとおり対応済み。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+対応記録（2026-09-10）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  高・中（No.1/No.2/No.3/No.7）を通し番号順に1件ずつ修正。各件ごとに
+  `python manage.py test organizations masters`（venv）で確認。最終 160 tests OK。
+  変更ファイル: masters/models.py, masters/forms.py, masters/views.py, masters/tests.py,
+  masters/migrations/0001_initial.py（Group/Category の unique 制約を (department, code) に修正）。
+  詳細は上記 A/B 各項目の【対応済み】節を参照。
+========================================================================

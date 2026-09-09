@@ -2,7 +2,8 @@ import logging
 
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.db.models import Case, Count, F, IntegerField, When
+from django.db import Error as DBError
+from django.db.models import Case, Count, F, IntegerField, Q, When
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import urlencode
@@ -33,9 +34,16 @@ def _group_queryset_with_counts():
     contracts.Contractかで異なるため、Count集計を2種類（related_name違い）annotateしてから
     doc_kbnに応じてどちらを使うかを`item_count`にまとめる（表示されている「文書件数」列と
     ソート対象を一致させるため。xlsx 分類管理!B58「文書件数」参照）。
+
+    ゴミ箱保管中（is_deleted=True）の文書・契約書は除外する（2026-09-10 レビュー指摘 No.2、
+    ユーザー確認済み）。ゴミ箱の文書は一覧・検索に出ず復元手段も無く最長1ヶ月で物理削除
+    されるため、これを数えると「文書件数」列が実際に見えない件数を表示し、xlsx B71「文書件数が
+    0件のときのみ削除可」にも反して削除ボタンが不必要にブロックされる。core/notice_services.py
+    の集計と同じ方針。
     """
     return Group.objects.filter(is_deleted=False).select_related("department").annotate(
-        doc_count=Count("documents", distinct=True), contract_count=Count("contracts", distinct=True)
+        doc_count=Count("documents", distinct=True, filter=Q(documents__is_deleted=False)),
+        contract_count=Count("contracts", distinct=True, filter=Q(contracts__is_deleted=False)),
     ).annotate(
         item_count=Case(
             When(doc_kbn=DocKbn.DOCUMENT, then=F("doc_count")),
@@ -118,6 +126,11 @@ class GroupRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.
     audit_action = "分類管理　新規登録"
     entity_label = "分類"
 
+    def extra_form_kwargs(self, request, is_admin):
+        # 非管理者の登録では「部署」フィールドが外れるため、clean_codeの部署内重複判定に使う
+        # ログイン者をフォームへ渡す（CategoryRegistViewと同じ。2026-09-10 No.1）。
+        return {"employee": request.user}
+
     def audit_event_message(self, obj):
         # 原本index.html:3220の操作履歴ログサンプル「カテゴリー管理　新規登録」と同種の
         # マスタ登録操作。documents/contractsだけでなくmasters系の登録・更新・削除も記録する。
@@ -156,6 +169,10 @@ class GroupEditView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.Ba
 
     def scoped_lookup(self, request, pk):
         return scoped_get_object_or_404(Group.objects.filter(is_deleted=False), request.user, pk)
+
+    def extra_form_kwargs(self, request, is_admin):
+        # GroupRegistViewと同じ理由（clean_codeの部署内重複判定用。2026-09-10 No.1）。
+        return {"employee": request.user}
 
     def audit_event_message(self, obj, before):
         # xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞と同じ「更新した項目名：更新前データ ->
@@ -205,10 +222,12 @@ class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.
 
 def _category_queryset_with_counts():
     """一覧の「文書件数」列。_group_queryset_with_countsと同じ理由（doc_kbnに応じて
-    doc_count/contract_countのどちらを使うかをitem_countにまとめる）。
+    doc_count/contract_countのどちらを使うかをitem_countにまとめる）。ゴミ箱保管中
+    （is_deleted=True）の文書・契約書を除外するのも同じ（No.2、ユーザー確認済み）。
     """
     return Category.objects.filter(is_deleted=False).select_related("group", "department").annotate(
-        doc_count=Count("documents", distinct=True), contract_count=Count("contracts", distinct=True)
+        doc_count=Count("documents", distinct=True, filter=Q(documents__is_deleted=False)),
+        contract_count=Count("contracts", distinct=True, filter=Q(contracts__is_deleted=False)),
     ).annotate(
         item_count=Case(
             When(doc_kbn=DocKbn.DOCUMENT, then=F("doc_count")),
@@ -429,13 +448,54 @@ class RetentionListView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         return render(request, self.template_name, context)
 
 
-class RetentionRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
+def _save_retention_period(form):
+    """RetentionPeriodForm の保存。clean_display_order/clean のアプリ層チェックを
+    すり抜ける同時送信（TOCTOU競合）での models.RetentionPeriod の UniqueConstraint
+    （unique_retention_display_order/period_value/permanent）違反時の IntegrityError を
+    save_or_none で捕捉する（Group/Category 系の form.save() と同じ方針）。
+    RetentionRegistView/RetentionEditView がまったく同じ呼び出しを手書き重複していたため
+    集約した（2026-09-10 レビュー指摘 No.7）。
+    """
+    return save_or_none(
+        form,
+        log_message="保存期間設定の重複によりDB制約違反が発生しました: kbn=%s doc_name=%s period=%s%s display_order=%s",
+        log_args=(
+            form.cleaned_data.get("kbn"), form.cleaned_data.get("doc_name"),
+            form.cleaned_data.get("period_value"), form.cleaned_data.get("period_unit"),
+            form.cleaned_data.get("display_order"),
+        ),
+    )
+
+
+class BaseRetentionSaveView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
+    """RetentionRegistView/RetentionEditView の共通部分。保存期間設定の登録・編集は
+    Group/Category と違い core.master_views.BaseScopedMaster* へ寄せられていない
+    （区分/書類名の文脈引き継ぎ・電子決裁3tbody など Retention 固有の事情が多く、
+    パラメータ化の見合いが悪いため）。二重送信トークンの再発行とフォーム再描画、
+    重複時の非フィールドエラー提示だけをここへ最小限集約する
+    （Regist/Edit でバイト単位で重複していた。2026-09-10 レビュー指摘 No.7）。
+    """
+
+    settings_menu_key = "retention_setting"
+
+    def _render_form(self, request, form, **extra):
+        token = issue_token(request.session, self.form_id)
+        return render(request, self.template_name, {"form": form, "token": token, **extra})
+
+    def _conflict_response(self, request, form, **extra):
+        # retention_regist/edit.html は messages 機構ではなく form.non_field_errors /
+        # period_value / display_order の errors しか描画しないため、GroupRegistView.post と
+        # 同じ理由で form.add_error() を使う。どちらの一意制約に触れたかは判別しないため
+        # 非フィールドエラーにまとめる。
+        form.add_error(None, "保存期間または表示順が他の設定と重複しています。")
+        return self._render_form(request, form, **extra)
+
+
+class RetentionRegistView(BaseRetentionSaveView):
     """screen-retention-regist-doc。原本はタイトル・書類名欄をJSで書き換える1画面共用構成だが、
     区分(kbn)・書類名(doc_name)は一覧側の現在の選択状態からクエリパラメータで引き継ぎ、
     サーバー側で直接正しい表示に出し分ける（JSでの後書き換えより確実なため）。
     """
-
-    settings_menu_key = "retention_setting"
 
     template_name = "masters/retention_regist.html"
     form_id = "masters_retention_regist"
@@ -446,8 +506,7 @@ class RetentionRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         return {"kbn": kbn, "doc_name": doc_name}
 
     def get(self, request):
-        form = RetentionPeriodForm(initial=self._initial(request))
-        return render(request, self.template_name, {"form": form, "token": issue_token(request.session, self.form_id)})
+        return self._render_form(request, RetentionPeriodForm(initial=self._initial(request)))
 
     def post(self, request):
         initial = self._initial(request)
@@ -459,30 +518,11 @@ class RetentionRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
 
         form = RetentionPeriodForm(request.POST)
         if not form.is_valid():
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, {"form": form, "token": token})
+            return self._render_form(request, form)
 
-        # RetentionPeriodForm側のアプリ層チェック（clean_display_order/clean）も同時送信の
-        # TOCTOU競合までは防げないため、models.RetentionPeriodのUniqueConstraint
-        # （unique_retention_display_order/period_value/permanent）違反時のIntegrityErrorを
-        # save_or_noneで捕捉する（Group/Category系のform.save()と同じ方針）。
-        period = save_or_none(
-            form,
-            log_message="保存期間設定の重複によりDB制約違反が発生しました: kbn=%s doc_name=%s period=%s%s display_order=%s",
-            log_args=(
-                form.cleaned_data.get("kbn"), form.cleaned_data.get("doc_name"),
-                form.cleaned_data.get("period_value"), form.cleaned_data.get("period_unit"),
-                form.cleaned_data.get("display_order"),
-            ),
-        )
+        period = _save_retention_period(form)
         if period is None:
-            # retention_regist.htmlはmessages機構ではなくform.non_field_errors/period_value/
-            # display_orderのerrorsしか描画しないため、GroupRegistView.postと同じ理由で
-            # form.add_error()を使う。どちらの一意制約に触れたかはここでは判別しないため非フィールド
-            # エラーにまとめる。
-            form.add_error(None, "保存期間または表示順が他の設定と重複しています。")
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, {"form": form, "token": token})
+            return self._conflict_response(request, form)
 
         logger.info("保存期間設定を新規登録しました: id=%s %s", period.pk, period)
         audit_services.log(
@@ -494,17 +534,13 @@ class RetentionRegistView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         return redirect(_retention_list_url(period.kbn, period.doc_name))
 
 
-class RetentionEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
+class RetentionEditView(BaseRetentionSaveView):
     template_name = "masters/retention_edit.html"
     form_id = "masters_retention_edit"
-    settings_menu_key = "retention_setting"
 
     def get(self, request, pk):
         period = get_object_or_404(RetentionPeriod, pk=pk, is_deleted=False)
-        form = RetentionPeriodForm(instance=period)
-        return render(
-            request, self.template_name, {"form": form, "period": period, "token": issue_token(request.session, self.form_id)}
-        )
+        return self._render_form(request, RetentionPeriodForm(instance=period), period=period)
 
     def post(self, request, pk):
         period = get_object_or_404(RetentionPeriod, pk=pk, is_deleted=False)
@@ -521,23 +557,10 @@ class RetentionEditView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
 
         form = RetentionPeriodForm(request.POST, instance=period)
         if not form.is_valid():
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, {"form": form, "period": period, "token": token})
+            return self._render_form(request, form, period=period)
 
-        # RetentionRegistView.postと同じ理由でIntegrityErrorをsave_or_noneで捕捉する。
-        if save_or_none(
-            form,
-            log_message="保存期間設定の重複によりDB制約違反が発生しました: kbn=%s doc_name=%s period=%s%s display_order=%s",
-            log_args=(
-                form.cleaned_data.get("kbn"), form.cleaned_data.get("doc_name"),
-                form.cleaned_data.get("period_value"), form.cleaned_data.get("period_unit"),
-                form.cleaned_data.get("display_order"),
-            ),
-        ) is None:
-            # retention_edit.htmlも同様の理由でform.add_error()を使う（RetentionRegistView参照）。
-            form.add_error(None, "保存期間または表示順が他の設定と重複しています。")
-            token = issue_token(request.session, self.form_id)
-            return render(request, self.template_name, {"form": form, "period": period, "token": token})
+        if _save_retention_period(form) is None:
+            return self._conflict_response(request, form, period=period)
 
         logger.info("保存期間設定を更新しました: id=%s %s", period.pk, period)
         # xlsx 操作履歴ログ!B69-70＜職員マスタ更新　例＞と同じ「更新した項目名：更新前データ ->
@@ -591,7 +614,16 @@ class RetentionDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         period.is_deleted = True
         # updated_atも更新する（auto_now=Trueはupdate_fieldsに明示しないと発火しない。
         # Group/CategoryのBaseScopedMasterDeleteViewと挙動を揃える。review_pending.txt No.24）。
-        period.save(update_fields=["is_deleted", "updated_at"])
+        try:
+            period.save(update_fields=["is_deleted", "updated_at"])
+        except DBError:
+            # DB接続断・制約違反等。BaseScopedMasterDeleteView.post（Group/Categoryの同種
+            # 論理削除）と揃え、生の500応答にせずユーザーへ案内した上で一覧へ戻す
+            # （RetentionDeleteViewはBaseScopedMasterDeleteViewを使わない独自実装のため、
+            # この横展開が漏れていた。2026-09-10 レビュー指摘 No.3）。
+            logger.exception("保存期間設定の削除処理に失敗しました: id=%s", pk)
+            messages.error(request, "削除に失敗しました。もう一度お試しください。")
+            return redirect(_retention_list_url(period.kbn, period.doc_name))
         logger.info("保存期間設定を削除しました: id=%s", pk)
         audit_services.log(
             employee=request.user,
