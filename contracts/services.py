@@ -121,15 +121,24 @@ def sync_related_contracts(contract, related_ids):
             row.save(update_fields=["display_order"])
 
 
-def filter_valid_related_ids(ids, *, employee, exclude_pk=None):
+def filter_valid_related_ids(ids, *, employee, exclude_pk=None, keep_ids=None):
     """関連書類として紐付けてよい契約書pkだけに絞る（並び順は維持、重複は除去）。
 
     ポップアップ検索API（`contracts.api.RelatedSearchAPIView`）は元々「閲覧権限内・削除されて
     いない・自分自身でない」契約書しか返さないが、hidden inputは生POST値なので改ざんで任意の
     pkが混入し得る。保存前にサーバー側でも同じ条件で検証し、外れた値は不正アクセス試行の兆候
     として警告ログに残す（`core.bulk_edit_services.resolve_ordered_pks` と同じ方針）。
+
+    `keep_ids`（＝この契約書に既に紐付いている契約書pkの集合）に含まれるpkは、論理削除済みで
+    閲覧範囲外検索から選び直せなくなっていても、入力リストに残っている限り維持する。紐付け時に
+    一度検証済みであり、`ContractRelation` docstring「論理削除（is_deleted=True）の場合は行は
+    残る」に従うため。これが無いと、削除済み関連書類を持つ契約書を別項目編集しただけで
+    紐付けが黙って消え、かつ正常操作なのに「紐付け不可」警告ログが毎回残っていた
+    （コードレビュー A No.1、2026-09-09。単独編集・一括編集の両経路で発生していた）。
     """
     from contracts.models import Contract
+
+    keep_ids = {int(k) for k in keep_ids} if keep_ids else set()
 
     int_ids = []
     for raw in ids:
@@ -149,10 +158,13 @@ def filter_valid_related_ids(ids, *, employee, exclude_pk=None):
     seen = set()
     result = []
     for pk in int_ids:
-        if pk in valid and pk not in seen:
-            seen.add(pk)
+        if pk in seen:
+            continue
+        seen.add(pk)
+        # exclude_pk（自分自身）は keep_ids に入っていても必ず除外する。
+        if pk != exclude_pk and (pk in valid or pk in keep_ids):
             result.append(pk)
-        elif pk not in valid:
+        else:
             logger.warning("紐付け不可の契約書pkが関連書類に指定されたため除外しました: pk=%s", pk)
     return result
 

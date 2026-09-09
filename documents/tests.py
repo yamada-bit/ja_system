@@ -2560,7 +2560,7 @@ class DetailAPIViewTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_document_past_delete_window_yields_null_delete_url(self):
-        """xlsx 保管!B300,B581・検索・閲覧・変更!B339-340「初回登録から1週間以上経過している
+        """xlsx 保管!B300,B583（Rev1.6で+2、旧B581）・検索・閲覧・変更!B339-340「初回登録から1週間以上経過している
         ものは削除不可。ボタンを非表示にする」（documents.services.can_delete）。"""
         from documents.models import Document
 
@@ -2969,6 +2969,31 @@ class UploadStep2PerFileMetadataTests(TestCase):
         # 保存満了日は各ファイルの保存期間で個別に計算される。
         self.assertNotEqual(a.expiry_date, b.expiry_date)
         self.assertEqual(AuditLog.objects.filter(action="保管画面２　登録").count(), 2)
+
+    def test_expiry_date_uses_jst_today_not_utc_date(self):
+        """コードレビュー A No.2：JST深夜（UTCではまだ前日）の登録でも保存満了日はJSTの
+        「今日」起算。以前は timezone.now().date()（UTC日付）で1日手前にずれ、画面プレビューと
+        食い違っていた。"""
+        from django.utils import timezone as _tz
+
+        from documents.models import Document
+
+        # JST 2026-09-09 06:00 = UTC 2026-09-08 21:00
+        fake_now = datetime.datetime(2026, 9, 8, 21, 0, tzinfo=datetime.timezone.utc)
+        token = self._start_two_files()
+        with mock.patch.object(_tz, "now", return_value=fake_now):
+            self.client.post("/documents/upload/step2/", {
+                "token": token,
+                "department_0": self.department.pk, "group_0": self.group_a.pk,
+                "category_0": self.cat_a.pk, "year_0": 2025, "retention_period_0": self.rp1.pk,
+                "privacy_flag_0": "False", "memo_0": "", "title_0": "深夜文書A",
+                "department_1": self.department.pk, "group_1": self.group_b.pk,
+                "category_1": self.cat_b.pk, "year_1": 2026, "retention_period_1": self.rp5.pk,
+                "privacy_flag_1": "False", "memo_1": "", "title_1": "深夜文書B",
+            })
+        a = Document.objects.get(title="深夜文書A")
+        # 保存期間1年 → JST起算 2026-09-09 + 1年（UTC日付なら 2027-09-08 になっていた）。
+        self.assertEqual(a.expiry_date, datetime.date(2027, 9, 9))
 
     def test_second_file_invalid_blocks_all_and_reports_index(self):
         from django.contrib.messages import get_messages

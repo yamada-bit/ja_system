@@ -156,11 +156,11 @@
               </div>
             </div>
             {% endfor %}
-            {# documents/storage2.htmlと同じ（xlsx 保管!B487-488「誤ってアップロードした契約書、 #}
+            {# documents/storage2.htmlと同じ（xlsx 保管!B489-490「誤ってアップロードした契約書、 #}
             {# 不要な契約書を削除する。(本登録から除外する)」。2026-08-27ユーザー確定で「表示中 #}
             {# ファイルのアップロード取り消し、他は登録処理を続行」に変更。2026-08-31：メインフォーム #}
-            {# ごと submit して他ファイルの入力を保持する（action=remove。関連書類はファイル入力の #}
-            {# ため復元不可＝選び直しが必要）。 #}
+            {# ごと submit して他ファイルの入力を保持する（action=remove）。Rev1.6で関連書類が #}
+            {# hidden input になり _remap_related_ids_after_remove で添字を詰め直す＝選び直し不要。 #}
             {# html5 で「削除」ボタンの div を [4]メモ欄ボックスの外（スクロール領域末尾）へ移動 #}
             {# （Rev1.4 で追加された説明画像 image69/image70 がこの配置を示している）。 #}
             <div style="text-align: right; margin-top: 10px;">

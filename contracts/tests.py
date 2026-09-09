@@ -2477,7 +2477,7 @@ class DetailAPIViewTests(TestCase):
         self.assertEqual(data["download_url"], f"/contracts/{self.contract.pk}/download/")
 
     def test_contract_past_delete_window_yields_null_delete_url(self):
-        """xlsx 保管!B300,B581・検索・閲覧・変更!B664-665「初回登録から1週間以上経過している
+        """xlsx 保管!B300,B583（Rev1.6で+2、旧B581）・検索・閲覧・変更!B664-665「初回登録から1週間以上経過している
         ものは削除不可。ボタンを非表示にする」（contracts.services.can_delete）。"""
         from contracts.models import Contract
 
@@ -2964,6 +2964,55 @@ class ContractEditViewFileHandlingTests(TestCase):
         data = self._edit_form_data(contract)
         data["token"] = self._get_token(contract)
         data["related_contract_ids"] = [str(contract.pk)]
+
+        self.client.post(f"/contracts/{contract.pk}/edit/", data)
+        self.assertFalse(ContractRelation.objects.filter(contract=contract).exists())
+
+    def test_edit_keeps_link_to_logically_deleted_related_contract(self):
+        """コードレビュー A No.1：削除済みの関連書類を持つ契約書を別項目編集しただけで
+        紐付けが消えないこと。edit.html は削除済み行にも hidden input を出すため、その pk が
+        POST に含まれる限り filter_valid_related_ids(keep_ids=...) が維持する。"""
+        from contracts.models import Contract, ContractRelation
+
+        contract = self._create_contract()
+        linked = self._linked_contract("削除される紐付け先")
+        ContractRelation.objects.create(contract=contract, related_contract=linked, display_order=0)
+        linked.is_deleted = True
+        linked.deleted_at = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
+        linked.save(update_fields=["is_deleted", "deleted_at"])
+
+        data = self._edit_form_data(contract)
+        data["token"] = self._get_token(contract)
+        data["related_contract_ids"] = [str(linked.pk)]  # edit.html の hidden input を再現
+
+        response = self.client.post(f"/contracts/{contract.pk}/edit/", data)
+
+        self.assertEqual(response.status_code, 200)
+        contract.refresh_from_db()
+        self.assertEqual(contract.title, "更新後タイトル")
+        self.assertEqual(
+            list(
+                ContractRelation.objects.filter(contract=contract).values_list(
+                    "related_contract_id", flat=True
+                )
+            ),
+            [linked.pk],
+        )
+
+    def test_edit_removing_deleted_related_row_still_unlinks_it(self):
+        """削除済み関連書類の行をユーザーが明示的に外した（hidden input が来ない）場合は
+        従来どおり紐付けが解除される（keep_ids は「リストに残っている限り維持」）。"""
+        from contracts.models import ContractRelation
+
+        contract = self._create_contract()
+        linked = self._linked_contract("外される紐付け先")
+        ContractRelation.objects.create(contract=contract, related_contract=linked, display_order=0)
+        linked.is_deleted = True
+        linked.save(update_fields=["is_deleted"])
+
+        data = self._edit_form_data(contract)
+        data["token"] = self._get_token(contract)
+        # related_contract_ids を送らない
 
         self.client.post(f"/contracts/{contract.pk}/edit/", data)
         self.assertFalse(ContractRelation.objects.filter(contract=contract).exists())

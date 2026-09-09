@@ -2,7 +2,8 @@ import datetime
 
 from django.utils import timezone
 
-# xlsx 保管!B300,B581・検索・閲覧・変更!B339-340,B664-665「初回登録から1週間以上経過している
+# xlsx 保管!B300（文書）,B583（契約書。Rev1.5まではB581、Rev1.6の関連書類節の行追加で+2）・
+# 検索・閲覧・変更!B339-340,B664-665「初回登録から1週間以上経過している
 # ものは削除不可。ボタンを非表示にする」（documents.services.DELETE_WINDOW_DAYS/
 # contracts.services.DELETE_WINDOW_DAYSが同じ値のまま重複定義されていたため集約
 # 〈品質レビューで発見、2026-08-25修正〉）。

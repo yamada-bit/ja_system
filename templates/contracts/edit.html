@@ -145,7 +145,7 @@
             <div class="form-section">
               <h4>[4] メモ欄</h4>
               {{ form.memo }}
-              {# xlsx 保管!B579-581。can_delete が False ならボタン非表示。単独編集は即時削除 #}
+              {# xlsx 保管!B581-583。can_delete が False ならボタン非表示。単独編集は即時削除 #}
               {# （EditDeleteView→検索画面へ）。一括編集は「削除予定」マーク＋「更新」で確定。 #}
               {% if can_delete %}
                 <div style="text-align: right; margin-top: 10px;">
