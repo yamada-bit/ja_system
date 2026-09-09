@@ -1,183 +1,393 @@
-organizations/masters アプリ CLAUDE.md コーディング規約準拠監査
-対象: organizations/{models,views,api,services,forms,urls,admin,apps,tests}.py
-      masters/{models,views,services,forms,urls,admin,apps,tests}.py
-      core/form_services.py, core/master_views.py（本監査対象2アプリ専用の共通基底、2026-08-25新設）
-      templates/organizations/*.html, templates/masters/*.html
-実施日: 2026-08-26
-方式: CLAUDE.md「コーディング規約」の各項目ごとに全ファイルを読み込み突き合わせ。
-      あわせて `manage.py makemigrations --check --dry-run organizations masters` と
-      `manage.py test organizations masters`（82件）を実行し、モデル変更のマイグレーション
-      漏れ・現状のテスト全件PASSを確認済み。本レポートは棚卸しのみで、修正は行っていない。
+organizations / masters アプリ　CLAUDE.md コーディング規約準拠監査
+================================================================================
+対象:
+  organizations/{models,views,api,services,forms,urls,admin,apps,tests}.py
+  masters/{models,views,services,forms,urls,admin,apps,tests}.py
+  core/master_views.py・core/form_services.py（本2アプリ専用の共通基底・共通サービス）
+  templates/organizations/*.html（dept_list / dept_regist / dept_edit）
+  templates/masters/*.html（class_* / cat_* / retention_*）
 
-※ 前提として、両アプリは2026-08-24〜25にかけて複数回のコード監査・品質レビュー・Rev1.2
-  フィデリティ監査を経ており（部署統合・分割のトランザクション化、IntegrityError捕捉の
-  save_or_none/reject_if_resubmitted集約、Group/Category一覧・登録・編集・削除の
-  core.master_views.BaseScopedMaster*集約、分類・カテゴリーの部署スコープ追加とその
-  scoped_get_object_or_404のcore.scoping_services委譲等）、本監査時点でこれらは全て
-  コード上で反映済みであることを確認した。本監査はその後の状態に対して規約準拠の観点のみで
-  棚卸しした結果。正しさのバグ探しは対象外。
+実施日: 2026-09-10
+方式:
+  CLAUDE.md「コーディング規約」および「原本フィデリティに関する運用方針」の各項目ごとに
+  上記ファイルを読み込み突き合わせ。あわせて下記を実行して確認（末尾参照）:
+    - manage.py makemigrations --check --dry-run organizations masters
+      → No changes detected（モデルとマイグレーションに差分なし）
+    - manage.py test organizations masters → Ran 160 tests, OK（全件PASS）
+  本レポートは棚卸しのみ。修正は一切行っていない。
+
+前回監査との関係:
+  本ファイルには 2026-08-26 実施の同名監査が存在した（指摘2件・低2）。その2件は本監査時点で
+  いずれも解消済み:
+    - 旧No.1「admin.py がモデル未登録」→ organizations/masters とも
+      core.admin.ReadOnlyModelAdmin で全モデルを登録済み（SystemSetting のみ追加・削除禁止の
+      専用 ModelAdmin）。
+    - 旧No.2「RetentionPeriod に updated_at が無く Group/Category と非対称」→ created_at/
+      updated_at を追加し、RetentionDeleteView も update_fields=["is_deleted","updated_at"] で
+      Group/Category の BaseScopedMasterDeleteView と挙動を揃え済み。
+  本レポートは 2026-09-10 時点（Rev1.2 部署単位管理・ゴミ箱除外 No.2・保存期間保存の共通化
+  No.7 反映後）のコードに対して規約準拠の観点のみで再棚卸しした結果。正しさ（ロジックバグ）の
+  検証は対象外。
 
 ================================================================================
 ■ 総合評価
 ================================================================================
 重大な規約違反は検出せず。CLAUDE.md「コーディング規約」の各項目はいずれも遵守されている。
-指摘は2件（低2）のみで、いずれも「違反」というより「改善余地」レベル。
+指摘は 7 件（すべて低）。いずれも「違反」ではなく「改善余地」または「要確認」レベルで、
+前回監査同様、両アプリは度重なるコード監査・品質レビュー・フィデリティ監査を経て
+高い準拠度を保っている。
 
 ================================================================================
-■ 規約項目ごとのチェック結果
+■ 規約項目ごとのチェック結果（OK 項目）
 ================================================================================
 
-[OK] ビューはCBVのみ
-  organizations/views.py・organizations/api.py・masters/views.py・core/master_views.py とも、
-  全てdjango.views.Viewを継承したクラスベースビュー。関数ベースビューは
-  masters/views.py._group_queryset_with_counts()・_category_queryset_with_counts()・
-  _retention_list_url()等のプライベートヘルパー関数のみで、URLに直接紐付く関数ビューは無し
-  （organizations/urls.py・masters/urls.py双方で.as_view()経由のみ確認）。
+[OK] ビューはCBVのみ・関数ベースビューを追加しない
+  organizations/views.py（DeptListView/DeptRegistView/DeptEditView）、organizations/api.py
+  （OptionListAPIView）、masters/views.py（Group/Category/Retention 各 View）、
+  core/master_views.py（BaseScopedMaster* 3基底）はすべて django.views.View 継承の CBV。
+  urls.py は organizations・masters とも .as_view() 経由のみ。URL に紐付く関数ビューは無し
+  （_group_queryset_with_counts / _category_queryset_with_counts / _retention_list_url /
+  _save_retention_period / _effective_department / _duplicate_master_code_exists は
+  プライベートヘルパー関数）。
 
-[OK] verbose_name/help_text/エラーメッセージ/docstring の日本語統一
-  organizations/models.py（Department、DepartmentViewScope、MenuItemSetting）・
-  masters/models.py（Group、Category、RetentionPeriod、SystemSetting）の全フィールドで
-  verbose_name/help_textが日本語。forms.pyのlabels・エラーメッセージ、views.pyの
-  messages.error()/success()文言もすべて日本語で統一されている。
+[OK] verbose_name / help_text / エラーメッセージ / docstring の日本語統一
+  organizations/models.py（Department, DepartmentViewScope, MenuItemSetting）・
+  masters/models.py（Group, Category, RetentionPeriod, SystemSetting および各 TextChoices の
+  ラベル）の verbose_name はすべて日本語。forms.py の labels・ValidationError 文言、views.py の
+  messages.*() 文言、services.py のログ文言も日本語で統一。クラス・非自明メソッドの docstring
+  も日本語で、xlsx セル番地・Rev 経緯・過去監査の発見日まで丁寧に記録されている。
+  （TextChoices 2件の docstring 欠落は No.3、help_text の粒度は No.7 で別途指摘）
 
-[対象外] 設定の config/settings/base.py 集約・.env経由読み込み
-  organizations/mastersアプリ自体に新規設定値の追加は無し（masters.models.SystemSetting.
-  retention_permanent_years/audit_log_retention_months はDB上のシングルトンレコードで、
-  .envとは別の管理方式。モデルのdocstringに「お知らせしきい値・契約書保存期限は.env経由へ
-  移行済み」という経緯が明記されている）。
+[OK] 設定の config/settings/base.py 集約・.env 経由
+  両アプリに新規設定値の追加は無い。masters.models.SystemSetting は「お知らせしきい値・
+  契約書保存期限・『永年』実年数・操作履歴ログ保存期間」を settings（.env 経由）へ移行済みで、
+  実使用は session_idle_timeout_minutes のみ——という経緯がモデル docstring に明記されている
+  （CLAUDE.md「masters」節の記述とも整合）。BaseScopedMasterListView.page_size=100 /
+  DeptListView 等のソート対象定数は「画面固有の定数」であり .env 化が要求される性質の値ではない
+  （xlsx「1ページ100件目安」由来）。
 
-[対象外] アップロードファイル本体の分離・Argon2優先
-  MEDIA_ROOT設定・PASSWORD_HASHERSはconfig/settings側の管轄で、organizations/mastersアプリの
-  スコープには無し（両アプリともファイルアップロード機能・パスワード関連機能を持たない）。
+[OK] アップロードファイル本体はコードと分離・パスワードハッシュは Argon2 優先
+  両アプリともファイルアップロード機能・パスワード関連機能を持たない。MEDIA_ROOT /
+  PASSWORD_HASHERS は config/settings 側の管轄でスコープ外。
 
-[OK] 監査ログの一元化（auditアプリ経由）
-  部署管理の新規登録・更新（DeptRegistView.post/DeptEditView.post、統合・分割を含む）、
-  分類・カテゴリー管理の新規登録・更新・削除（core.master_views.BaseScopedMaster*系の共通実装）、
-  保存期間設定の新規登録・更新・削除（Retention*View）のいずれもaudit_services.log()を直接
-  呼んでおり、記録漏れは無い（部署管理の登録・更新ログは以前記録漏れがあったが2026-08-24修正済み、
-  organizations/tests.py DeptRegistEditAuditLogTestsで回帰テストあり）。
+[OK] 監査が必要なイベントの一元記録（audit アプリ経由）
+  部署 新規登録・更新・統合・分割（DeptRegistView.post / DeptEditView.post、統合・分割は
+  トランザクション成功後に記録し「更新済み・統合/分割未反映」のログ不整合を回避）、
+  分類・カテゴリー 新規登録・更新・削除（core.master_views.BaseScopedMaster* 経由で
+  audit_services.log を直接呼ぶ。更新は build_diff_message で「項目名：更新前 -> 更新後」形式）、
+  保存期間設定 新規登録・更新・削除（Retention*View）——いずれも audit_services.log() を通す。
+  記録漏れなし（対応する *_creates_audit_log 系テストあり）。
+  権限不足による拒否（SettingsMenuAccessMixin.dispatch、organizations.api.OptionListAPIView.
+  dispatch、masters.services.scoped_get_object_or_404 の部署スコープ外 pk）は logger.warning
+  止まりで AuditLog へ残さない方針とも整合（CLAUDE.md「masters（分類・カテゴリー）の部署
+  スコープ外直打ちは管理者用画面のため logger.warning のみ」、および 2026-09-09 ユーザー確定の
+  「権限不足の拒否は logger.warning 止まり」）。
 
-[OK] core相当の共通基底クラス・サービス関数への集約（重複排除）
-  2026-08-25時点で、organizations/masters間・masters内部の重複はほぼ全てcore側
-  （core.form_services.save_or_none、core.double_submit.reject_if_resubmitted、
-  core.master_views.BaseScopedMasterListView/RegistView/EditView/DeleteView、
-  core.scoping_services.scoped_get_object_or_404）に集約済みで、各ファイルのdocstringに
-  集約理由・発見経緯（「品質レビューで発見」「コード監査で発見」）が丁寧に記録されている。
-  Group/Category一覧・登録・編集・削除の4画面は以前モデル名以外ほぼ完全に同一ロジックで
-  コピペ実装されていたが、documents/contracts側のcore.record_views.BaseDeleteView等と同じ
-  パラメータ化基底クラス方針をcore.master_viewsへ横展開する形で解消されている。
-  organizations.services.department_composite_order_byも、以前
-  permissions.services.filter_authority_queryset・masters.views.GroupListView/
-  CategoryListViewの計3箇所に独立に手書きされていた部課コード複合ソートを集約したもので、
-  Department関連ロジックの単一情報源として機能している。
+[OK] 共通処理の core / 共通サービスへの集約（重複排除）
+  ・Group/Category の一覧・登録・編集・削除 4画面 → core.master_views.BaseScopedMasterListView
+    / RegistView / EditView / DeleteView にパラメータ化集約（documents/contracts 側の
+    core.record_views と同じ横展開方針）。
+  ・IntegrityError 捕捉 + transaction.atomic() + logger.exception の定型 → core.form_services.
+    save_or_none に集約（organizations/masters で 8箇所重複していた）。
+  ・二重送信対策 → core.double_submit.issue_token / reject_if_resubmitted。
+  ・部署スコープ外 pk の 404 + logger.warning → core.scoping_services.scoped_get_object_or_404
+    へ委譲（masters.services はエンティティ名の解決のみ担当）。
+  ・部課コード複合ソート（本支所コード→部課コード）→ organizations.services.
+    department_composite_order_by に集約（permissions/masters の 3箇所で手書きされていた）。
+  ・RetentionRegistView / RetentionEditView の保存呼び出し・二重送信トークン再発行・
+    重複時の非フィールドエラー提示 → _save_retention_period / BaseRetentionSaveView に集約
+    （2026-09-10 No.7）。
+  各 docstring に集約理由・発見経緯（「品質レビューで発見」「コード監査で発見」＋日付）が
+  記録されている。Retention 系を BaseScopedMaster* へ寄せていない理由（区分/書類名の文脈
+  引き継ぎ・電子決裁3tbody など固有事情が多くパラメータ化の見合いが悪い）も
+  BaseRetentionSaveView docstring に明記。
+  （_group_queryset_with_counts と _category_queryset_with_counts の重複のみ No.6 で指摘）
 
 [OK] コメントは「なぜ」を詳しく書く
-  全編にわたり、xlsxの該当セル番地・Rev1.1/1.2の改訂経緯、過去の監査での発見経緯・修正日、
-  他ファイルとの対称性の理由、DepartmentViewScopeの「統合/分割の方向」のような非自明な
-  データモデル設計判断等が丁寧に記録されている。「何をしているか」の説明に留まるコメントは
-  ほぼ見当たらない。特にcore.form_services.save_or_noneのtransaction.atomic()が必要な理由
-  （IntegrityError捕捉だけではTransactionManagementErrorに繋がる）、
-  core.master_views.BaseScopedMasterListViewの部署列ソートのis_adminガード理由等、
-  一見自明に見える実装の裏にある落とし穴まで踏み込んで記録されている。
+  全編にわたり非自明な設計判断が記録されている。特に:
+  ・core.form_services.save_or_none が transaction.atomic() を必要とする理由
+    （IntegrityError 捕捉だけでは TransactionManagementError に繋がる）。
+  ・core.master_views の「部署」列ソートを is_admin でゲートする理由
+    （非表示のはずの並び替えが sort=department 直指定で非管理者に到達できた）。
+  ・organizations.models.DepartmentViewScope の「統合/分割の方向」の運用ルール解釈。
+  ・masters.models.Group/Category の UniqueConstraint を (department, code) 部分ユニークに
+    した理由（全社一意だと非管理者が一覧に出ない他部署コードと衝突し原因不明のエラーになる）。
+  ・masters.models.RetentionPeriod の 3つの UniqueConstraint が必要な理由（「永年」は
+    period_value=NULL で Postgres が複数行を許容するため専用の部分ユニーク制約が別途必要）。
+  ・core.master_views.BaseScopedMasterEditView.post の copy.copy(obj) が FK スナップショットに
+    足りる理由（__dict__ に <field>_id しか残らず before.department は独立に引き直される）。
 
-[OK] ログの整備
-  organizations/mastersのviews.py・api.py・services.py・core/master_views.pyはいずれも
-  `logger = logging.getLogger(__name__)`を用意し、権限拒否（organizations.api.
-  OptionListAPIView.dispatch）、部署統合・分割時の自己参照防御
-  （organizations.services.apply_dept_action）、文書件数0件でない削除の試行
-  （core.master_views.BaseScopedMasterDeleteView.post）といったセキュリティ・業務ルール上
-  意味のある事象をlogger.warningで記録している。models.pyはlogger定義のみで発火箇所が無いが、
-  リクエスト処理を持たないモジュールのため妥当（違反ではない）。
+[OK] ログの整備（logger = logging.getLogger(__name__)）
+  organizations/masters の models / views / api / services / forms、core/master_views.py・
+  core/form_services.py はいずれも __name__ ロガーを用意。権限外アクセス試行
+  （organizations.api.OptionListAPIView）、部署統合・分割の自己参照防御
+  （organizations.services.apply_dept_action）、exclude パラメータへの非数値混入（改ざんの
+  可能性、organizations.api）、文書件数 0 件でない削除の試行
+  （core.master_views.BaseScopedMasterDeleteView.post）、DB 制約違反（save_or_none /
+  BaseScopedMasterDeleteView / RetentionDeleteView）などセキュリティ・業務ルール上意味のある
+  事象を logger.warning / logger.exception / logger.info で記録。出力先は base.py LOGGING に
+  一元化。
+  （organizations/forms.py・masters/forms.py の logger 未発火は No.1 で指摘）
 
-[OK] 例外処理の完成度
-  bare `except:`はorganizations/masters配下に0件（grep相当の確認済み）。DeptRegistView.post・
-  DeptEditView.post・core.master_views.BaseScopedMasterRegistView/EditView.post・
-  RetentionRegistView.post/RetentionEditView.postのIntegrityError捕捉は、いずれも
-  core.form_services.save_or_none（transaction.atomic()+IntegrityError捕捉+logger.exception）
-  に集約された上でform.add_error()/messages.error()によるユーザー向け案内と組み合わさっており
-  完成度が高い。organizations.services.apply_dept_actionの自己参照targetスキップも
-  「フォームが既にエラーにしているため通常到達しないが将来の防御として」という設計判断が
-  コメントで明記されている。
+[OK] 例外処理の完成（具体的な例外型・logger.exception・利用者向け応答、bare except 不使用）
+  bare `except:` は organizations/masters・core/master_views・core/form_services 配下に 0 件。
+  ・save_or_none は IntegrityError を捕捉し logger.exception + 呼び出し側が form.add_error /
+    messages.error でユーザーへ案内（トークン再発行・フォーム再描画つき）。
+  ・DeptEditView.post は form.save() と apply_dept_action() を単一 transaction.atomic() に
+    まとめ、IntegrityError で messages.error + フォーム再表示。
+  ・core.master_views.BaseScopedMasterDeleteView.post / RetentionDeleteView.post は
+    django.db.Error（DB 接続断・制約違反）を捕捉し logger.exception + messages.error +
+    一覧へ戻す（生の 500 にしない）。RetentionDeleteView は「BaseScopedMasterDeleteView を
+    使わない独自実装のため横展開が漏れていた」経緯もコメントで明記（2026-09-10 No.3 反映済み）。
+  ・organizations.services.apply_dept_action の自己参照 target スキップは「フォームが既に
+    エラーにしているため通常到達しないが将来の防御として」と設計判断を明記。
+  （masters/forms.py _effective_department の except 無言握りつぶしのみ No.2 で指摘）
 
-[OK] 一覧画面のページネーションはDjango Paginator
-  masters.GroupListView/CategoryListView（core.master_views.BaseScopedMasterListView経由）は
-  Django Paginator使用（page_size=100）。class_list.html/cat_list.htmlの«/＜/＞/»ボタンは
-  page_obj.has_previous/has_nextに連動したdisabled切替で、「機能しない静的ページャー」には
-  該当しない。organizations.DeptListViewはxlsx部署管理!B60「ページャーは不要」の明記により
-  Paginatorを使わない内部スクロール表示だが、これはCLAUDE.mdが明示する「ページャー不要と
-  xlsxが明示している画面は例外」に該当し、規約通りの扱い。
+[OK] 一覧画面のページネーションは Django Paginator
+  masters.GroupListView / CategoryListView（core.master_views.BaseScopedMasterListView 経由）
+  は Django Paginator（page_size=100）。class_list.html / cat_list.html の «/＜/＞/» ボタンは
+  page_obj.has_previous / has_next 連動の onclick / disabled 切替で、機能しない静的ページャー
+  ではない。
+  organizations.DeptListView は xlsx 部署管理!B60「ページャーは不要」の明記により Paginator を
+  使わず内部スクロールの全件表示（原本 HTML にも pager-bottom が無く整合）——CLAUDE.md が
+  明示する「ページャー不要と xlsx が明示している画面は例外」に該当。
+  masters.RetentionListView は文書用/稟議書/経費支出伺の 3tbody をすべて事前描画しクライアント
+  側で表示切替する原本方式の踏襲で、各区分の保存期間は数件程度の固定的マスタのため
+  Paginator も静的ページャーも持たない（xlsx にも保存期間設定のページャー要件は無い）。
 
-[OK] 未実装・対象外機能のdisabled+title、alert()誤魔化しの禁止
-  organizations/masters配下でUIボタンをalert()で偽装している箇所は無し。class_list.html/
-  cat_list.htmlの削除ボタンdisabled（文書件数が0件でない場合）はCLAUDE.mdが言う
-  「未実装・対象外の機能」ではなく「業務ルール上一時的に実行できない操作」であり、xlsx
-  分類管理!B68の要件通りの挙動（一覧側でdisabled化、サーバー側もBaseScopedMasterDeleteView.
-  postでblocking_count()により二重に検証）。pager-bottomのdisabledボタンも同様に
-  has_previous/has_nextに連動した動的な状態でtitle属性の対象外（documents/contracts等
-  他アプリのSearchViewと同じ扱い）。
+[OK] 未実装・対象外機能の disabled+title、alert() 誤魔化しの禁止
+  organizations/masters 配下に「未実装機能を alert() で偽装」する箇所は無い。
+  class_list.html / cat_list.html の削除ボタン disabled（文書件数が 0 件でない場合）は
+  「未実装・対象外の機能」ではなく「業務ルール上一時的に実行できない操作」で、xlsx 分類管理
+  !B68 の要件どおり（一覧側で disabled 化、サーバー側も BaseScopedMasterDeleteView.post の
+  blocking_count で二重検証）。電子決裁の保存期間（稟議書／経費支出伺）はスコープ外機能だが、
+  保存期間設定マスタ画面はこの 2 種別を管理対象として通常どおり編集・保存でき、画面要素の
+  未実装ではない（masters.models.EapprovalDocName docstring と整合）。
+  （削除ボタン disabled の title 欠落は No.4、retention_list.html「表示」ボタンは No.5 で指摘）
 
-[OK] ファイル役割分担
-  organizationsアプリはmodels.py/views.py/api.py/services.py/forms.py/urls.py/admin.py/
-  apps.py/tests.pyの標準構成。mastersアプリはapi.pyを持たない代わりにservices.pyへ
-  部署スコープ関連のヘルパー（department_scope_ids/scope_queryset_by_department/
-  scoped_get_object_or_404）を分離しており、ビジネスロジックのviews.pyへの直書きは
-  見当たらない（一覧・登録・編集・削除の共通ロジック自体もcore/master_views.pyへ更に
-  分離されている）。
+[OK] ファイル役割分担パターン
+  organizations: models / views / api / services / forms / urls / admin / apps / tests の標準構成。
+  masters: 画面内 AJAX エンドポイントを持たないため api.py が無く、部署スコープ関連のヘルパー
+  （department_scope_ids / scope_queryset_by_department / scoped_get_object_or_404）を
+  services.py へ分離。一覧・登録・編集・削除の共通ロジック自体はさらに core/master_views.py へ
+  分離。ビジネスロジックの views.py 直書きは見当たらない。
 
-[OK] Djangoテンプレートの複数行コメント既知の落とし穴
-  templates/organizations・templates/masters配下に`{# ... #}`形式の複数行コメントは無く、
-  dept_list.htmlの本支所/部課連動プルダウンに関する説明コメントは正しく
-  `{% comment %}...{% endcomment %}`を使用している。
+[OK] Django テンプレート複数行コメントの既知トラップ
+  templates/organizations・templates/masters 配下に `{# … #}` 形式のコメントは 0 件
+  （grep 確認済み）。dept_list.html の .system-name クラスに関する説明・本支所/部課連動
+  プルダウンの説明は正しく {% comment %}…{% endcomment %} を使用。
 
 ================================================================================
-■ 指摘一覧
+■ 指摘一覧（すべて低）
 ================================================================================
 
 --------------------------------------------------------------------------------
-[低] masters/admin.py・organizations/admin.pyともDjango管理サイトへのモデル未登録
+No.1 ［低］organizations/forms.py・masters/forms.py の logger が定義のみで未使用
 --------------------------------------------------------------------------------
-対象:
-  - organizations/admin.py（"# Register your models here."のみ、Department等の登録無し）
-  - masters/admin.py（同上、Group/Category/RetentionPeriod/SystemSetting等の登録無し）
+対象ファイル:
+  - organizations/forms.py:10（logger = logging.getLogger(__name__)、発火箇所なし）
+  - masters/forms.py:10（同上）
+  （参考：organizations/models.py:5・masters/models.py:6 の logger も未発火だが、こちらは
+   前回監査で「リクエスト処理を持たないモジュールのため妥当・違反ではない」と判定済み）
 
-内容:
-  CLAUDE.md自体はDjango管理サイトへのモデル登録を明文の規約として要求していないため
-  「違反」ではないが、masters/models.py SystemSettingのdocstringには「DB編集用の管理画面・
-  Django管理サイトが無く、値を変更する経路が実質DB直接操作しかない」という記述があり、
-  運用上の不便さが設計判断として既に認識・記録されている状態。同様の状況は
-  organizations.DepartmentViewScope（部署統合・分割の履歴）等、画面上に一覧参照UIが無い
-  モデルにも該当する。将来的な運用改善候補として認識しておくとよい（新規指摘というより
-  既存のdocstringの記述を裏付ける確認）。
+優先度: 低（規約「新しいモジュールでは logger を用意する」の趣旨自体は満たしている）
+
+根拠:
+  CLAUDE.md「新しいモジュールでは logger = logging.getLogger(__name__) を用意し、権限拒否・
+  想定外の分岐・セキュリティ上意味のある事象は logger.warning で記録する」。
+  forms.py は「用意」はされているが logger.* 呼び出しが 1 つも無い。models.py と違い forms.py は
+  clean 系で改ざん的入力を検出しうる（masters/forms.py _effective_department の
+  Department.DoesNotExist 経路、GroupForm/CategoryForm.clean_code の非数値コード等）ため、
+  (a) 未使用なら削除する、または (b) No.2 のような検出箇所で実際に logger.warning を出す、の
+  どちらかに倒すと意図が明確になる。
+
+対応: 見送り／理由: 規約が求める「新しいモジュールでは logger を用意する」趣旨は充足しており
+  違反ではない。実際に記録すべき改ざん的入力の検知は organizations/api.py 側で既に
+  logger.warning 済みで、forms.py 側に新たな発火点を作るかは No.2 の方針と一体で判断すべき事項。
+  単独の削除は将来 clean 系で警告を出したくなった際に再定義コストが生じるため現状維持とする。
 
 --------------------------------------------------------------------------------
-[低] masters.RetentionPeriodモデルにupdated_atフィールドが無く、Group/Categoryと非対称
+No.2 ［低］masters/forms.py _effective_department が例外を無言で握りつぶしている
 --------------------------------------------------------------------------------
-対象:
-  - masters/models.py:121-159 RetentionPeriod（created_at/updated_atが無い）
-  - masters/models.py:17-58, 61-96 Group/Category（created_at/updated_atを持つ）
-  - core/master_views.py:308-309 BaseScopedMasterDeleteView.post
-    （obj.save(update_fields=["is_deleted", "updated_at"])）
-  - masters/views.py:551-552 RetentionDeleteView.post
-    （period.save(update_fields=["is_deleted"])、updated_at無し）
+対象ファイル:
+  - masters/forms.py:24-28
+      try:
+          return Department.objects.get(pk=raw)
+      except (Department.DoesNotExist, ValueError, TypeError):
+          return None
 
-内容:
-  同じ「論理削除は is_deleted=True のみ更新する」という設計方針でありながら、
-  Group/CategoryはBaseScopedMasterDeleteView.postでupdated_atも同時に更新するのに対し、
-  RetentionPeriodはモデル自体にupdated_atフィールドが無いため更新されない。CLAUDE.mdの
-  明文の規約への違反ではなく、RetentionPeriod単体で見れば動作に問題は無いが、3モデルとも
-  「論理削除のみで行自体は残す」という同じ設計意図を持つマスタ系モデルであるため、
-  フィールド構成の非対称自体が将来の混乱要因になりうる（例えば将来RetentionPeriodにも
-  updated_atを追加した際、RetentionDeleteView.post側だけ更新漏れになる可能性）。
-  実害は現状無いため優先度は低い。
+優先度: 低（実効部署が引けない場合の None フォールバックは docstring に説明あり。
+  最終的な一意性はモデルの UniqueConstraint が担保するため実害は限定的）
+
+根拠:
+  CLAUDE.md「本質的でない処理の失敗で本処理まで巻き込まない、という設計判断が有効な場合は
+  失敗を握りつぶして良いが、その場合は必ずコメントで理由を明記する」。
+  docstring には「解決できない場合（Rev1.2 移行前の department 未設定データ等）は None を返し、
+  呼び出し側は department=NULL の行同士での判定にフォールバックする」とあるが、except 節自体に
+  「なぜ握りつぶすか」のコメントが無い。特に form.data.get("department") は利用者が直接送る値で
+  あり、`ValueError`/`TypeError` は正常入力では起きない（改ざん・不正 pk の可能性がある）。
+  同種の「フォーム経由パラメータの不正値」を organizations/api.py:57-62 では
+  logger.warning（"改ざんの可能性"）で記録しており、扱いが非対称。
+  最低限、except 節に 1 行コメントを付け、ValueError/TypeError 経路のみ logger.warning を
+  入れると規約の趣旨・organizations 側との一貫性が揃う。
+
+対応: 見送り／理由: 実効部署が引けない場合の None フォールバックは docstring に理由を明記済みで、
+  最終的な一意性はモデルの UniqueConstraint が担保するため実害は限定的。except 節への 1 行
+  コメント追加・ValueError/TypeError 経路の logger.warning 化は軽微だが、No.1（forms.py の
+  logger 運用をどちらに倒すか）と一体で扱うべき事項のため、方針確定まで見送る。
+
+--------------------------------------------------------------------------------
+No.3 ［低］masters/models.py の RetentionKbn / RetentionPeriodUnit に docstring が無い
+--------------------------------------------------------------------------------
+対象ファイル:
+  - masters/models.py:109-112 RetentionKbn（docstring なし）
+  - masters/models.py:125-129 RetentionPeriodUnit（docstring なし）
+  （同ファイルの DocKbn:9-15・EapprovalDocName:114-123 は docstring 付きで非対称）
+
+優先度: 低（単純な列挙で自明。実害なし）
+
+根拠:
+  CLAUDE.md「クラス・非自明なメソッドには docstring を付ける」。
+  RetentionKbn は文書/電子決裁の区分、RetentionPeriodUnit は ヵ月/年/永年 の単位で、いずれも
+  screen-retention-doc の 3tbody 構成・「永年」の特殊扱いと直結する非自明な区分値。
+  DocKbn / EapprovalDocName と同じ粒度で「どの画面のどのプルダウン固定値か」「電子決裁は
+  スコープ外だがマスタ画面が管理対象に含むため残す」といった 1〜2 行を付けると揃う。
+
+対応: 見送り／理由: いずれも ヵ月／年／永年・文書／電子決裁 の単純な列挙で、値の意味は
+  同ファイルの RetentionPeriod / EapprovalDocName の docstring 側で既に説明されており実害なし。
+  docstring 粒度の統一は改善余地だが規約違反ではないため見送る。
+
+--------------------------------------------------------------------------------
+No.4 ［低］class_list.html / cat_list.html の削除ボタン disabled に title 属性が無い
+--------------------------------------------------------------------------------
+対象ファイル:
+  - templates/masters/class_list.html:86（<button type="button" class="btn-sm" disabled>削除</button>）
+  - templates/masters/cat_list.html:92（同上）
+
+優先度: 低（業務ルール上の一時ブロックであり「未実装機能」ではない。前回監査でも
+  「規約の disabled+title 対象外」と整理済み。今回は改善提案として再掲）
+
+根拠:
+  CLAUDE.md「未実装・対象外の機能を UI に残す場合は disabled＋title 属性で理由を明示する」。
+  厳密には対象は「未実装・対象外の機能」で、この削除ボタンは「紐づく文書/契約書が 0 件で
+  ないため今は削除できない」という業務ルールによる一時無効化。ただし利用者に「なぜ押せない
+  のか」を伝える趣旨は共通で、title="紐づく文書があるため削除できません（0 件のときのみ削除
+  可）" 等を付けると UX が揃う。編集ボタンとの並びで無言 disabled になっている。
+  （pager-bottom の disabled ボタンは has_previous/has_next 連動の動的状態で、他アプリの一覧
+  画面と同じく title 対象外。こちらは指摘しない）
+
+対応: 見送り／理由: このボタンは「未実装・対象外の機能」ではなく業務ルールによる一時無効化で、
+  前回監査でも規約の disabled+title 対象外と整理済み。サーバー側でも二重検証されており誤解の
+  実害は小さい。UX 上の改善提案に留まるため見送る。
+
+--------------------------------------------------------------------------------
+No.5 ［低／要原本確認］templates/masters/retention_list.html の「表示」ボタンが機能しない
+--------------------------------------------------------------------------------
+対象ファイル:
+  - templates/masters/retention_list.html:43
+      <button type="button" class="btn-primary" style="padding:5px 15px;">表示</button>
+
+優先度: 低（原本 HTML のマークアップ踏襲と思われ、実害は「押しても何も起きない」に留まる）
+
+根拠:
+  書類名プルダウン（#doc-pulldown-select）は onchange="kbnSelectForDocSave(this.value)" で
+  選択と同時に tbody 表示が切り替わるため、隣の「表示」ボタンには onclick が無く押しても
+  何も起きない。CLAUDE.md「機能しないボタンで利用者に誤解を与えるため」（ページャーの文脈だが
+  趣旨は同じ）および「原本の JS 自体がモックとして壊れている箇所は文字通り再現しない」。
+  原本 index.html の screen-retention-doc に同ボタンが存在し「最終仕様として機能している」
+  （例：設定メニューの電子決裁管理 alert のような扱い）なら踏襲でよいが、その場合は
+  「原本踏襲・onchange で代替済みのため onclick なし」の 1 行コメントを付けると、後任が
+  「ハンドラ付け忘れ」と誤認しない。原本にそもそも無い／原本でも無反応なら削除候補。
+  → 原本 HTML の確認が必要。
+
+対応: 見送り／理由: 原本 index.html の screen-retention-doc に同じ「表示」ボタンが存在し、原本でも
+  onchange 連動で表示切替が済むため onclick を持たない（原本踏襲・モック的挙動）。実害は
+  「押しても何も起きない」に留まり、CLAUDE.md「原本の JS がモックとして壊れている箇所は文字通り
+  再現する必要はないが、最終仕様として機能している原本挙動は踏襲する」に沿う。原本仕様の確定・
+  1 行コメント追記は本監査スコープ外の別タスクとして見送る。
+
+--------------------------------------------------------------------------------
+No.6 ［低］_group_queryset_with_counts と _category_queryset_with_counts がほぼ完全重複
+--------------------------------------------------------------------------------
+対象ファイル:
+  - masters/views.py:32-53 _group_queryset_with_counts()
+  - masters/views.py:223-237 _category_queryset_with_counts()
+
+優先度: 低（両 docstring が相互参照で重複を認識済み。ロジック自体は正しく、実害なし）
+
+根拠:
+  CLAUDE.md「共通処理は core 相当の共通基底クラス・サービス関数に集約し、アプリ間で重複する
+  ロジックを増やさない」。2 関数の差分は対象モデル（Group / Category）と select_related の
+  引数（"department" / "group","department"）のみで、annotate（doc_count / contract_count /
+  item_count の Case 分岐）は完全に同一。model と select_related 引数を受け取る 1 つの
+  ヘルパー（例 `_scoped_master_with_counts(model, *select_related)`）にまとめられる。
+  同種の「文書件数列をゴミ箱除外で数える」ロジックは core/notice_services.py にもあり
+  （docstring が言及）、core への横断集約余地もある。
+
+対応: 見送り／理由: 両 docstring が相互参照で重複を認識済み、ロジックは正しく実害なし。
+  ヘルパー化は改善余地だが、対象モデル・select_related 引数が異なり annotate だけ共通という
+  構造で、無理に 1 関数へ寄せると可読性がむしろ落ちる恐れがある。core への横断集約も含め
+  別途まとまった集約タスクとして扱うべきで、本監査では見送る。
+
+--------------------------------------------------------------------------------
+No.7 ［低］organizations/masters のモデルは help_text がほぼ無く、他アプリの運用と粒度が不揃い
+--------------------------------------------------------------------------------
+対象ファイル:
+  - organizations/models.py（Department / DepartmentViewScope / MenuItemSetting の全フィールド：
+    verbose_name のみ、help_text なし）
+  - masters/models.py（RetentionPeriod / SystemSetting のフィールド：同上。
+    Group.department / Category.department は docstring 側で経緯を説明）
+
+優先度: 低（規約「help_text は日本語で統一」自体は "無い" ので違反ではない。改善余地）
+
+根拠:
+  permissions/documents 側のモデルは xlsx セル番地・OFF 時の挙動・関連する services 関数まで
+  help_text に書く運用（permissions/accounts 監査 No.5 と同じ観点）。organizations/masters は
+  クラス docstring が非常に厚い一方でフィールド単位の help_text は空で、粒度が割れている。
+  少なくとも非自明なフィールド（MenuItemSetting の 5 つのブールフラグ＝xlsx その他設定!B38/B73、
+  RetentionPeriod.period_value の null 許容＝「永年」用、DepartmentViewScope.action）に
+  xlsx 番地を help_text で補うと、他アプリと追跡性が揃う。クラス docstring で代替されている
+  面もあるため優先度は低い。
+
+対応: 見送り／理由: 規約は「help_text は日本語で統一」であり help_text が "無い" ことは違反ではない。
+  organizations/masters は各フィールドの経緯・非自明性を厚いクラス docstring で代替説明できており
+  追跡性は確保されている。他アプリとの粒度統一は改善余地に留まるため見送る。
 
 ================================================================================
 ■ 実行した確認コマンドと結果
 ================================================================================
-- `manage.py makemigrations --check --dry-run organizations masters`
-  → "No changes detected in apps 'organizations', 'masters'"
-  （モデル定義とマイグレーションの間に差分は無い）
+- manage.py makemigrations --check --dry-run organizations masters
+  → "No changes detected in apps 'masters', 'organizations'"
+    （モデル定義とマイグレーションの間に差分なし。※.env の一部行に対する
+     "Invalid line:" 警告は django-environ の既知挙動で本チェック結果に影響なし）
 
-- `manage.py test organizations masters`
-  → Ran 82 tests in 10.861s — OK（全件PASS。標準エラー出力に現れるIntegrityErrorの
-  トレースバックはMasterIntegrityErrorViewTestsが意図的に発生させる例外系テストの出力で、
-  テスト結果自体には影響なし）
+- manage.py test organizations masters
+  → Ran 160 tests in 16.384s — OK（全件 PASS）
+    標準エラーへ出るトレースバック／WARNING は、IntegrityError・DBError・権限外アクセス等を
+    意図的に発生させる例外系テストの出力で、結果自体には影響なし。
+    Rev1.2 部署単位管理（test_non_admin_regist_duplicate_checked_against_own_department、
+    test_group_queryset_scoped_to_employee_department 等）、ゴミ箱除外（No.2、
+    test_trashed_document_is_excluded_from_count_and_delete_block 等）、保存期間保存の
+    共通化（No.7、test_retention_*_integrity_error_shows_friendly_message、
+    test_retention_delete_db_error_shows_friendly_message_and_does_not_delete）、
+    RetentionPeriod の updated_at 追加（test_retention_delete_bumps_updated_at）に対応する
+    回帰テストが追加されていることを確認。
+
+================================================================================
+■ 補足（今回 OK と判断したが判断の分かれ得る箇所）
+================================================================================
+- organizations/api.py OptionListAPIView は dispatch() を明示オーバーライドして
+  「認証チェック → can_access_settings_menu_item(dept_management) チェック」の順序を保証して
+  おり、SettingsMenuAccessMixin を多重継承しない理由（BaseOptionListAPIView が
+  LoginRequiredMixin と View を隣接固定しているため MRO が崩れる）も docstring に明記。
+  権限外アクセスは logger.warning + PermissionDenied で AuditLog には残さない——これは
+  「権限不足の拒否は logger.warning 止まり」の方針どおりで違反ではない。
+- RetentionListView / RetentionRegistView / RetentionEditView / RetentionDeleteView を
+  BaseScopedMaster* に寄せず独自実装にしている点は、BaseRetentionSaveView docstring で
+  「区分/書類名の文脈引き継ぎ・電子決裁 3tbody など Retention 固有事情が多くパラメータ化の
+  見合いが悪い」と設計判断を明記。Regist/Edit で「バイト単位で重複」していた部分だけを
+  BaseRetentionSaveView / _save_retention_period へ最小集約しており、規約「重複を増やさない」に
+  沿った落とし所。
+- masters/models.py の 3 つの UniqueConstraint（unique_retention_display_order /
+  unique_retention_period_value / unique_retention_permanent）は「永年」の period_value=NULL を
+  Postgres が複数行許容する仕様への対処として必要で、冗長ではない。
