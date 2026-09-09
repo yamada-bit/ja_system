@@ -15,6 +15,11 @@ def get_profile(employee):
         return employee.permission_profile
     except PermissionProfile.DoesNotExist:
         return None
+    except AttributeError:
+        # 認証チェック前のビューから AnonymousUser 等、permission_profile 属性自体を持たない
+        # オブジェクトが渡された場合の保険（review_code_permissions_accounts No.1）。呼び出し側は
+        # None を最も制限の強い（一般職員相当の）扱いにするため、未認証で権限が緩む方向には働かない。
+        return None
 
 
 def get_role(employee):
@@ -47,6 +52,29 @@ def admin_count(*, exclude_profile_pk=None):
     if exclude_profile_pk is not None:
         qs = qs.exclude(pk=exclude_profile_pk)
     return qs.count()
+
+
+def lock_active_admin_profiles():
+    """在職中の"管理者"PermissionProfile 行を FOR UPDATE でロックする。降格を行う全経路で、
+    呼び出し側の transaction.atomic() 内・would_orphan_admins()/admin_count() による0人判定より
+    前に呼ぶこと。
+
+    admin_count() は素の集計で行ロックを持たない check-then-act のため、「他に管理者が1人居る」
+    と確認してから実際に降格するまでの間に、別トランザクション（別セッションの権限管理編集、
+    CSV取込の別行、CSV取込と手動編集の同時実行）がもう1人の管理者を降格すると、双方がガードを
+    通過して管理者0人になりうる（review_code_permissions_accounts No.2）。降格経路で本関数を先に
+    呼ぶと、2つ目以降のトランザクションは1つ目の commit まで待たされ、待機解除後に評価し直す
+    フィルタ（role=ADMIN）は減った行だけを返すため、admin_count は正しく0人を検知して中止できる。
+
+    of=["self"] で PermissionProfile 行だけをロックし、結合先の accounts_employee 行はロック
+    しない（職員マスタ編集など無関係な更新とのデッドロックを避けるため）。トランザクション外で
+    呼ぶと select_for_update() が TransactionManagementError を送出する。
+    """
+    list(
+        PermissionProfile.objects.select_for_update(of=["self"])
+        .filter(role=PermissionRole.ADMIN, employee__is_retired=False)
+        .values_list("pk", flat=True)
+    )
 
 
 def would_orphan_admins(profile, new_role):

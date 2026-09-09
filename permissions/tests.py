@@ -14,6 +14,7 @@ from permissions.services import (
     can_select_department,
     filter_authority_queryset,
     get_role,
+    lock_active_admin_profiles,
     visible_groups,
     would_orphan_admins,
 )
@@ -237,6 +238,27 @@ class PermissionServicesTests(TestCase):
         p2.save(update_fields=["role"])
         self.assertEqual(admin_count(), 2)
         self.assertFalse(would_orphan_admins(p1, PermissionRole.MANAGER))
+
+    def test_lock_active_admin_profiles_emits_select_for_update(self):
+        """review_code_permissions_accounts No.2：admin_count は行ロックを持たない check-then-act
+        のため、降格経路（権限管理編集・CSV所属長フラグ降格・本支所〜役職変更/退職に伴うリセット）は
+        判定前に在職管理者の PermissionProfile 行を FOR UPDATE でロックし、別トランザクションの
+        同時降格で管理者が0人になる隙間を塞ぐ。退職者行はロック対象に含めない。"""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        retired = Employee.objects.create_user(
+            employee_no="77", name="退職管理者", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO, is_retired=True,
+        )
+        PermissionProfile.objects.create(employee=retired, role=PermissionRole.ADMIN)
+
+        with CaptureQueriesContext(connection) as ctx:
+            lock_active_admin_profiles()
+        lock_sql = [q["sql"] for q in ctx.captured_queries if "FOR UPDATE" in q["sql"].upper()]
+        self.assertEqual(len(lock_sql), 1)
+        self.assertIn("is_retired", lock_sql[0].lower())
 
     def test_admin_count_excludes_retired(self):
         """会話ログ2026-09-04の指摘③：ログイン不能な退職管理者は「有効な管理者」に数えない。
@@ -588,6 +610,18 @@ class AuthorityEditViewTests(TestCase):
         token = get_response.context["token"]
         self.client.post(f"/permissions/{self.other_employee.pk}/edit/", {"role": PermissionRole.STAFF, "token": token})
         self.assertTrue(AuditLog.objects.filter(action="権限管理　更新").exists())
+
+    def test_unauthenticated_get_redirects_to_login(self):
+        """review_code_permissions_accounts No.1：AuthorityEditView.dispatch は自前で
+        get_object_or_404 → can_manage_target → logger.warning(... employee_no ...) を
+        LoginRequiredMixin の認証チェックより前に実行していたため、未認証（AnonymousUser）で
+        存在する pk を GET すると permission_profile / employee_no 属性が無く 500 になっていた。
+        未認証はまず親へ委譲し、ログイン画面へ 302 リダイレクトさせる。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.client.logout()
+        response = self.client.get(f"/permissions/{self.other_employee.pk}/edit/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response["Location"])
 
 
 class ContractVisibleDepartmentsAdminOnlyTests(TestCase):

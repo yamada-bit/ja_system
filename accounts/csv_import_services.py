@@ -10,7 +10,7 @@ from accounts.services import LastAdminError, reset_permission_profile_if_needed
 from audit import services as audit_services
 from organizations.models import RETIRED_SECTION_CODE, Department
 from permissions.models import PermissionProfile, PermissionRole
-from permissions.services import would_orphan_admins
+from permissions.services import lock_active_admin_profiles, would_orphan_admins
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +262,12 @@ def _apply_manager_flag(employee, manager_flag, actor):
     )
     if profile.role == PermissionRole.MANAGER:
         return
+    # 判定〜保存は _import_row の transaction.atomic() 内で実行されるが、ここで
+    # lock_active_admin_profiles() を挟んで在職管理者行をロックしてから 0人判定する
+    # （review_code_permissions_accounts No.2）。CSV取込の別行や別セッションの権限管理編集が
+    # 同時に別の管理者を降格しても、片方の commit まで待たされ、admin_count が減った人数を見て
+    # LastAdminError を正しく送出できる。
+    lock_active_admin_profiles()
     if profile.role == PermissionRole.ADMIN and would_orphan_admins(profile, PermissionRole.MANAGER):
         # reset_permission_profile_if_needed と同じ LastAdminError（ValueError サブクラス）で
         # 揃える。import_staff_csv の except ValueError が行単位に握って summary.errors へ集積する。

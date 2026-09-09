@@ -4,6 +4,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views import View
 
@@ -20,6 +21,7 @@ from permissions.services import (
     get_profile,
     get_role,
     is_admin,
+    lock_active_admin_profiles,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,6 +153,13 @@ class AuthorityEditView(LoginRequiredMixin, View):
     form_id = "permissions_authority_edit"
 
     def dispatch(self, request, *args, **kwargs):
+        # LoginRequiredMixin.dispatch より前に request.user を権限判定・logger へ渡すと、未認証
+        # （AnonymousUser）アクセス時に permission_profile / employee_no 属性が無く 500 になる
+        # （permissions/mixins.py SettingsMenuAccessMixin docstring が警告する順序問題。この
+        # ビューだけ自前 dispatch でその前提を崩していた。review_code_permissions_accounts No.1）。
+        # 未認証はまず親へ委譲し、LoginRequiredMixin にログイン画面へリダイレクトさせる。
+        if not request.user.is_authenticated:
+            return super().dispatch(request, *args, **kwargs)
         self.employee = get_object_or_404(Employee.objects.select_related("department"), pk=kwargs.get("pk"))
         if not can_manage_target(request.user, self.employee):
             logger.warning(
@@ -210,7 +219,17 @@ class AuthorityEditView(LoginRequiredMixin, View):
             editable_roles=self._editable_roles(request),
             show_contract_visible_departments=is_admin_editor,
         )
-        if not form.is_valid():
+        # フォーム検証（clean_role の would_orphan_admins による0人ガード）と保存を1トランザクション
+        # にまとめ、先頭で在職管理者行をロックする（review_code_permissions_accounts No.2）。
+        # admin_count は素の集計で行ロックを持たないため、別セッションの権限管理編集や CSV 取込が
+        # 同時にもう1人の管理者を降格すると双方がガードを通過して管理者0人になりうる。ロック取得
+        # により2つ目以降は commit まで待たされ、待機解除後の検証で減った人数を見て弾ける。
+        with transaction.atomic():
+            lock_active_admin_profiles()
+            form_valid = form.is_valid()
+            if form_valid:
+                form.save()
+        if not form_valid:
             token = issue_token(request.session, self.form_id)
             return render(
                 request,
@@ -218,7 +237,6 @@ class AuthorityEditView(LoginRequiredMixin, View):
                 {"form": form, "employee": employee, "token": token, "is_admin_editor": is_admin_editor},
             )
 
-        form.save()
         logger.info("権限設定を更新しました: employee_no=%s", employee.employee_no)
         # 原本index.html:3221,3231の操作履歴ログサンプル「権限管理　更新」に対応。
         # 個々のフラグの変更差分（before→after）までは記録せず対象職員のみ記録する

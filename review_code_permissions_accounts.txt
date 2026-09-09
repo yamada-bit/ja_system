@@ -1,165 +1,180 @@
-permissions / accounts アプリ コードレビュー結果
-実施日: 2026-08-25
-対象: permissions/{models,views,api,mixins,forms,services,urls}.py,
-      accounts/{models,views,services,forms,csv_import_services,urls}.py
-      （関連テンプレート・テストは参照のみ、修正は未実施）
-方針: 正しさのバグ／再利用性・単純化・効率性の指摘を分離。CLAUDE.mdのコーディング規約との
-      整合性も確認対象に含めた。優先度は 高/中/低 の3段階。
+========================================================================
+コードレビュー: permissions/ ・ accounts/ アプリ全体
+対象ブランチ: feat/storage2-per-file-metadata（main との差分 + アプリ全体）
+レビュー日: 2026-09-10
+観点: 正しさのバグ / 再利用・単純化・効率 / CLAUDE.md 規約整合
+修正は未実施。指摘一覧と優先度のみ。
+テスト状況: `manage.py test permissions accounts` 155件 全PASS（本レビュー時点）
+========================================================================
 
+------------------------------------------------------------------------
+A. 正しさのバグ
+------------------------------------------------------------------------
 
-====================================================================
-■ 正しさのバグ
-====================================================================
+No.1  優先度: 中
+対象: permissions/views.py:153-161  AuthorityEditView.dispatch
+現象:
+  未認証（AnonymousUser）で /permissions/<存在するpk>/edit/ を GET すると、
+  ログイン画面へのリダイレクト（302）ではなく HTTP 500 になる。
+根拠:
+  - AuthorityEditView は dispatch() を独自オーバーライドしており、その中で
+    まず get_object_or_404() → can_manage_target(request.user, self.employee)
+    → logger.warning(... request.user.employee_no ...) を実行し、その後で
+    super().dispatch()（= LoginRequiredMixin.dispatch の認証チェック）を呼ぶ。
+    つまり認証チェックより前に request.user を権限判定に使ってしまう。
+  - can_manage_target() は get_role() → get_profile() で
+    employee.permission_profile にアクセスするが、AnonymousUser には
+    permission_profile が無く、get_profile() の except は
+    PermissionProfile.DoesNotExist しか捕捉しないため AttributeError が素通りする。
+    （実機確認済み: get_role(AnonymousUser()) →
+     AttributeError("'AnonymousUser' object has no attribute 'permission_profile'")）
+  - request.user.employee_no も AnonymousUser では存在しない。
+  - permissions/mixins.py SettingsMenuAccessMixin の docstring が
+    「LoginRequiredMixin より先に実行されると未ログイン時に get_role() が
+    AnonymousUser を渡されて意図しない挙動になる」とまさにこの順序問題を警告している。
+    AuthorityListView / AuthorityCsvExportView / accounts 側の各ビューは
+    LoginRequiredMixin を先に効かせているため影響なし。AuthorityEditView だけが
+    自前 dispatch でこの前提を崩している。
+補足（altitude）:
+  対処は (a) AuthorityEditView.dispatch の先頭で未認証なら super().dispatch() に
+  委譲してから独自チェックを行う、または (b) get_profile()/get_role() を
+  未認証ユーザーに対して安全にする（AttributeError も None 扱い）、のいずれか。
+  (b) の方が横展開に強い（同種のビューが将来増えても防げる）。
+対応済み（2026-09-10）:
+  (a)(b) 両方を実施。AuthorityEditView.dispatch の先頭で request.user.is_authenticated が
+  False なら独自チェックを一切行わず super().dispatch() へ委譲（LoginRequiredMixin が
+  ログイン画面へ 302）。あわせて permissions/services.py get_profile() が AttributeError も
+  捕捉して None を返すよう変更（未認証時に権限が緩む方向には働かない＝None は最も制限の
+  強い扱い）。permissions/tests.py に未認証 GET が 302 になる回帰テストを追加。
 
---- [優先度: 高] --------------------------------------------------
-CSV職員取込のemployee_noが登録フォームと同じ正規化・検証を経由しない
---------------------------------------------------------------------
-場所: accounts/csv_import_services.py の _import_row()（102-119行付近）
+No.2  優先度: 中
+対象: permissions/services.py:33-65  admin_count / would_orphan_admins
+現象:
+  「システム管理者が0人にならない」ガードが check-then-act であり、
+  並行操作で最後の2人の管理者を同時に降格すると両方がガードを通過し0人化しうる。
+根拠:
+  - admin_count() は PermissionProfile.objects.filter(...).count() の素の集計で、
+    select_for_update 等の行ロックが無い。
+  - would_orphan_admins() を使う経路が複数ある:
+    権限管理編集(AuthorityEditForm.clean_role)、CSV取込の所属長フラグ降格
+    (_apply_manager_flag)、本支所〜役職変更・退職に伴うリセット
+    (reset_permission_profile_if_needed)。
+    管理者Aの降格リクエストと管理者Bの降格リクエスト（別セッション／CSV取込中の
+    別行／CSV取込と手動編集の同時実行）が並走すると、双方が
+    admin_count(exclude=自分) == 1 を見て両方 commit し、結果0人になる。
+  - 「管理者1人以上」を保証する DB 制約（部分unique等）が無いため最終防衛も無い。
+影響度: 実運用で同時降格が起きる頻度は高くないが、ガードの存在意義そのものに
+  穴がある。少なくとも各更新経路で対象 PermissionProfile 行を
+  select_for_update() で確定してから admin_count するか、行数の下限を保証する
+  仕組みの検討が望ましい。
+対応済み（2026-09-10）:
+  permissions/services.py に lock_active_admin_profiles() を追加（在職中 role=ADMIN の
+  PermissionProfile 行を SELECT ... FOR UPDATE OF self でロック）。降格を行う3経路すべてで、
+  transaction.atomic() 内・would_orphan_admins()/admin_count() の判定より前にこれを呼ぶ：
+   - AuthorityEditForm.clean_role 経路：AuthorityEditView.post で is_valid()＋save() を1つの
+     transaction.atomic() で囲み、先頭で lock_active_admin_profiles()。
+   - _apply_manager_flag（CSV所属長フラグ降格）：_import_row の atomic 内で would_orphan_admins
+     の直前にロック。
+   - reset_permission_profile_if_needed（本支所〜役職変更・退職に伴うリセット）：関数内の
+     判定〜保存を transaction.atomic() で明示的に囲み、先頭でロック（呼び出し側も従来どおり
+     atomic だが単体でも競合に強くした）。
+  2つ目以降のトランザクションは1つ目の commit まで待たされ、待機解除後の admin_count が減った
+  人数を見て正しく中止する。permissions/tests.py に FOR UPDATE 発行の回帰テストを追加。
 
+No.3  優先度: 低
+対象: accounts/csv_import_services.py:236-264  _apply_manager_flag
+現象:
+  PermissionProfile がまだ無い「既存職員」に所属長フラグ "1" が付いた行を取り込むと、
+  権限は MANAGER になるのに AuditLog（操作履歴ログ）に一切記録されない。
+根拠:
+  - profile, _ = PermissionProfile.objects.get_or_create(
+        employee=employee, defaults={"role": PermissionRole.MANAGER})
+    で新規作成された場合、直後の `if profile.role == PermissionRole.MANAGER: return`
+    で早期リターンし、その先の audit_services.log(...) を通らない。
+  - 新規職員ブランチ(_import_employee 内)は明示的に STAFF の profile を作るため
+    影響しないが、「既存職員だが権限管理で未設定」は get_profile() が None を返す
+    正常状態として存在しうる（permissions/services.py get_profile docstring）。
+  - 本改修の意図（コメント: 「CSV取込経由の所属長昇格が /audit/ 画面から
+    追跡できなかった」ため audit ログを追加）と矛盾する抜け。
+  - 旧実装も同じ挙動のため厳密には本PRの回帰ではないが、周辺を触っている今が
+    直しどき。get_or_create の created フラグを見て、新規作成時も audit ログを
+    出すのが筋。
+見送り（2026-09-10）／理由:
+  優先度「低」。旧実装からの既存挙動で本PRの回帰ではない。発生条件は「既存職員かつ権限管理で
+  PermissionProfile 未設定（get_profile()=None の正常状態）かつ CSV 所属長フラグ"1"」に限られ、
+  実データではほぼ出現しない周辺ケース。No.2 対応で _apply_manager_flag は触っているが、
+  get_or_create の created 分岐で audit ログを出す修正は今回の対応方針（高・中のみ修正）から外れる
+  ため見送る。将来 audit ログの網羅性を見直す際に併せて対応する。
+
+------------------------------------------------------------------------
+B. 再利用・単純化・効率 / 規約整合
+------------------------------------------------------------------------
+
+No.4  優先度: 低
+対象: accounts/views.py, accounts/services.py, accounts/csv_import_services.py
+      （監査 action 文字列の半角スペース→全角スペース化）
 内容:
-  手動登録フォーム StaffRegistForm.clean_employee_no()（accounts/forms.py 107-121行）は
-  ①unicodedata.normalize("NFKC", ...) で全角数字を半角に変換し、②employee_no.isdigit() で
-  数字以外を弾いている（xlsx 職員マスタ!B173「半角数字のみ許可。全角の場合は登録時に半角へ
-  変換」に対応）。
+  本PRで "職員マスタ CSV出力" → "職員マスタ　CSV出力"、"権限管理 自動リセット"
+  → "権限管理　自動リセット" 等、AuditLog.action の区切りを全角スペースへ統一した
+  （他アプリ audit/core/masters/organizations/documents/contracts は元々全角なので
+  方向性は正しい）。ただし:
+  - 既存 AuditLog レコードを書き換えるデータマイグレーションが無いため、
+    操作履歴ログ一覧に新旧2表記（"職員マスタ CSV出力" と "職員マスタ　CSV出力"）が
+    混在する。action 列は AuditLogSearchForm の検索対象ではないため実害は表示上のみ。
+  - 影響は軽微。運用開始前（本番リリース前）なら既存ログを一括UPDATEするか、
+    リリース後なら「表記ゆれが残る」ことを承知の上で許容する判断を明記しておくと良い。
+根拠: CLAUDE.md「原本フィデリティ」ではなく運用データの一貫性の観点。
+見送り（2026-09-10）／理由:
+  優先度「低」。実害は操作履歴ログ一覧の表示上の表記ゆれのみ（action 列は AuditLogSearchForm の
+  検索対象外）。本番リリース前の運用判断事項であり、コード修正ではなく既存ログの一括 UPDATE で
+  対応すべき性質のため、RELEASE_PREP_NOTES.md 等のリリース準備タスクとして扱う。コードとしての
+  修正対象にはしない。
 
-  一方 accounts/csv_import_services.py の _import_row() は
-  `employee_no = cell.strip()` のみで、上記の正規化・digit検証を一切行わずそのまま
-  Employee.objects.create_user()/employee.save() に渡している。
-
-失敗シナリオ:
-  HR側で作成されたCSVの職員番号列に全角の「１２３４」が含まれる行を取り込むと、
-  Employee.employee_no="１２３４"（全角）としてそのまま保存される。employee_noは
-  USERNAME_FIELDでありログイン画面（accounts/forms.py LoginForm）も正規化を行わないため、
-  当該職員が半角で"1234"と入力してログインしようとすると一致せず「職員番号またはパスワードが
-  誤っています」で恒久的にログインできなくなる。数字以外の文字が紛れ込むケース（全角/半角
-  混在の入力ミス等）も同様に無検証で保存される。
-
---- [優先度: 中] --------------------------------------------------
-visible_groups()だけkind引数を検証しておらず、想定外の値が契約書向けクエリにフォールスルーする
---------------------------------------------------------------------
-場所: permissions/services.py の visible_groups()（268-281行）
-
+No.5  優先度: 低
+対象: permissions/api.py:13-41  OptionListAPIView
 内容:
-  同ファイルの can_download()（72-91行）・department_ids_for_group_scope()（239-265行）は
-  いずれも「kindが既知の値でなければValueErrorを送出する」よう2026-08-24に修正済みで、
-  department_ids_for_group_scope()のコメントには「can_download()と同じ理由：想定外のkindを
-  "document"扱いで握りつぶさず、呼び出し側の誤り（typo等）として早期に気付けるようにする
-  （コード監査で発見：以前はkindを検証しておらず、"document"分岐へ暗黙にフォールスルー
-  していた、2026-08-24修正）」と明記されている。
+  LoginRequiredMixin のみで、権限管理画面にアクセスできない一般ロールでも
+  ?type=dept（全部署一覧）/ ?type=group&doc_kbn=contract（契約書向け分類一覧）を
+  直接取得できる。コード内で「[優先度: 低・見送り、コード監査 2026-08-25]」として
+  既に検討・保留済みだが、今回 permissions/ を対象にレビュー依頼を受けているため再掲。
+  返す情報が他画面でも同ロールに露出しうる部署名・分類名に限られるため実害は限定的、
+  という既存の判断は妥当。対応するなら SettingsMenuAccessMixin 相当の
+  ロールゲート（authority_management キー）を挟むのが他の設定系画面と揃う。
+根拠: CLAUDE.md「URL直打ちを想定してサーバー側も確認する」。ただし機微度が低く
+  既存で明示的に保留済みのため優先度は低。
+見送り（2026-09-10）／理由:
+  優先度「低」。permissions/api.py のコード内コメントで「[優先度: 低・見送り、コード監査
+  2026-08-25]」として既に明示的に検討・保留済みの事項。返す情報は他画面でも同ロールに露出しうる
+  部署名・分類名に限られ実害は限定的、という既存判断は妥当。本レビューでも同結論のため、
+  据え置く（新規の判断変更なし）。
 
-  しかし visible_groups() は
-    qs = profile.doc_visible_groups if kind == "document" else profile.contract_visible_groups
-  という三項式のままで、"document"以外は全て契約書向け（contract_visible_groups）として
-  扱われる。同じ2026-08-24の監査で同種の関数群が修正された際に、この関数だけ取りこぼされて
-  いると見られる（permissions/tests.pyにも can_download/department_ids_for_group_scope の
-  「不正kindはValueError」テストはあるが、visible_groups()の同種テストは無い）。
+------------------------------------------------------------------------
+C. 重複ロジックの確認結果（指摘なし / 良好）
+------------------------------------------------------------------------
+- 0人ガードは admin_count / would_orphan_admins（permissions/services.py）に集約され、
+  3経路（clean_role・_apply_manager_flag・reset_permission_profile_if_needed）が
+  共有している。LastAdminError も accounts/services.py で1定義。重複実装なし。良好。
+- FLAG_FIELDS / MULTI_FIELDS / CSV_EXPORT_FIELDS の単一情報源化、
+  filter_staff_queryset / filter_authority_queryset の form.is_valid() パターン、
+  department_composite_order_by への集約なども過去監査で解消済み。追加の重複は
+  見当たらなかった。
 
-失敗シナリオ:
-  呼び出し側（core/api.py・core/forms.py）でkind文字列をtypoした場合や、将来新しい
-  kind種別を追加した場合に、文書向けの分類フィルタのつもりが契約書向け
-  contract_visible_groupsを返してしまい、検索/保管画面で本来のフィルタと異なる分類が
-  表示される／表示されない不具合になる。現状のkind呼び出しは全てハードコードされた
-  "document"/"contract"の2値のみのため即座には顕在化しないが、他の姉妹関数が同じ理由で
-  過去に一度実際に修正された「取りこぼしやすい」バグクラスであり、修正の横展開漏れとして
-  記録に値する。
+------------------------------------------------------------------------
+D. CLAUDE.md 規約チェック結果
+------------------------------------------------------------------------
+- ビューはCBVのみ: 準拠（新規FBVなし）。
+- verbose_name / help_text / docstring / エラーメッセージ日本語: 準拠
+  （LastAdminError docstring・新規メッセージともに日本語）。
+- 例外処理の完成: StaffEditView は transaction.atomic() + IntegrityError /
+  LastAdminError を捕捉。CSV取込は行単位 except ValueError / except Exception で
+  logger.exception + 利用者向けメッセージ。準拠。
+- logger整備: 各 raise 経路の呼び出し側で logger.warning / logger.exception あり。
+  ただし No.3 のとおり audit ログ側に抜けあり。
+- Argon2優先: PASSWORD_HASHERS 未変更。set_password 経由のみ。準拠。
+- 監査イベントは audit 経由: 準拠（拒否・中止は logger 止まり、成功操作は
+  audit_services.log）。No.3 が唯一の例外。
+- ページネーション: Paginator 使用。準拠。
 
-
-====================================================================
-■ 再利用性・単純化・効率性
-====================================================================
-
---- [優先度: 高 / 効率性] ------------------------------------------
-権限管理一覧・CSV出力でPermissionProfileのM2MフィールドがprefetchされておらずN+1が発生する
---------------------------------------------------------------------
-場所:
-  - permissions/services.py visible_employees()（154-168行）
-  - templates/permissions/authority_list.html（98,101,102行）
-  - permissions/views.py _flags_row()（124-143行、AuthorityCsvExportViewから呼ばれる）
-
-内容:
-  AuthorityListView・AuthorityCsvExportViewの双方が経由する filter_authority_queryset()は
-  内部で visible_employees() を呼ぶが、そこでは
-    Employee.objects.select_related("department", "permission_profile")
-  のみで、PermissionProfileの3つのManyToManyField
-  （doc_visible_groups / contract_visible_departments / contract_visible_groups）への
-  prefetch_relatedが無い。
-
-  にもかかわらず、
-  - authority_list.htmlは各行で {% for g in profile.doc_visible_groups.all %} 等を3箇所、
-  - _flags_row()（CSV出力）も同じ3つのM2Mを .all() で参照
-  しており、行ごとに追加のDBクエリが発生する。
-
-失敗シナリオ:
-  一覧画面はPAGE_SIZE=100件/ページのため、1ページ表示するだけで最大300件（3M2M×100件）の
-  追加クエリが発行される。CSV出力はページングが無いため全件が対象になり、職員数が
-  数百〜千名規模になるとエクスポート1回でそれに比例したDBラウンドトリップが発生し、
-  レスポンスタイムが大きく劣化する（他画面のprefetch_related利用箇所と比べても対応漏れ）。
-
---- [優先度: 中 / 再利用性] ------------------------------------------
-_flags_row()がFLAG_FIELDS/MULTI_FIELDSを再利用せず個別にハードコードしている
---------------------------------------------------------------------
-場所: permissions/views.py _flags_row()（124-143行）、permissions/models.py FLAG_FIELDS/
-      MULTI_FIELDS（16-36行）
-
-内容:
-  permissions/models.pyのコメントが自ら明記している通り、PermissionProfileのフラグ一覧は
-  本来 FLAG_FIELDS / MULTI_FIELDS の単一情報源に集約されており
-  （AuthorityEditForm、accounts.services.reset_permission_profile_if_neededは既にこれを
-  参照している）、_flags_row()だけが「このリストとは別に手動同期が必要な3箇所目
-  （コード監査で発見、2026-08-24追記）。フラグ追加時はそちらの更新も忘れないこと」と
-  コメントで自認されたまま個別ハードコードの状態で残っている。
-
-失敗シナリオ:
-  将来PermissionProfileに新しい権限フラグを追加してFLAG_FIELDS/MULTI_FIELDSとフォームは
-  更新したが、CSVヘッダー（AuthorityCsvExportView.get内のwriterow）または_flags_row()の
-  どちらか一方の更新を忘れると、CSV出力の列がヘッダーとずれる、または新フラグの値が
-  出力されないまま気付かれずリリースされる（同種の既知リスクとして開発者自身が既に
-  コード上に警告コメントを残している箇所）。
-
-
-====================================================================
-■ CLAUDE.mdコーディング規約との整合性
-====================================================================
-
-- ビューはCBVのみ: permissions/accounts双方とも全ビューがView/BaseLoginView/BaseLogoutView
-  のサブクラスで、関数ベースビューは無し。準拠。
-- モデルのverbose_name/help_text/エラーメッセージ/docstringの日本語統一: 確認した範囲で
-  すべて日本語。準拠。
-- 例外処理（try/exceptで具体的な例外型を捕捉しlogger.exceptionで記録、bare except:禁止）:
-  StaffRegistView/StaffEditViewのIntegrityError捕捉、csv_import_servicesのUnicodeDecodeError/
-  ValueError捕捉はいずれも具体的な例外型＋理由コメント付きで、bare exceptも無し。準拠。
-  （csv_import_services.import_staff_csvの`except Exception:`は一見広すぎるが、「1行の失敗で
-  全体を止めない」という設計判断がコメントで明記されており、CLAUDE.mdの「本質的でない処理の
-  失敗で本処理まで巻き込まない場合は握りつぶして良いが理由をコメントに明記する」に該当し
-  問題無い）。
-- ログ整備（logger = logging.getLogger(__name__)、権限拒否等はlogger.warning）:
-  両アプリ全モジュールでlogger定義済み。SettingsMenuAccessMixin・AuthorityEditView.dispatchの
-  権限拒否時にlogger.warningあり。準拠。
-- 一覧画面のページネーションはDjango Paginator: AuthorityListView・StaffListViewともに
-  Paginator使用。準拠。
-- 未実装機能をUIに残す場合はdisabled+titleで明示（alertで誤魔化さない）:
-  permissions/accountsのテンプレートで確認した範囲では、alert()は実際に機能している
-  パスワードリセット結果表示（staff_edit.html）のみで、未実装の隠蔽には使われていない。準拠。
-
-- [優先度: 低] permissions/api.py OptionListAPIViewがSettingsMenuAccessMixin等のロール制御を
-  持たない
-  場所: permissions/api.py（13-33行）
-  内容: LoginRequiredMixinのみで、権限管理画面自体へのアクセス権が無いSTAFFロールでも
-  `/permissions/api/options/?type=dept`（全部署一覧）や`?type=group&doc_kbn=contract`
-  （契約書向け分類一覧）を直接叩いて取得できる。CLAUDE.mdが明記する既知の落とし穴
-  「ボタンの表示/非表示（クライアント側・APIのURL生成）と、そのボタンが叩くエンドポイントの
-  サーバー側権限チェックは別物」と同種のパターンに近い（このAPI自体は選択肢の一覧を返す
-  だけでPermissionProfileの中身は変更できないため実害は限定的だが、部署名・契約書向け
-  分類名は本来この画面へのアクセス権が無い職員には見せる想定が無い情報である可能性がある）。
-  優先度は低いが、他のpopup-select系オプションAPI（core.api.BaseOptionListAPIView等）の
-  ゲーティング方針と揃っているか、別途確認する価値がある。
-
-
-====================================================================
-■ まとめ（優先度別件数）
-====================================================================
-高: 2件（CSV職員番号の正規化漏れ／権限管理一覧・CSV出力のN+1）
-中: 2件（visible_groups()のkind検証漏れ／_flags_row()の手動同期リスク）
-低: 1件（OptionListAPIViewのロール制御欠如）
-
-※本レビューは指摘一覧のみで、修正は未実施。
+========================================================================
+以上。No.1 / No.2 を優先対応候補として推奨。
+========================================================================

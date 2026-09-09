@@ -1,10 +1,12 @@
 import logging
 
+from django.db import transaction
+
 from audit import services as audit_services
 from accounts.models import Employee, Position, Rank
 from core.text_normalization import filter_by_full_name
 from permissions.models import FLAG_FIELDS, MULTI_FIELDS, PermissionProfile, PermissionRole
-from permissions.services import would_orphan_admins
+from permissions.services import lock_active_admin_profiles, would_orphan_admins
 
 logger = logging.getLogger(__name__)
 
@@ -100,30 +102,38 @@ def reset_permission_profile_if_needed(
     # 自体の0人ガードを明記していないが、明示的なロール変更（権限管理編集の更新・CSV所属長
     # フラグ降格）だけ塞いでリセット経由を野放しにするとサイレントな孤児化が残る
     # （会話ログ 2026-09-04 の指摘①）。role変更前に判定し、孤児化するなら中止する。
-    if would_orphan_admins(profile, PermissionRole.STAFF):
-        raise LastAdminError(
-            "この職員はシステム唯一の「管理者」です。本支所・部課・職階・役職の変更、または"
-            "退職の設定を行うと管理者が不在になります。先に他の職員を「管理者」に設定してください。"
-        )
+    #
+    # 判定〜保存は transaction.atomic() + lock_active_admin_profiles() で囲む。呼び出し側
+    # （StaffEditView.post / _import_row）は既に atomic 内だが、ここで明示的に囲むことで本関数
+    # 単体でも 0人ガードの check-then-act 競合（review_code_permissions_accounts No.2）を
+    # 塞ぐ。在職管理者行をロックしてから admin_count するため、別セッション／CSV取込の別行と
+    # 同時に別の管理者を降格しても、片方の commit 後にもう片方が減った人数を見て中止できる。
+    with transaction.atomic():
+        lock_active_admin_profiles()
+        if would_orphan_admins(profile, PermissionRole.STAFF):
+            raise LastAdminError(
+                "この職員はシステム唯一の「管理者」です。本支所・部課・職階・役職の変更、または"
+                "退職の設定を行うと管理者が不在になります。先に他の職員を「管理者」に設定してください。"
+            )
 
-    for field in FLAG_FIELDS:
-        setattr(profile, field, False)
-    profile.role = PermissionRole.STAFF
-    for field in MULTI_FIELDS:
-        getattr(profile, field).clear()
-    profile.save()
-    logger.info(
-        "所属/職階/役職変更または退職により権限設定をリセットしました: employee_no=%s",
-        employee.employee_no,
-    )
-    audit_services.log(
-        employee=actor,
-        action="権限管理　自動リセット",
-        event_message=(
-            f"職員：{employee.name}({employee.employee_no}),"
-            "所属/職階/役職変更または退職に伴い権限設定を自動リセットしました"
-        ),
-    )
+        for field in FLAG_FIELDS:
+            setattr(profile, field, False)
+        profile.role = PermissionRole.STAFF
+        for field in MULTI_FIELDS:
+            getattr(profile, field).clear()
+        profile.save()
+        logger.info(
+            "所属/職階/役職変更または退職により権限設定をリセットしました: employee_no=%s",
+            employee.employee_no,
+        )
+        audit_services.log(
+            employee=actor,
+            action="権限管理　自動リセット",
+            event_message=(
+                f"職員：{employee.name}({employee.employee_no}),"
+                "所属/職階/役職変更または退職に伴い権限設定を自動リセットしました"
+            ),
+        )
 
 
 def build_staff_edit_diff_message(
