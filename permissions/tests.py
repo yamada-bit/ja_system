@@ -511,6 +511,28 @@ class AuthorityEditViewTests(TestCase):
         response = self.client.get(f"/permissions/{other_dept_employee.pk}/edit/")
         self.assertEqual(response.status_code, 403)
 
+    def test_denied_cross_target_access_creates_audit_log(self):
+        """review_rule_permissions_accounts No.4（2026-09-10ユーザー確定）：所属長が pk 直指定で
+        他部署職員の権限編集を試みた拒否は、documents/contracts の部署スコープ外直打ちと同様に
+        操作履歴ログ（action="アクセス拒否"）へも記録する。"""
+        from audit.models import AuditLog
+
+        other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="", section_name=""
+        )
+        other_dept_employee = Employee.objects.create_user(
+            employee_no="3", name="他部署太郎", password="x",
+            department=other_department, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.MANAGER)
+        response = self.client.get(f"/permissions/{other_dept_employee.pk}/edit/")
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="アクセス拒否", employee_no="1", event_message__contains="職員の権限設定"
+            ).exists()
+        )
+
     def test_manager_cannot_edit_employee_with_manager_role(self):
         """xlsx 権限管理!B113の「"一般"職員のみ」の裏返し：同部署でも所属長・管理者ロールの
         職員は編集不可（原本フィデリティ監査で発見：以前はロール制限が一切無かった）。"""

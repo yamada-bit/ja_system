@@ -1,191 +1,383 @@
-permissions/accounts アプリ CLAUDE.md コーディング規約準拠監査
-対象: permissions/{models,views,api,mixins,forms,services,urls,admin,apps,tests}.py
-      accounts/{models,views,services,forms,csv_import_services,urls,admin,apps,tests}.py
-      templates/permissions/*.html, templates/accounts/*.html
-実施日: 2026-08-25
-方式: CLAUDE.md「コーディング規約」の各項目ごとに全ファイルを読み込み突き合わせ。
-      あわせて `manage.py makemigrations --check --dry-run permissions accounts` と
-      `manage.py test permissions accounts`（101件）を実行し、モデル変更のマイグレーション
-      漏れ・現状のテスト全件PASSを確認済み。本レポートは棚卸しのみで、修正は行っていない。
+permissions / accounts アプリ　CLAUDE.md コーディング規約準拠監査
+================================================================================
+対象:
+  permissions/{models,views,api,mixins,forms,services,urls,admin,apps,tests}.py
+  accounts/{models,views,services,forms,csv_import_services,urls,admin,apps,tests}.py
+  templates/permissions/*.html, templates/accounts/*.html
+  （参照）config/settings/base.py の LOGGING / PASSWORD_HASHERS
 
-※ 前提として、両アプリは2026-08-25時点で既に複数回のコード監査・原本フィデリティ監査を
-  経ており（review_code_permissions_accounts.txtで指摘された「CSV職員番号の正規化漏れ」
-  「visible_groups()のkind検証漏れ」「権限管理一覧・CSV出力のN+1」「_flags_row()の手動同期
-  リスク」の4件は本監査時点でいずれも修正済みであることをコードで確認した）。本監査はその
-  後の状態に対して規約準拠の観点のみで棚卸しした結果。正しさのバグ探しは対象外。
+実施日: 2026-09-10
+方式:
+  CLAUDE.md「コーディング規約」および「原本フィデリティに関する運用方針」の各項目ごとに
+  上記ファイルを読み込み突き合わせ。あわせて下記を実行して確認（末尾参照）:
+    - manage.py makemigrations --check --dry-run permissions accounts
+      → No changes detected（モデルとマイグレーションに差分なし）
+    - manage.py test permissions accounts → Ran 157 tests, OK（全件PASS）
+  本レポートは棚卸しのみ。修正は一切行っていない。
+
+前回監査との関係:
+  本ファイルには 2026-08-25 実施の同名監査が存在した（指摘2件・低2）。その後、
+  会話ログ 2026-09-04 の管理者0人ガード（reset 経路への適用・退職者除外・行ロック）、
+  review_code_permissions_accounts No.1/No.2（AuthorityEditView.dispatch の認証順序、
+  lock_active_admin_profiles 導入）、Rev1.5/Rev1.6 反映などでコードが更新されている。
+  本レポートは 2026-09-10 時点のコードに対して規約準拠の観点のみで再棚卸しした結果。
+  正しさ（ロジックバグ）の検証は対象外。
 
 ================================================================================
 ■ 総合評価
 ================================================================================
 重大な規約違反は検出せず。CLAUDE.md「コーディング規約」の各項目はいずれも遵守されている。
-指摘は2件（低2）のみで、いずれも「違反」というより「改善余地」レベル。
+指摘は 9 件（中1／低8）。いずれも「違反」ではなく「改善余地」または「要確認」レベル。
+前回監査の指摘2件（No.1・No.2）は本監査時点でも未対応のまま有効（それぞれ本レポートの
+No.1・No.2 に再掲）。
 
 ================================================================================
-■ 規約項目ごとのチェック結果
+■ 規約項目ごとのチェック結果（OK 項目）
 ================================================================================
 
-[OK] ビューはCBVのみ
-  permissions/views.py・permissions/api.py・accounts/views.pyとも、全てdjango.views.View /
-  BaseLoginView / BaseLogoutViewを継承したクラスベースビュー。関数ベースビューは
-  permissions/views.py._flags_row()等のプライベートヘルパー関数のみで、URLに直接紐付く
-  関数ビューは無し（permissions/urls.py・accounts/urls.py双方で.as_view()経由のみ確認）。
+[OK] ビューはCBVのみ・関数ベースビューを追加しない
+  permissions/views.py, permissions/api.py, accounts/views.py はすべて django.views.View /
+  BaseLoginView / BaseLogoutView 継承の CBV。urls.py は permissions・accounts とも
+  .as_view() 経由のみ。URL に紐付く関数ビューは無し（_flags_row 等はプライベートヘルパー）。
 
-[OK] verbose_name/help_text/エラーメッセージ/docstring の日本語統一
-  permissions/models.py（PermissionProfile、PermissionRole）・accounts/models.py
-  （Employee、Rank、Position）の全フィールドでverbose_name/help_textが日本語。
-  forms.pyのlabels・エラーメッセージ、views.pyのmessages.error()/success()文言もすべて
-  日本語で統一されている。
+[OK] verbose_name / help_text / エラーメッセージ / docstring の日本語統一
+  permissions/models.py（PermissionProfile, PermissionRole, FLAG_FIELDS 等の説明）、
+  accounts/models.py（Employee, Rank, Position）の verbose_name / help_text はすべて日本語。
+  forms.py の labels・ValidationError 文言、views.py の messages.*() 文言、services.py の
+  LastAdminError メッセージも日本語で統一。クラス・非自明メソッドの docstring も日本語。
+  （help_text の粒度不揃いは No.5 で別途指摘）
 
-[OK] 設定のconfig/settings/base.py集約・.env経由読み込み
-  permissions/accountsアプリ自体に新規設定値の追加は無し（PAGE_SIZE=100はStaffListView/
-  AuthorityListViewのクラス属性としてハードコードされているが、documents/contracts等
-  他アプリのSearchViewと同じパターンで、アプリ固有の画面定数であり.env化が要求される
-  性質の値ではない）。
+[OK] 設定の config/settings/base.py 集約・.env 経由
+  両アプリに新規設定値の追加は無い。PAGE_SIZE=100 は StaffListView / AuthorityListView の
+  クラス属性だが、他アプリの検索ビューと同じ「画面固有の定数」であり .env 化が要求される
+  性質の値ではない（xlsx「1ページ100件程度」由来）。
 
-[OK] アップロードファイル本体の分離
-  permissions/accountsアプリはファイルアップロード機能を持たない（StaffCsvImportForm/
-  AuthorityCsvExportViewはいずれもアップロードされたCSVをメモリ上でストリーム処理する
-  だけで、MEDIA_ROOT配下にファイル実体を保存しない）ため対象外。
+[OK] アップロードファイル本体はコードと分離
+  両アプリはファイルアップロード機能を持たない。StaffCsvImportForm / 各 CsvExportView は
+  CSV をメモリ上でストリーム処理するのみで MEDIA_ROOT 配下に実体を保存しない。対象外。
 
-[OK] パスワードハッシュはArgon2優先
-  config/settings/base.py PASSWORD_HASHERSはArgon2PasswordHasherが先頭。accounts.models.
-  EmployeeManager.create_user()・StaffRegistForm.save()・StaffEditForm.save()・
-  csv_import_services._import_employee()はいずれもset_password()経由でのみパスワードを
-  設定しており、平文保存箇所は無い。パスワードリセット結果のalert表示（staff_edit.html
-  L123）・画面表示（staff_detail.html、AuthorityCsvExportView）もマスク表示に統一されて
-  おり、原本フィデリティ運用方針「パスワード等の機微情報はマスク表示にする」とも整合する。
+[OK] パスワードハッシュは Argon2 優先
+  base.py PASSWORD_HASHERS は Argon2PasswordHasher 先頭（並び順の変更なし）。
+  EmployeeManager.create_user / StaffRegistForm.save / StaffEditForm.save /
+  csv_import_services._import_employee はすべて set_password() 経由。平文保存箇所なし。
+  原本が平文表示・プリフィルする箇所（ログイン、職員マスタ詳細・編集、権限CSV出力）は
+  マスク表示（●●●●●● 等）に統一しており、原本フィデリティ運用方針とも整合。
 
-[OK] 監査ログの一元化（auditアプリ経由）
-  ログイン/ログアウト（LoginView.form_valid/form_invalid、LogoutView.dispatch）、職員マスタ
-  登録・更新・CSV出力・CSV取込（所属長昇格を含む）、権限管理更新・CSV出力、権限自動リセット
-  （accounts.services.reset_permission_profile_if_needed）のいずれもaudit_services.log()/
-  log_raw()を直接呼んでおり、記録漏れは無い（過去の監査で発見された記録漏れは全て解消済み）。
+[OK] 監査が必要なイベントの一元記録（audit アプリ経由）
+  ログイン成功／失敗（LoginView.form_valid / form_invalid、log_raw で氏名不明時も職員番号記録、
+  パスワードは非記録）、ログアウト（LogoutView.dispatch、AnonymousUser 化前に退避）、
+  職員マスタ 新規登録・更新（差分メッセージ build_staff_edit_diff_message）・CSV出力
+  （personal_info_flag=True）・CSV取込、権限管理 更新・CSV出力・自動リセット
+  （reset_permission_profile_if_needed、記録主体は actor）、CSV取込の所属長昇格／降格
+  （_apply_manager_flag）——いずれも audit_services.log() / log_raw() を直接通す。記録漏れなし。
+  権限不足による拒否（SettingsMenuAccessMixin.dispatch、AuthorityEditView.dispatch の
+  can_manage_target 不成立）は logger.warning 止まりで AuditLog へ残さない方針とも整合
+  （2026-09-09 ユーザー確定、review_rule_doc_contract.txt No.1）。※他部署直打ちの扱いのみ
+  No.4 で要確認。
 
-[OK] core相当の共通基底クラス・サービス関数への集約（重複排除）
-  permissions.services.is_admin()はmasters/views.pyから`is_admin as _is_admin`としてエイリアス
-  参照されており、ロール判定ロジックの重複は無い（実際にgrepで確認、独自実装の残存無し）。
-  CSVの数式インジェクション対策（core.csv_services.sanitize_csv_row）、二重送信対策
-  （core.double_submit）、設定メニューアクセス制御（permissions.mixins.
-  SettingsMenuAccessMixin）、氏名の複合検索（core.text_normalization.filter_by_full_name）は
-  いずれもcore側の共通実装を参照するだけで、両アプリ内に重複実装は無い。
-  permissions.models.FLAG_FIELDS/MULTI_FIELDS/CSV_EXPORT_FIELDSがAuthorityEditForm・
-  accounts.services.reset_permission_profile_if_needed・AuthorityCsvExportViewの単一情報源
-  として機能しており、過去に発生した「ハードコードの重複によるドリフト」（2026-08-24/25の
-  一連の修正）が再発しない設計になっている。
+[OK] 共通処理の core / 共通サービスへの集約（重複排除）
+  permissions.services.is_admin() は masters/views.py から `is_admin as _is_admin` で
+  エイリアス参照（独自実装の残存なし）。sanitize_csv_row（core.csv_services）、
+  double_submit（core）、SettingsMenuAccessMixin（permissions.mixins）、
+  filter_by_full_name（core.text_normalization）、department_composite_order_by
+  （organizations.services）はいずれも共通実装を参照するのみ。
+  permissions.models.FLAG_FIELDS / MULTI_FIELDS / CSV_EXPORT_FIELDS が
+  AuthorityEditForm・reset_permission_profile_if_needed・AuthorityCsvExportView の
+  単一情報源として機能し、過去の「ハードコード重複によるドリフト」再発を
+  テスト（test_csv_export_fields_matches_flag_and_multi_fields）で担保。
 
 [OK] コメントは「なぜ」を詳しく書く
-  全編にわたり、xlsxの該当セル番地、過去の監査での発見経緯・修正日、他ファイルとの対称性の
-  理由等、非自明な設計判断の「なぜ」が丁寧に記録されている。「何をしているか」の説明に
-  留まるコメントはほぼ見当たらない。特にpermissions/models.py FLAG_FIELDS/CSV_EXPORT_FIELDS
-  のコメントは、3箇所の手動同期が必要な理由とそれぞれの検知手段（テスト）まで踏み込んで
-  記録されている。
+  全編にわたり xlsx セル番地、過去監査での発見経緯・修正日、他ファイルとの対称性の理由、
+  既知の制約・将来の注意点が丁寧に記録されている。特に
+  permissions/models.py の FLAG_FIELDS / CSV_EXPORT_FIELDS、
+  permissions/services.py の lock_active_admin_profiles / admin_count、
+  accounts/services.py の reset_permission_profile_if_needed のコメントは、
+  設計判断の背景と検知手段（対応テスト名）まで踏み込んでいる。
 
-[OK] ログの整備
-  permissions/accountsのviews.py・api.py・services.py・csv_import_services.py・mixins.pyは
-  いずれも`logger = logging.getLogger(__name__)`を用意し、権限拒否（SettingsMenuAccessMixin.
-  dispatch、AuthorityEditView.dispatch）、退職済み職員のログイン試行（LoginForm.
-  confirm_login_allowed）、ログイン失敗（LoginView.form_invalid）といったセキュリティ上
-  意味のある事象をlogger.warningで記録している。models.pyはlogger定義のみで発火箇所が
-  無いが、リクエスト処理を持たないモジュールのため妥当（違反ではない）。
+[OK] ログの整備（logger = logging.getLogger(__name__)）
+  views.py / api.py / services.py / csv_import_services.py / mixins.py はいずれも
+  __name__ ロガーを用意。権限拒否・退職者ログイン試行・ログイン失敗・想定外 CSV 行エラー・
+  管理者0人ガード発動などセキュリティ／運用上意味のある事象を logger.warning /
+  logger.exception で記録。出力先は base.py LOGGING に一元化（root ハンドラ経由、
+  個別 logger 登録不要）。
+  （models.py のロガー未発火・CSV decode 失敗の未ログは No.6・No.8 で指摘）
 
-[OK] 例外処理の完成度
-  bare `except:`はpermissions/accounts配下に0件（grep確認済み）。StaffRegistView.post・
-  StaffEditView.postのIntegrityError捕捉はlogger.exception+利用者向けmessages.errorの
-  組み合わせで完成している。accounts.csv_import_services.import_staff_csvの
-  `except Exception:`は「1行の失敗で全体を止めない」という設計判断がコメントで明記
-  されており、CLAUDE.md「本質的でない処理の失敗で本処理まで巻き込まない場合は握りつぶして
-  良いが理由をコメントに明記する」に該当し問題無い（ValueErrorと想定外Exceptionを分けて
-  捕捉し、後者のみ汎用メッセージに丸める設計も規約の「利用者にわかるエラー応答を返す」に
-  沿っている）。
+[OK] 例外処理の完成（具体的な例外型・logger.exception・利用者向け応答、bare except 不使用）
+  bare `except:` は permissions/accounts 配下に 0 件。
+  StaffRegistView.post / StaffEditView.post の IntegrityError は logger.exception +
+  messages.error + フォーム再表示で完成。StaffEditView は LastAdminError も捕捉し
+  transaction.atomic() ごとロールバックして再表示。
+  csv_import_services.import_staff_csv の `except Exception:` は「1行の失敗で取込全体を
+  止めない」という設計判断がコメントで明記され、ValueError（想定内・日本語メッセージ）と
+  想定外 Exception（logger.exception + 汎用メッセージに丸め）を分離しており、規約の
+  「握りつぶす場合は理由をコメントに明記」「利用者にわかるエラー応答を返す」に合致。
 
-[OK] 一覧画面のページネーションはDjango Paginator
-  AuthorityListView・StaffListViewともにDjango Paginator使用（PAGE_SIZE=100）。
-  authority_list.html/staff_list.htmlの«/＜/＞/»ボタンはpage_obj.has_previous/has_nextに
-  連動したdisabled切替で、「機能しない静的ページャー」には該当しない。
+[OK] 一覧画面のページネーションは Django Paginator
+  AuthorityListView / StaffListView とも Django Paginator（PAGE_SIZE=100）。
+  authority_list.html / staff_list.html のページャーは page_obj.has_previous / has_next
+  連動の disabled 切替で、機能しない静的ページャーではない。
 
-[OK] 未実装機能のdisabled+title、alert()誤魔化しの禁止
-  permissions/accounts配下でUIボタンをalert()で偽装している箇所は無し。staff_edit.html
-  L123のalert()はパスワードリセット結果表示という実際に機能している通知であり、
-  「未実装機能をalert()で誤魔化す」パターンには該当しない（review_code_permissions_
-  accounts.txtでも同じ結論）。電子決裁3フラグ（eapproval_view_setting等）はチェックボックス
-  として通常通り編集・保存できる機能であり、「連動ロジックが保留」なのはフラグの先の業務
-  ロジックであって画面要素自体が未実装なわけではないため、disabled+titleの対象外
-  （CLAUDE.md「既知の未実装・保留事項」の記述と整合）。
+[OK] 未実装・対象外機能の disabled+title、alert() 誤魔化しの禁止
+  両アプリ配下に「未実装機能を alert() で偽装」する箇所は無い。
+  staff_edit.html:129 の alert("パスワードをリセットしました…") は原本 resetPassword() の
+  移植で、実際に機能している通知（入力欄へ ja+下4桁をセットし、保存は「更新」押下時）。
+  CLAUDE.md「原本の alert() 自体が最終仕様として機能している箇所はそのまま踏襲」に該当。
+  電子決裁3フラグ（eapproval_*）はチェックボックスとして通常どおり編集・保存でき、
+  「連動ロジックが保留」なのはフラグの先の業務ロジックであって画面要素の未実装ではない
+  （CLAUDE.md「既知の未実装・保留事項」と整合）。
 
-[OK] ファイル役割分担
-  permissionsアプリはmodels.py/views.py/api.py/services.py/mixins.py/forms.py/urls.py/
-  admin.py/apps.py/tests.pyの標準構成。accountsアプリはAPIエンドポイントを持たないため
-  api.pyが無く、代わりにcsv_import_services.pyでCSV取込のビジネスロジックをviews.pyから
-  分離している（views.pyはCsvImportError捕捉とmessages変換のみで、行単位の解析・DB更新
-  ロジックはcsv_import_services.py側に閉じている）。ビジネスロジックのviews.pyへの直書きは
-  見当たらない。
+[OK] ファイル役割分担パターン
+  permissions: models / views / api / services / mixins / forms / urls / admin / apps / tests。
+  accounts: API エンドポイントを持たないため api.py が無く、CSV 取込のビジネスロジックを
+  csv_import_services.py に分離（views.py は CsvImportError 捕捉と messages 変換のみ）。
+  ビジネスロジックの views.py 直書きは見当たらない。
 
-[OK] Djangoテンプレートの複数行コメント既知の落とし穴
-  templates/permissions・templates/accounts配下に`{# ... #}`形式の複数行コメントは無く
-  （grep確認済み）、staff_detail.htmlのパスワードマスク表示に関する説明コメントは正しく
-  `{% comment %}...{% endcomment %}`を使用している。
-
-[要確認] 新機能追加時のユニットテスト追加（詳細は指摘1参照）
+[OK] Django テンプレート複数行コメントの既知トラップ
+  `{# ... #}` を改行をまたいで使っている箇所は無い（authority_list.html:59-61 は各行が
+  単独で閉じた1行コメントで描画は正常。ただし趣旨として No.9 参照）。staff_detail.html 等の
+  複数行説明は {% comment %}…{% endcomment %} を使用。
 
 ================================================================================
 ■ 指摘一覧
 ================================================================================
 
 --------------------------------------------------------------------------------
-[低] CSV職員番号の全角→半角正規化（2026-08-25修正）に対応する単体テストが無い
+No.1 ［低］CSV 職員番号の NFKC 正規化に対応する CSV 取込側の回帰テストが依然として無い
 --------------------------------------------------------------------------------
-対象:
-  - accounts/csv_import_services.py:118 _import_row()内のunicodedata.normalize("NFKC", ...)
-  - accounts/tests.py ImportStaffCsvServiceTests（対応するテストケースが存在しない）
+【2026-09-10 見送り／理由: 優先度「低」。実装済みロジックへの追加テストで、規約準拠上の
+  違反ではない。前回監査でも見送り済みでコード内コメントにも記録済み。今回の高・中対応の
+  スコープ外。】
 
-内容:
-  同じ2026-08-24〜25の一連の監査で見つかった姉妹バグ「rank_code/position_codeの
-  choices未検証」には test_invalid_rank_code_is_rejected（accounts/tests.py:694）・
-  test_invalid_position_code_is_rejected（同:705）という回帰テストが追加されている一方、
-  同じ_import_row()内で同時に修正された「employee_noのNFKC正規化漏れ」
-  （accounts/csv_import_services.py:113-120のコメントで2026-08-25修正と明記）には、
-  StaffRegistFormTests.test_fullwidth_employee_no_converted_to_halfwidth
-  （accounts/tests.py:108、手動登録フォーム側の同種テスト）に対応するCSV取込側のテストが
-  無い（ImportStaffCsvServiceTestsをgrepしても"NFKC"/"全角"/"fullwidth"は0件）。
+対象ファイル:
+  - accounts/csv_import_services.py:126（_import_row 内 unicodedata.normalize("NFKC", employee_no)）
+  - accounts/csv_import_services.py:119-125（コード内に「優先度: 低・見送り、規約準拠監査
+    2026-08-25」として同趣旨の見送りコメントが既にある）
+  - accounts/tests.py ImportStaffCsvServiceTests（対応テストケースが存在しない）
 
-  CLAUDE.mdの「新機能追加時は同様の観点でユニットテストを追加する」、および
-  「同一注記が複数箇所に繰り返し付いている場合...1箇所直して終わりにせず、該当箇所を
-  1つずつ個別に開いて実装済みか確認する」の運用方針に照らすと、同じ関数内で同時に
-  修正された2つのバグのうち片方だけテストが横展開されていない状態であり、将来
-  _import_row()をリファクタリングした際にNFKC正規化だけ回帰が検知されないリスクが残る。
+優先度: 低（前回監査 No.1 の再掲。実装済みロジックへの追加テストで緊急性なし）
 
-対応方針（参考、修正はまだしない）:
-  ImportStaffCsvServiceTestsに、全角数字を含む職員番号列（例："１２３４"）のCSV行を
-  取り込んだ際、Employee.employee_noが半角"1234"として保存されることを検証する
-  テストケースを追加する（StaffRegistFormTests.test_fullwidth_employee_no_converted_to_
-  halfwidthと同じ観点）。
+根拠:
+  CLAUDE.md「新機能追加時は同様の観点でユニットテストを追加する」、および「同一注記が
+  複数箇所に繰り返し付いている場合…1箇所直して終わりにせず個別に確認する」。
+  2026-08-24〜25 の一連の監査で _import_row() 内の姉妹バグ「rank_code / position_code の
+  choices 未検証」には test_invalid_rank_code_is_rejected / test_invalid_position_code_is_
+  rejected が追加されたが、同関数内で同時に修正された「employee_no の全角→半角正規化漏れ」
+  には CSV 取込側テストが無い（grep で NFKC/全角/fullwidth は accounts/tests.py:108 の
+  StaffRegistFormTests＝手動フォーム側のみヒット）。将来 _import_row() をリファクタリング
+  した際、NFKC 正規化だけ回帰が検知されないリスクが残る。
 
 --------------------------------------------------------------------------------
-[低] permissions/api.py OptionListAPIViewがSettingsMenuAccessMixin等のロール制御を持たない
+No.2 ［低］permissions/api.py OptionListAPIView がロールベースのアクセス制御を持たない
 --------------------------------------------------------------------------------
-対象: permissions/api.py:13-30（OptionListAPIView docstring内に既に「優先度: 低・見送り、
-      コード監査 2026-08-25」として記録済み）
+【2026-09-10 見送り／理由: 優先度「低」。前回監査で見送り済み・コード側 docstring に理由
+  （この API 自体は PermissionProfile を変更できず、返す情報は他の popup-select 系でも
+  同種ロールに露出しうる）明記済み。他の popup-select 系 API のゲーティング方針全体と
+  揃える議論が必要で、単体修正の対象外。】
 
-内容:
-  LoginRequiredMixinのみで、権限管理画面自体へのアクセス権が無いSTAFFロールでも
-  `/permissions/api/options/?type=dept`（全部署一覧）や`?type=group&doc_kbn=contract`
-  （契約書向け分類一覧）を直接叩いて取得できる。CLAUDE.mdが明記する既知の落とし穴
-  「ボタンの表示/非表示（クライアント側・APIのURL生成）と、そのボタンが叩くエンドポイント
-  のサーバー側権限チェックは別物」と同種のパターンに近い。ただしこの指摘自体は
-  review_code_permissions_accounts.txtで既に発見・記録され、コード側のdocstringにも
-  「見送り」の判断理由（このAPI自体はPermissionProfileの中身を変更できず、返す情報も
-  他画面のpopup-select等で同種ロールに露出しうる情報のため実害は限定的）が明記済みで、
-  ユーザー判断待ちの既知事項として扱われている状態。新規指摘ではなく、既存の記録が
-  今回の規約準拠監査でも変わらず有効であることの確認に留まる。
+対象ファイル:
+  - permissions/api.py:13-30（OptionListAPIView。docstring 内に「優先度: 低・見送り、
+    コード監査 2026-08-25」として記録済み）
+  - permissions/urls.py:11（api/options/ は LoginRequiredMixin のみ）
+
+優先度: 低（前回監査 No.2 の再掲。既知・見送り済み事項の有効性確認）
+
+根拠:
+  CLAUDE.md 既知の落とし穴「ボタンの表示/非表示（クライアント側・API の URL 生成）と、
+  そのボタンが叩くエンドポイントのサーバー側権限チェックは別物」と同種のパターン。
+  権限管理画面へアクセスできない STAFF ロールでも
+  /permissions/api/options/?type=dept（全部署一覧）や ?type=group&doc_kbn=contract
+  （契約書向け分類一覧）を直接取得できる。
+  ただしコード側 docstring に見送り理由（この API 自体は PermissionProfile を変更できず、
+  返す情報＝部署名・分類名は検索/保管の popup-select 等で同種ロールに露出しうる情報のため
+  実害は限定的）が明記済みで、他の popup-select 系オプション API のゲーティング方針と
+  揃えるかは別途要検討、という状態。テスト（OptionListAPIViewTests）も
+  「login 必須のみ」を確認しており、ロール制御が無いこと自体は現仕様として扱われている。
+
+--------------------------------------------------------------------------------
+No.3 ［低］permissions/views.py で csv / HttpResponse をメソッド内ローカルインポートしている
+--------------------------------------------------------------------------------
+【2026-09-10 見送り／理由: 優先度「低」。動作影響なし・スタイルの不統一のみで規約に明文
+  規定なし。今回の高・中対応のスコープ外。】
+
+対象ファイル:
+  - permissions/views.py:69-71（AuthorityCsvExportView.get 内の
+    `import csv` / `from django.http import HttpResponse`）
+
+優先度: 低（動作影響なし・スタイルの不統一）
+
+根拠:
+  CLAUDE.md に import 位置の明文規定は無いが、同一機能である accounts/views.py は
+  `import csv` をモジュール先頭（1 行目）・`from django.http import HttpResponse` も
+  先頭（10 行目）に置いており、同じコードベース内で書き方が割れている。
+  規約「共通処理・スタイルの一貫性」の観点、および他の全ファイルがトップレベル import で
+  統一されている点から、permissions/views.py も先頭に移すのが自然。
+
+--------------------------------------------------------------------------------
+No.4 ［中］AuthorityEditView の他部署職員編集試行が logger.warning 止まりで、
+         audit.services.log_denied_cross_department_access を通していない（要確認）
+--------------------------------------------------------------------------------
+【2026-09-10 対応済み: ユーザー確定により「AuditLog へ記録する」方針を採用。
+  AuthorityEditView.dispatch の can_manage_target 不成立分岐に
+  audit_services.log_denied_cross_department_access(entity_name="職員の権限設定") を追加
+  （logger.warning は従来どおり併存）。permissions/views.py:164-181。
+  回帰テスト permissions/tests.py
+  AuthorityEditViewTests.test_denied_cross_target_access_creates_audit_log
+  を追加。python manage.py test permissions accounts → Ran 158 tests, OK。】
+
+対象ファイル:
+  - permissions/views.py:155-170（AuthorityEditView.dispatch。can_manage_target が
+    False のとき logger.warning + PermissionDenied のみ）
+  - permissions/services.py:199-215（can_manage_target。target.department_id !=
+    viewer.department_id で False を返す＝他部署職員への pk 直打ちアクセス）
+
+優先度: 中（規約の一条項と、CLAUDE.md 内の別記述との整合が判断待ちのため）
+
+根拠と論点:
+  CLAUDE.md コーディング規約「監査が必要なイベント」節:
+  「『権限に関わる操作』のうち成功した操作と“他部署リソースへの URL 直打ちアクセス試行”
+   （audit.services.log_denied_cross_department_access）は AuditLog（操作履歴ログ画面・
+   CSV 出力の対象）へ記録する」。
+  一方で同節は「masters（分類・カテゴリー）の部署スコープ外直打ちは管理者用画面のため
+  logger.warning のみ」とも定めている。
+
+  AuthorityEditView は「権限に関わる操作」の中核画面で、所属長が pk を直指定して
+  他部署の職員（または同部署でも所属長／管理者ロールの職員）の権限編集を試みる経路は
+  まさに “他部署リソースへの URL 直打ちアクセス試行” に該当する。現状は
+  logger.warning（employee_no + target_employee_no）だけで AuditLog には残らない。
+
+  ただし権限管理画面は管理者・所属長のみアクセス可能（一般ロールは
+  SETTINGS_MENU_VISIBLE_ROLES で 403）であり、「管理者用画面だから logger.warning のみ」
+  という masters と同じ扱いに倒す解釈も成り立つ。masters より広く所属長にも開いている点で
+  documents/contracts 側（log_denied_cross_department_access を通す）に近いとも言える。
+
+  → どちらの扱いにするか（AuditLog へ記録するか logger.warning のみに留めるか）は
+    ユーザー確認が必要。前回監査（2026-08-25）ではこの観点が挙がっていなかった。
+
+--------------------------------------------------------------------------------
+No.5 ［低］PermissionProfile の一部 BooleanField に help_text が無く、隣接フィールドと粒度が不揃い
+--------------------------------------------------------------------------------
+【2026-09-10 見送り／理由: 優先度「低」。規約「help_text は日本語」自体は満たしており
+  （"無い"だけ）、改善余地レベル。今回の高・中対応のスコープ外。】
+
+対象ファイル:
+  - permissions/models.py:93（doc_download）
+  - permissions/models.py:121（contract_download）
+  - permissions/models.py:124-126（eapproval_view_setting / eapproval_doc_name_manage /
+    eapproval_retention）
+
+優先度: 低（規約「help_text は日本語」自体は満たす＝“無い”だけ。改善余地）
+
+根拠:
+  同じモデル内の doc_retention_edit（:88-92）・contract_edit（:112-120）は
+  xlsx セル番地・OFF 時の挙動・関連する services 関数まで help_text に書かれているのに対し、
+  ダウンロード系3フラグと電子決裁3フラグは verbose_name のみ。Rev 経緯・OFF 時挙動の
+  追跡性の観点で、少なくとも xlsx 番地（権限管理!B177-180 / B193-194、B211-215）を
+  help_text に補うと粒度が揃う。CLAUDE.md「非自明な設計判断・既知の制約を書き残す」。
+
+--------------------------------------------------------------------------------
+No.6 ［低］accounts/models.py・permissions/models.py の logger が定義のみで未使用
+--------------------------------------------------------------------------------
+【2026-09-10 見送り／理由: 優先度「低」。規約「logger を用意する」の趣旨は満たしており
+  違反ではない（前回監査でも OK 判定）。今回の高・中対応のスコープ外。】
+
+対象ファイル:
+  - accounts/models.py:6（logger = logging.getLogger(__name__)、発火箇所なし）
+  - permissions/models.py:5（同上）
+
+優先度: 低（違反ではない。前回監査 No.（OK 判定）と同じ結論）
+
+根拠:
+  CLAUDE.md「新しいモジュールでは logger = logging.getLogger(__name__) を用意し」に沿って
+  用意されているが、両 models.py はリクエスト処理を持たず logger.* 呼び出しが1つも無い。
+  厳密には「用意する」の趣旨を満たしているため違反ではないが、未使用の変数が残るより、
+  (a) 削除する、または (b) Employee.has_perm / has_module_perms（:96-100、is_superuser を
+  そのまま返す非自明な分岐で docstring も無い）等に実際の記録を入れる、のどちらかに
+  倒すと意図が明確になる。
+
+--------------------------------------------------------------------------------
+No.7 ［低］accounts/admin.py・permissions/admin.py が Django 雛形のまま（英語コメント・モデル未登録）
+--------------------------------------------------------------------------------
+【2026-09-10 見送り／理由: 優先度「低」。他アプリの admin.py 実態と揃えるべきかが要確認
+  （本監査の範囲外と記載あり）。今回の高・中対応のスコープ外。】
+
+対象ファイル:
+  - accounts/admin.py（全内容が `from django.contrib import admin` + `# Register your models here.`）
+  - permissions/admin.py（同上）
+
+優先度: 低
+
+根拠:
+  CLAUDE.md「コメントは日本語で統一」。`# Register your models here.` は Django の
+  スキャフォールドそのままで、日本語規約に照らせば削除するか日本語の意図コメントに
+  置き換えるのが望ましい。
+  加えて、本システムは Django カスタムユーザー（is_staff / is_superuser を保持）を使うが
+  Employee / PermissionProfile とも admin 未登録。全管理を業務画面に寄せる意図であれば
+  admin.py にその旨を1行日本語コメントで残すと、後任が「登録漏れ」と誤認しない。
+  （他アプリの admin.py 実態と揃えるべきかは要確認。organizations/masters 等が
+  どうしているかは本監査の範囲外）
+
+--------------------------------------------------------------------------------
+No.8 ［低］CSV 取込のファイル文字コード不正（UnicodeDecodeError）が logger に記録されない
+--------------------------------------------------------------------------------
+【2026-09-10 見送り／理由: 優先度「低」。具体型で捕捉し利用者向けメッセージへ変換済みで
+  規約の主要要件は満たす。今回の高・中対応のスコープ外。】
+
+対象ファイル:
+  - accounts/csv_import_services.py:63-66（file_obj.read().decode("utf-8-sig") の
+    UnicodeDecodeError を捕捉して CsvImportError を raise、logger 出力なし）
+  - accounts/csv_import_services.py:69-74（空ファイル・ヘッダー不一致の CsvImportError も同様）
+
+優先度: 低
+
+根拠:
+  CLAUDE.md「ファイル I/O・外部境界…は try/except で具体的な例外型を捕捉し、
+  logger.exception(...) で原因を記録した上で、利用者にわかるエラー応答を返す」。
+  現状 UnicodeDecodeError は具体型で捕捉し利用者向けメッセージ（CsvImportError）へは
+  変換しているが、logger.warning / logger.exception が無い。呼び出し側 StaffCsvImportView.post
+  も CsvImportError を messages.error にするだけでログを残さないため、文字コード起因の
+  取込失敗がサーバーログに一切痕跡を残さない。
+  ※ 空ファイル・列構成不一致は明確な利用者入力ミスなのでログ不要という整理も可能。
+    最低限 UnicodeDecodeError 経路だけは logger.warning を入れると規約の趣旨に沿う。
+  （_import_row 内の想定外 Exception は既に logger.exception 済みで、この指摘の対象外）
+
+--------------------------------------------------------------------------------
+No.9 ［低］templates/permissions/authority_list.html の3行連続 {# #} コメントは {% comment %} が望ましい
+--------------------------------------------------------------------------------
+【2026-09-10 見送り／理由: 優先度「低」。各行が単独で閉じた1行コメントで描画は正常、
+  既知トラップには現状該当しない。今回の高・中対応のスコープ外。】
+
+対象ファイル:
+  - templates/permissions/authority_list.html:59-61（{# … #} が3行連続）
+
+優先度: 低（描画は正常。既知トラップ回避の趣旨からの改善提案）
+
+根拠:
+  各行が単独で閉じた1行 `{# #}` のため、CLAUDE.md が警告する「`.` が改行にマッチせず
+  生テキストが表示される」トラップには現状該当しない（描画正常）。
+  ただし規約は「複数行コメントは {% comment %}…{% endcomment %} を使うこと」と明記して
+  おり、意味上ひとまとまりの3行注記なので {% comment %} に寄せるほうが、後から1行に
+  まとめようとした人が誤って改行またぎの {# #} を書くリスクを断てる。
 
 ================================================================================
 ■ 実行した確認コマンドと結果
 ================================================================================
-- `manage.py makemigrations --check --dry-run permissions accounts`
+- manage.py makemigrations --check --dry-run permissions accounts
   → "No changes detected in apps 'accounts', 'permissions'"
-  （モデル定義とマイグレーションの間に差分は無い）
+    （モデル定義とマイグレーションの間に差分なし。※.env の一部行に対する
+     "Invalid line:" 警告が出るが django-environ の既知挙動で本チェック結果に影響なし）
 
-- `manage.py test permissions accounts`
-  → Ran 101 tests in 13.486s — OK（全件PASS。標準エラー出力に現れるトレースバックは
-  IntegrityError等を意図的に発生させる例外系テストのmock出力で、テスト結果自体には
-  影響なし）
+- manage.py test permissions accounts
+  → Ran 157 tests in 21.372s — OK（全件 PASS）
+    標準エラーへ出るトレースバック／WARNING は、IntegrityError・LastAdminError・
+    権限外アクセス等を意図的に発生させる例外系テストの出力で、結果自体には影響なし。
+
+================================================================================
+■ 補足（今回 OK と判断したが判断の分かれ得る箇所）
+================================================================================
+- AuthorityEditView が SettingsMenuAccessMixin を使わず can_manage_target に直接依存する点は、
+  permissions/mixins.py の docstring で「対象データ単位のより詳細なアクセス制御を自前で
+  行う画面には mixin を適用しない（二重管理を避ける）」と明記されており、意図的な設計。
+  ただし AuditLog 記録の扱いは No.4 のとおり要確認。
+- reset_permission_profile_if_needed / _apply_manager_flag / clean_role の3経路で
+  管理者0人ガード（would_orphan_admins + lock_active_admin_profiles）を共有している点は、
+  重複排除の観点でむしろ規約に合致（services 集約・単一情報源）。

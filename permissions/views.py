@@ -166,6 +166,16 @@ class AuthorityEditView(LoginRequiredMixin, View):
                 "権限管理編集の対象外アクセスを試行: employee_no=%s target_employee_no=%s",
                 request.user.employee_no, self.employee.employee_no,
             )
+            # 権限管理は「権限に関わる操作」の中核画面で、所属長が pk を直指定して他部署の職員
+            # （または同部署でも所属長・管理者ロールの職員）の権限編集を試みる経路は
+            # 「他部署リソースへの URL 直打ちアクセス試行」に該当する。documents/contracts の
+            # 部署スコープ外直打ちと同様、エンドユーザー向けの操作履歴ログにも残す
+            # （CLAUDE.md「監査が必要なイベント」節、review_rule_permissions_accounts No.4、
+            # 2026-09-10 ユーザー確定。管理者用画面のため logger.warning 止まりとする masters
+            # とは異なり、権限管理画面は所属長にも開かれており IDOR 的試行の監査価値が高い）。
+            audit_services.log_denied_cross_department_access(
+                employee=request.user, entity_name="職員の権限設定", pk=self.employee.pk
+            )
             raise PermissionDenied("この職員の権限は編集できません。")
         return super().dispatch(request, *args, **kwargs)
 
