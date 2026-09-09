@@ -728,6 +728,44 @@ class NoticeFilterTests(TestCase):
         qs = build_queryset(form, employee=self.employee, notice="expiring_soon")
         self.assertIn(within, qs)
 
+    def test_expired_notice_filters_to_expiry_date_before_today_only(self):
+        """[review_test_doc_contract.txt No.21 追加] メイン画面お知らせ「有効期限切れ」
+        リンクからの遷移（notice="expired"）。expiry_date < 本日 のみが対象で、
+        本日ちょうど（満了日当日）は含まない（expiry_date__lt today の境界）。"""
+        today = datetime.date.today()
+        expired = self._create_document(today - datetime.timedelta(days=1))
+        due_today = self._create_document(today)
+        future = self._create_document(today + datetime.timedelta(days=1))
+        form = SearchForm(data={})
+        qs = build_queryset(form, employee=self.employee, notice="expired")
+        self.assertIn(expired, qs)
+        self.assertNotIn(due_today, qs)
+        self.assertNotIn(future, qs)
+
+    def test_recently_deleted_notice_switches_to_deleted_records_within_threshold(self):
+        """[review_test_doc_contract.txt No.22 追加] notice="recently_deleted" は
+        build_queryset がクエリセットを is_deleted=True 側へ切り替える唯一の入口
+        （「削除済み文書はダウンロード不可だが閲覧のみ可能」仕様の入口）。かつ
+        _apply_notice_filter が deleted_at を NOTICE_DELETED_THRESHOLD_MONTHS 以内に絞る。
+        既定除外（is_deleted=False のみ）しか見ていなかった既存テストの裏返し。"""
+        from documents.models import Document
+
+        recent = self._create_document(datetime.date(2030, 1, 1))
+        old = self._create_document(datetime.date(2030, 1, 1))
+        alive = self._create_document(datetime.date(2030, 1, 1))
+        now = timezone.now()
+        Document.objects.filter(pk=recent.pk).update(is_deleted=True, deleted_at=now)
+        Document.objects.filter(pk=old.pk).update(
+            is_deleted=True, deleted_at=now - datetime.timedelta(days=120)
+        )
+        form = SearchForm(data={})
+        with override_settings(NOTICE_DELETED_THRESHOLD_MONTHS=1):
+            qs = build_queryset(form, employee=self.employee, notice="recently_deleted")
+        pks = set(qs.values_list("pk", flat=True))
+        self.assertIn(recent.pk, pks)
+        self.assertNotIn(old.pk, pks)   # しきい値より古い削除は除外
+        self.assertNotIn(alive.pk, pks)  # 未削除は当然除外
+
 
 class DeleteViewAjaxTests(TestCase):
     """詳細ポップアップ「削除」ボタン。common.jsのtriggerDeleteFromDetail()はX-Requested-With
@@ -3633,3 +3671,171 @@ class UploadStep2RemoveViewTests(TestCase):
             "token": step2.context["token"], "action": "remove", "remove_index": "abc",
         })
         self.assertRedirects(response, "/documents/upload/step2/")
+
+
+class UploadStep2PartialFailureCleanupTests(TestCase):
+    """[review_test_doc_contract.txt No.1 追加] 保管画面２（新規登録）で複数ファイルの
+    途中失敗経路。既存の test_step2_open_pending_file_failure_rolls_back_and_shows_error は
+    1件目で失敗するため created が空で、UploadStep2View.post の以下2つが一度も発火していない:
+      (a) 既に file.save()＋document.save() まで通った先行ファイルの孤児 blob 後始末
+          （for document in created: document.file.delete(save=False)）
+      (b) except 節が捕捉するのが OSError だけでなく DBError（IntegrityError 等）でもあること
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def _start_two_files(self):
+        self.client.post("/documents/upload/step1/", {"files": [
+            SimpleUploadedFile("a.pdf", b"AAAA", content_type="application/pdf"),
+            SimpleUploadedFile("b.pdf", b"BBBB", content_type="application/pdf"),
+        ]})
+        return self.client.get("/documents/upload/step2/").context["token"]
+
+    def _two_file_payload(self, token):
+        base = {
+            "department": self.department.pk, "group": self.group.pk,
+            "category": self.category.pk, "year": 2026,
+            "retention_period": self.retention_period.pk, "privacy_flag": "False",
+            "memo": "", "title": "文書",
+        }
+        data = {"token": token}
+        for i in (0, 1):
+            for key, value in base.items():
+                data[f"{key}_{i}"] = value
+        return data
+
+    def _document_blob_count(self):
+        from pathlib import Path
+
+        from django.conf import settings
+
+        root = Path(settings.MEDIA_ROOT) / "documents"
+        return sum(1 for p in root.rglob("*") if p.is_file()) if root.exists() else 0
+
+    def test_second_file_failure_rolls_back_db_and_cleans_first_files_orphan_blob(self):
+        from django.contrib.messages import get_messages
+
+        from documents.models import Document
+
+        token = self._start_two_files()
+        before = set(Document.objects.values_list("pk", flat=True))
+        blobs_before = self._document_blob_count()
+        # 1件目: 本物のファイルを返し file.save()＋document.save() まで成功 → created に積まれる。
+        # 2件目: open_pending_file が OSError → except (OSError, DBError) 節へ。
+        with mock.patch(
+            "documents.views.upload_services.open_pending_file",
+            side_effect=[ContentFile(b"AAAA"), OSError("temp file missing")],
+        ):
+            response = self.client.post("/documents/upload/step2/", self._two_file_payload(token))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/documents/upload/step2/")
+        # (a) DB は1件も登録されていない。
+        self.assertEqual(set(Document.objects.values_list("pk", flat=True)), before)
+        # (a) 先行ファイルの blob（DBロールバックの対象外）が明示 delete で後始末され、
+        #     このリクエストで書かれた blob が1件も残っていない。
+        self.assertEqual(self._document_blob_count(), blobs_before)
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("ファイルの保存に失敗しました" in t for t in texts))
+
+    def test_dberror_on_document_save_is_caught_not_bubbled_as_500(self):
+        from documents.models import Document
+
+        token = self._start_two_files()
+        before = set(Document.objects.values_list("pk", flat=True))
+        # (b) document.save() が DBError（IntegrityError 等）を投げても except 節が捕捉する。
+        with mock.patch("documents.views.Document.save", side_effect=DBError("integrity")):
+            response = self.client.post("/documents/upload/step2/", self._two_file_payload(token))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/documents/upload/step2/")
+        self.assertEqual(set(Document.objects.values_list("pk", flat=True)), before)
+
+
+class UploadStep2NonAdminDepartmentTamperingTests(TestCase):
+    """[review_test_doc_contract.txt No.2 追加] 部署選択権限の無い職員（can_select_department
+    ＝False）が department_{i}／department に他部署 pk を密輸しても、サーバー側で
+    request.user.department に強制され、保存レコードが必ず自部署になること（IDOR 対策）。
+    新規登録は UploadStep2View.post の `if not can_select: department = request.user.department`、
+    単独編集は services.apply_document_edit の同等分岐を、いずれも「実際に保存された
+    Document.department」までアサートして固定する（従来はフォーム initial／*_is_dirty 経由の
+    間接検証のみだった）。
+    """
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.other_department = Department.objects.create(
+            branch_code="999", branch_name="別支店", section_code="02", section_name="別部"
+        )
+        self.staff = Employee.objects.create_user(
+            employee_no="1", name="一般職員", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(employee=self.staff, role=PermissionRole.STAFF)
+        # 部署スコープに引っかからないよう分類・カテゴリーは全社共通（department 未設定）にする。
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_new_registration_smuggled_other_department_is_forced_to_own(self):
+        from documents.models import Document
+
+        self.client.post("/documents/upload/step1/", {"files": [
+            SimpleUploadedFile("a.pdf", b"AAAA", content_type="application/pdf")
+        ]})
+        token = self.client.get("/documents/upload/step2/").context["token"]
+        response = self.client.post("/documents/upload/step2/", {
+            "token": token,
+            "department_0": self.other_department.pk,  # 密輸
+            "group_0": self.group.pk, "category_0": self.category.pk,
+            "year_0": 2026, "retention_period_0": self.retention_period.pk,
+            "privacy_flag_0": "False", "memo_0": "", "title_0": "密輸文書",
+        })
+        self.assertEqual(response.status_code, 200)
+        doc = Document.objects.get(title="密輸文書")
+        self.assertEqual(doc.department_id, self.department.pk)
+        self.assertNotEqual(doc.department_id, self.other_department.pk)
+
+    def test_single_edit_smuggled_other_department_is_ignored(self):
+        from documents.models import Document
+
+        doc = Document(
+            title="編集対象", department=self.department, group=self.group,
+            category=self.category, year=2026, retention_period=self.retention_period,
+            uploader=self.staff, expiry_date=datetime.date(2030, 1, 1),
+        )
+        doc.file.save("edit.pdf", ContentFile(b"x"), save=False)
+        doc.save()
+
+        step = self.client.get(f"/documents/{doc.pk}/edit/")
+        response = self.client.post(f"/documents/{doc.pk}/edit/", {
+            "token": step.context["token"],
+            "department": self.other_department.pk,  # 密輸
+            "group": self.group.pk, "category": self.category.pk,
+            "year": 2026, "retention_period": self.retention_period.pk,
+            "privacy_flag": "False", "memo": "", "title_0": "編集対象",
+        })
+        self.assertEqual(response.status_code, 200)
+        doc.refresh_from_db()
+        self.assertEqual(doc.department_id, self.department.pk)
