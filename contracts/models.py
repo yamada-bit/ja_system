@@ -8,10 +8,7 @@ from django.db import models
 # 2行の定数のためクロスアプリ import を避けて併記する。
 _YEAR_VALIDATORS = [MinValueValidator(1900), MaxValueValidator(2200)]
 
-from contracts.storage_paths import (
-    contract_searchable_upload_path,
-    contract_upload_path,
-)
+from contracts.storage_paths import contract_upload_path
 from core.models import NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin
 from core.upload_validation import validate_no_active_content
 
@@ -28,11 +25,13 @@ class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
     設定値へ移行済み〈config/settings/base.py参照〉で、このdocstringが追従していなかった。
     2026-08-25修正）。
 
-    `extracted_text`はdocuments.Documentと同様の理由で追加（screen-search「フリーワード」全文検索、
-    2026-08-07ユーザー指示）。抽出処理自体もdocuments.Documentと同じ2段階方式
+    `extracted_text_normalized`はdocuments.Documentと同様の理由で追加（screen-search「フリーワード」
+    全文検索、2026-08-07ユーザー指示）。抽出処理自体もdocuments.Documentと同じ2段階方式
     （core.text_extraction_services／core.management.commands.extract_pending_pdf_text、
-    2026-08-10追加）。関連書類(ContractRelation)はRev1.6で「既に保管済みの契約書を検索して
-    紐付ける」方式に変わったため物理ファイル自体を持たず（Rev1.5までのRelatedFileは廃止）、
+    2026-08-10追加）。生の抽出テキストは保存せず NFKC 正規化した列のみ持つ（監査 案1、2026-09-11。
+    Contract には privacy_flag が無いため、OCR 文書の `ocr_textdata` は
+    settings.OCR_STORE_TEXTDATA のみに従って保存する）。関連書類(ContractRelation)はRev1.6で
+    「既に保管済みの契約書を検索して紐付ける」方式に変わったため物理ファイル自体を持たず、
     全文抽出は契約書本体ファイルのみを対象とする。
     """
 
@@ -78,37 +77,37 @@ class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
     file = models.FileField(
         "ファイル", upload_to=contract_upload_path, validators=[validate_no_active_content]
     )
-    extracted_text = models.TextField(
-        "抽出本文",
-        blank=True,
-        default="",
-        help_text="ファイルから抽出した本文テキスト。フリーワード全文検索の対象",
-    )
-    # documents.Document.title_normalized等と同じ理由で追加（core.text_normalization参照）。
-    # CharField(255)からTextFieldへの変更経緯もdocuments側と同じ（NFKC正規化による文字数増加で
-    # DataErrorが起き得たため。品質レビューで発見、2026-08-25修正）。
-    # verbose_name は付けない（editable=False の検索用内部列。監査 C-1/Q-3）。
+    # documents.Document.title_normalized等と同じ理由（core.text_normalization参照）。
+    # CharField(255)→TextFieldの経緯もdocuments側と同じ（NFKC正規化による文字数増加で DataError が
+    # 起き得たため。品質レビューで発見、2026-08-25修正）。verbose_name は付けない（editable=False の
+    # 検索用内部列。監査 C-1/Q-3）。
     title_normalized = models.TextField(blank=True, default="", editable=False)
     memo_normalized = models.TextField(blank=True, default="", editable=False)
+    # documents.Document.extracted_text_normalized と同じ（生カラム廃止＝監査 案1、2026-09-11。
+    # populate は NormalizedTextFieldsMixin ではなく抽出サービスが直接行う）。
     extracted_text_normalized = models.TextField(blank=True, default="", editable=False)
-    ocr_attempted = models.BooleanField(
-        "OCR実行済み",
+    # documents.Document.text_extracted と同じ（監査 案2、2026-09-11。旧 ocr_attempted を統合）。
+    text_extracted = models.BooleanField(
+        "本文抽出済み",
         default=False,
+        db_index=True,
         help_text=(
-            "documents.Document.ocr_attemptedと同じ理由で追加"
-            "（core.management.commands.extract_pending_pdf_text参照）。"
+            "テキスト層抽出または OCR による本文抽出が完了したら True（空結果でも完了は完了）。"
+            "core.management.commands.extract_pending_pdf_text は False のレコードだけを対象にする。"
+            "再抽出させたい場合は運用手順で False に戻す。"
         ),
     )
-    searchable_file = models.FileField(
-        "検索用PDF（OCRテキスト埋め込み版）",
-        upload_to=contract_searchable_upload_path,
+    # documents.Document.ocr_textdata と同じ（監査 案3、2026-09-11）。Contract には privacy_flag が
+    # 無いため settings.OCR_STORE_TEXTDATA のみに従って保存する。
+    ocr_textdata = models.JSONField(
+        "OCR座標データ",
         null=True,
         blank=True,
+        editable=False,
         help_text=(
-            "documents.Document.searchable_fileと同じ理由で追加（同モデルのhelp_text参照）。"
-            "ただしContractにはprivacy_flag（個人情報フラグ）が無いため、documents.Documentと"
-            "異なりファイル単位の除外判定は行わず、settings.OCR_EMBED_TEXT_TO_PDFのみに従って"
-            "埋め込む（core.management.commands.extract_pending_pdf_text._should_embed参照）。"
+            "スキャン文書の OCR 行レイアウト（core.ocr_layout_services.textdatas_to_json 形式）。"
+            "検索用PDFを core.searchable_pdf_services が必要時に生成するための元データ。"
+            "settings.OCR_STORE_TEXTDATA=True のスキャン文書でのみ保存する。"
         ),
     )
 
@@ -143,7 +142,8 @@ class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
             ),
         ]
         indexes = [
-            # documents.Document.Meta.indexes と同じ方針（監査 B-IDX-1 / B-IDX-2、2026-09-10）。
+            # documents.Document.Meta.indexes と同じ方針（監査 B-IDX-1 / B-IDX-2）。生 extracted_text
+            # カラム自体は 2026-09-11 に廃止（案1）。
             # フリーワード検索・タイトル検索は正規化シャドウ列にのみ icontains するため、GIN は
             # title_normalized / memo_normalized / extracted_text_normalized の3本に揃える。
             # 生カラムには索引を張らない。
@@ -165,9 +165,10 @@ class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
     def __str__(self):
         return self.title
 
-    # save()（*_normalizedシャドウカラムの再計算）とdisplay_nameプロパティの実体は
+    # save()（title/memo の *_normalized 再計算）とdisplay_nameプロパティの実体は
     # core.models.NormalizedTextFieldsMixin/UuidPrefixedFilenameMixinに集約済み
     # （documents.Documentとの重複をコード監査で発見、2026-08-25修正）。
+    # extracted_text_normalized は抽出サービスが直接セットする（Mixin対象外、案1）。
 
 
 class ContractRelation(models.Model):

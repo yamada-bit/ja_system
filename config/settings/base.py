@@ -226,19 +226,21 @@ GOOGLE_APPLICATION_CREDENTIALS = env("GOOGLE_APPLICATION_CREDENTIALS", default="
 # ディレクトリパス。OSのPATHにpopplerが通っている環境では設定不要（空文字のままでよい）。
 POPPLER_PATH = env("POPPLER_PATH", default="")
 
-# OCR結果（単語ごとの座標データ、core.ocr_layout_services）を透明テキストとして元PDFに埋め込み、
-# 検索可能なPDF（documents.Document/contracts.Contractのsearchable_file）として保存するかどうか。
-# 既定False：OCR自体はコンプライアンス承認済みの前提で有効化したが（OCR_ENABLED参照）、埋め込み
-# 済みPDFを原本とは別に恒久保存する運用（ストレージ容量・原本以外のPDFを新たに生成すること自体の
-# 承認）は別途確認が必要なため、既定は無効のままとした。埋め込んでも原本（fileフィールド）は
-# 変更しない＝別ファイルとして保持する（監査・原本性の観点。core.pdf_text_embed_services参照）。
-# OCR自体は常にcore.ocr_layout_services.extract_text_and_layout_via_ocr（座標付き抽出）を使う
-# ため、このフラグを切り替えてもVision API呼び出し方法自体は変わらない。Trueの間は取得済みの
-# 座標データを使ってcore.pdf_text_embed_servicesへの埋め込みを追加で行うだけで、Vision APIを
-# 二重に呼ぶことはない。加えて、documents.Document.privacy_flag=True（個人情報を含む）の
-# レコードは、このフラグがTrueでも埋め込み対象から除外する
-# （core.management.commands.extract_pending_pdf_text.Command._should_embed参照、2026-08-19追加）。
-OCR_EMBED_TEXT_TO_PDF = env.bool("OCR_EMBED_TEXT_TO_PDF", default=False)
+# スキャン文書の OCR 行レイアウト（core.ocr_layout_services、座標＋テキスト）を
+# documents.Document/contracts.Contract.ocr_textdata（JSONField）へ保存するかどうか。保存した
+# 座標データは、検索可能なPDF（OCRテキスト埋め込み版）を core.searchable_pdf_services が
+# 必要時に生成するための元データになる（監査 案3、2026-09-11：以前は埋め込み済みPDFを
+# searchable_file へ恒久保存する OCR_EMBED_TEXT_TO_PDF だったが、桁違いに小さい座標データの
+# 保存＋遅延生成に置き換えた。旧設定名からのリネーム）。既定False：OCR自体はコンプライアンス
+# 承認済みの前提で有効化したが（OCR_ENABLED参照）、本文由来のデータ（座標＋テキスト）を原本とは
+# 別に DB へ恒久保存する運用の承認は別途必要なため、既定は無効のまま。OCR自体は常に
+# core.ocr_layout_services.extract_text_and_layout_via_ocr（座標付き抽出）を使うため、このフラグを
+# 切り替えても Vision API 呼び出し方法自体は変わらない（Trueの間は取得済みの座標データを
+# ocr_textdata へ保存するだけで、Vision API を二重に呼ぶことはない）。加えて、
+# documents.Document.privacy_flag=True（個人情報を含む）のレコードは、このフラグがTrueでも
+# 保存対象から除外する（core.management.commands.extract_pending_pdf_text.Command.
+# _should_store_textdata参照、2026-09-11ユーザー指示）。
+OCR_STORE_TEXTDATA = env.bool("OCR_STORE_TEXTDATA", default=False)
 
 # 保管画面２・編集画面・検索結果詳細ポップアップ・検索/閲覧画面「文書イメージ」欄の
 # PDF プレビュー描画方式。

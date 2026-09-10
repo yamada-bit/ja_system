@@ -39,8 +39,8 @@ def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort
     """screen-search（文書）の検索条件からQuerySetを組み立てる。
 
     タイトル／フリーワードはスペース区切りでAND/OR切替可能（xlsx 検索・閲覧・変更シート）。
-    フリーワードは`extracted_text`（本文抽出テキスト）も対象にする
-    （2026-08-07ユーザー指示、documents.Document.extracted_text参照）。
+    フリーワードはファイル本文（`extracted_text_normalized`）も対象にする
+    （2026-08-07ユーザー指示、documents.Document.extracted_text_normalized参照）。
     """
     if notice == "recently_deleted":
         # xlsx メイン画面!C46「直近Xヶ月内で削除された文書」通知からの遷移。
@@ -50,8 +50,8 @@ def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort
         qs = Document.objects.filter(is_deleted=False)
     qs = qs.select_related("department", "group", "category", "retention_period", "uploader")
     # 一覧に表示しない重いTextFieldカラムは取得しない（core.search_services.
-    # LIST_DEFERRED_TEXT_FIELDS docstring参照）。
-    qs = qs.defer(*search_services.LIST_DEFERRED_TEXT_FIELDS)
+    # LIST_DEFERRED_HEAVY_FIELDS docstring参照）。
+    qs = qs.defer(*search_services.LIST_DEFERRED_HEAVY_FIELDS)
 
     if not can_select_department(employee):
         # xlsx 検索・閲覧・変更!B48(Rev1.1)「閲覧部署範囲テーブルを参照し、部署の統合/分割時の

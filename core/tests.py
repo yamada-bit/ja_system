@@ -26,8 +26,9 @@ from core.csv_services import sanitize_csv_cell, sanitize_csv_row
 from core.forms import search_year_choices
 from core.middleware import SESSION_LAST_ACTIVITY_KEY
 from core.notice_services import add_months, get_notice_counts, is_expiring_soon
-from core.ocr_layout_services import OcrDisabledError
+from core.ocr_layout_services import OcrDisabledError, TextData, TextDatas
 from core.text_extraction_services import is_scanned, try_immediate_text_layer_extraction
+from core.text_normalization import normalize_for_search
 from core.upload_services import (
     ChunkUploadError,
     PendingFileStorageError,
@@ -774,27 +775,21 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
             ).exists()
         )
 
-    def test_purge_deletes_searchable_file_side_car(self):
-        """[review_test_audit_core.txt No.7] `_purge` の searchable_file 実体削除分岐
-        （`if searchable_file_field: self._delete_file(..., f"{kind}(searchable_file)", ...)`）。
-        既存テストは searchable_file を持たない文書しか作っておらず、OCR 透明テキスト埋め込み済み
-        PDF（searchable_file セット済み）を purge したとき副ファイルも消えることが未検証だった
-        （消え残ると孤児ファイルが storage に残り続ける）。"""
+    def test_purge_removes_ocr_textdata_with_the_record(self):
+        """ocr_textdata は DB カラムのため obj.delete() で自動的に消える（旧 searchable_file の
+        副ファイル削除分岐は 2026-09-11 に廃止＝監査 案3）。原本ファイルのみ実体削除する。"""
         from documents.models import Document
 
         doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
-        doc.searchable_file.save("test_searchable.pdf", ContentFile(b"searchable"), save=False)
-        doc.save(update_fields=["searchable_file"])
+        doc.ocr_textdata = [{"page": 1, "w": 800, "h": 1100, "lines": [[1, 1, 2, 2, "x"]]}]
+        doc.save(update_fields=["ocr_textdata"])
         file_name = doc.file.name
-        searchable_name = doc.searchable_file.name
-        storage = doc.searchable_file.storage
-        self.assertTrue(storage.exists(searchable_name))
+        storage = doc.file.storage
 
         call_command("purge_expired_deleted_records")
 
         self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
         self.assertFalse(storage.exists(file_name))
-        self.assertFalse(storage.exists(searchable_name))
 
 
 class AddMonthsClampTests(TestCase):
@@ -1891,7 +1886,7 @@ def _make_word(symbols, x1, y1, x2, y2):
 
 
 class OcrLayoutServicesTests(TestCase):
-    """core.ocr_layout_services（settings.OCR_EMBED_TEXT_TO_PDFが使う座標付きOCR、2026-08-10追加）
+    """core.ocr_layout_services（検索用PDFの遅延生成が使う座標付きOCR、2026-08-10追加）
     の単体テスト。実際のGoogle Cloud Vision API・pdf2image（poppler）は使わず、モックで完結させる。
     """
 
@@ -1970,9 +1965,23 @@ class OcrLayoutServicesTests(TestCase):
         textlines = ocr_layout_services._get_textlines(result, 1)
         self.assertEqual(textlines, ["あい"])
 
+    def test_textdatas_json_round_trip(self):
+        """監査 案3：ocr_textdata（JSONField）へ保存する textdatas_to_json と、検索用PDFの
+        遅延生成で使う textdatas_from_json が往復で一致する（配列形式 [x1,y1,x2,y2,text]）。"""
+        original = [
+            TextDatas(1, 800, 1100, [TextData(10, 20, 100, 40, "あいう"), TextData(10, 50, 90, 70, "えお")]),
+            TextDatas(2, 800, 1100, [TextData(5, 5, 50, 25, "Ｘ")]),
+        ]
+        as_json = ocr_layout_services.textdatas_to_json(original)
+        # JSON 化しても素の list/dict/int/str だけであること（DB JSONField 保存可能）。
+        self.assertEqual(as_json[0]["page"], 1)
+        self.assertEqual(as_json[0]["lines"][0], [10, 20, 100, 40, "あいう"])
+        restored = ocr_layout_services.textdatas_from_json(as_json)
+        self.assertEqual(restored, original)
+
 
 class PdfTextEmbedServicesTests(TestCase):
-    """core.pdf_text_embed_services（settings.OCR_EMBED_TEXT_TO_PDF、2026-08-10追加）の単体テスト。"""
+    """core.pdf_text_embed_services（検索用PDFの透明テキスト埋め込み、2026-08-10追加）の単体テスト。"""
 
     @staticmethod
     def _make_blank_pdf_bytes(page_count):
@@ -2064,7 +2073,7 @@ class ExtractPendingPdfTextCommandTests(TestCase):
         mock_pdf.__exit__.return_value = False
         return mock_pdf
 
-    def test_text_layer_extraction_updates_extracted_text(self):
+    def test_text_layer_extraction_populates_normalized_and_flag(self):
         doc = self._make_document("通常文書")
         with patch(
             "core.text_extraction_services.pdfplumber.open",
@@ -2072,7 +2081,11 @@ class ExtractPendingPdfTextCommandTests(TestCase):
         ):
             call_command("extract_pending_pdf_text")
         doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "十分な文字数を含む本文テキストです。")
+        self.assertEqual(
+            doc.extracted_text_normalized, normalize_for_search("十分な文字数を含む本文テキストです。")
+        )
+        self.assertTrue(doc.text_extracted)
+        self.assertIsNone(doc.ocr_textdata)
 
     def test_scanned_document_is_skipped_when_ocr_disabled(self):
         doc = self._make_document("スキャン文書")
@@ -2082,9 +2095,9 @@ class ExtractPendingPdfTextCommandTests(TestCase):
             ):
                 call_command("extract_pending_pdf_text")
         doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "")
+        self.assertEqual(doc.extracted_text_normalized, "")
         # OCR_ENABLED=Falseで呼び出しに至っていないため、有効化後に再試行できるようFalseのまま。
-        self.assertFalse(doc.ocr_attempted)
+        self.assertFalse(doc.text_extracted)
 
     def test_scanned_document_uses_ocr_when_enabled(self):
         doc = self._make_document("スキャン文書2")
@@ -2099,14 +2112,13 @@ class ExtractPendingPdfTextCommandTests(TestCase):
                 ) as mock_ocr:
                     call_command("extract_pending_pdf_text")
         doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "OCRで抽出した本文")
-        self.assertTrue(doc.ocr_attempted)
+        self.assertEqual(doc.extracted_text_normalized, normalize_for_search("OCRで抽出した本文"))
+        self.assertTrue(doc.text_extracted)
         mock_ocr.assert_called_once()
 
-    def test_ocr_result_empty_string_marks_attempted_and_is_excluded_from_next_run(self):
-        """OCR結果が本当に空文字列だった場合（画像に文字が全く無い等）、extracted_text=""の
-        ままでもocr_attempted=Trueになり、次回バッチではOCRが再実行されないことを確認する
-        （documents.Document.ocr_attemptedのフィールドコメント参照。無限リトライ対策）。"""
+    def test_ocr_result_empty_string_marks_extracted_and_is_excluded_from_next_run(self):
+        """OCR結果が本当に空文字列だった場合（画像に文字が全く無い等）、text_extracted=Trueになり、
+        次回バッチではOCRが再実行されないことを確認する（無限リトライ対策、監査 案2）。"""
         doc = self._make_document("空文字OCR結果文書")
         with override_settings(OCR_ENABLED=True):
             with patch(
@@ -2121,15 +2133,15 @@ class ExtractPendingPdfTextCommandTests(TestCase):
                     self.assertEqual(mock_ocr.call_count, 1)
 
                     call_command("extract_pending_pdf_text")
-                    # ocr_attempted=Trueによりクエリ対象から外れるため、2回目は呼ばれない。
+                    # text_extracted=Trueによりクエリ対象から外れるため、2回目は呼ばれない。
                     self.assertEqual(mock_ocr.call_count, 1)
         doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "")
-        self.assertTrue(doc.ocr_attempted)
+        self.assertEqual(doc.extracted_text_normalized, "")
+        self.assertTrue(doc.text_extracted)
 
-    def test_ocr_exception_does_not_mark_attempted_so_it_retries_next_run(self):
+    def test_ocr_exception_does_not_mark_extracted_so_it_retries_next_run(self):
         """OCR呼び出し自体が例外を送出した場合（タイムアウト等の一時的なエラー）は
-        ocr_attemptedをセットせず、次回バッチでも対象のままにする。"""
+        text_extractedをセットせず、次回バッチでも対象のままにする。"""
         doc = self._make_document("OCR失敗文書")
         with override_settings(OCR_ENABLED=True):
             with patch(
@@ -2142,8 +2154,8 @@ class ExtractPendingPdfTextCommandTests(TestCase):
                 ):
                     call_command("extract_pending_pdf_text")
         doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "")
-        self.assertFalse(doc.ocr_attempted)
+        self.assertEqual(doc.extracted_text_normalized, "")
+        self.assertFalse(doc.text_extracted)
 
     def test_one_failure_does_not_stop_processing_of_other_documents(self):
         """1件目のpdfplumber解析が例外を送出しても、2件目は正常に処理される
@@ -2166,8 +2178,11 @@ class ExtractPendingPdfTextCommandTests(TestCase):
 
         broken_doc.refresh_from_db()
         healthy_doc.refresh_from_db()
-        self.assertEqual(broken_doc.extracted_text, "")
-        self.assertEqual(healthy_doc.extracted_text, "十分な文字数を含む正常な本文です。")
+        self.assertFalse(broken_doc.text_extracted)
+        self.assertTrue(healthy_doc.text_extracted)
+        self.assertEqual(
+            healthy_doc.extracted_text_normalized, normalize_for_search("十分な文字数を含む正常な本文です。")
+        )
 
     def test_db_save_failure_does_not_stop_processing_of_other_documents(self):
         """本文抽出自体は成功しても、その結果をDBへ保存するobj.save(update_fields=...)が
@@ -2202,16 +2217,18 @@ class ExtractPendingPdfTextCommandTests(TestCase):
         failing_doc.refresh_from_db()
         healthy_doc.refresh_from_db()
         # 保存自体が失敗したため、抽出結果はDBに反映されないまま（次回バッチで再試行される）。
-        self.assertEqual(failing_doc.extracted_text, "")
-        self.assertEqual(healthy_doc.extracted_text, "十分な文字数を含む本文テキストです。")
+        self.assertFalse(failing_doc.text_extracted)
+        self.assertTrue(healthy_doc.text_extracted)
+        self.assertEqual(
+            healthy_doc.extracted_text_normalized, normalize_for_search("十分な文字数を含む本文テキストです。")
+        )
 
 
-class ExtractPendingPdfTextEmbedTests(TestCase):
-    """extract_pending_pdf_textコマンドのsettings.OCR_EMBED_TEXT_TO_PDF・
-    _should_embed（documents.Document.privacy_flag連動、2026-08-19追加）分岐の単体テスト。
-    core.ocr_layout_services・core.pdf_text_embed_services自体の単体テストは
-    OcrLayoutServicesTests・PdfTextEmbedServicesTestsで別途行うため、ここではコマンドの
-    分岐・DB更新の結果のみを検証する（両モジュールはモック化）。
+class ExtractPendingPdfTextTextdataTests(TestCase):
+    """extract_pending_pdf_textコマンドのsettings.OCR_STORE_TEXTDATA・_should_store_textdata
+    （documents.Document.privacy_flag連動）分岐＝OCR座標データ ocr_textdata の保存要否の単体テスト
+    （監査 案3、2026-09-11。旧 ExtractPendingPdfTextEmbedTests〈searchable_file 生成〉を置き換え）。
+    core.ocr_layout_services はモック化し、コマンドの分岐・DB更新の結果のみを検証する。
     """
 
     def setUp(self):
@@ -2252,86 +2269,52 @@ class ExtractPendingPdfTextEmbedTests(TestCase):
         mock_pdf.__exit__.return_value = False
         return mock_pdf
 
-    def test_embed_disabled_by_default_does_not_call_embed(self):
-        """既定（OCR_EMBED_TEXT_TO_PDF=False）でも本文抽出自体は座標付き抽出
-        （core.ocr_layout_services、2026-08-19統合後の唯一のOCR経路）を使うが、
-        PDFへの埋め込み（core.pdf_text_embed_services）は呼ばれない。"""
-        doc = self._make_document("スキャン文書埋め込み無効")
-        fake_textdatas = [object()]
-        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=False):
+    _FAKE_TEXTDATAS = [TextDatas(1, 800, 1100, [TextData(10, 10, 100, 30, "OCR")])]
+
+    def _run_ocr_batch(self, store_textdata):
+        with override_settings(OCR_ENABLED=True, OCR_STORE_TEXTDATA=store_textdata):
             with patch(
                 "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
             ):
                 with patch(
                     "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
                     ".extract_text_and_layout_via_ocr",
-                    return_value=("座標付きOCRで抽出した本文", fake_textdatas),
-                ) as mock_layout_ocr:
-                    with patch(
-                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
-                        ".embed_textdatas_into_pdf",
-                    ) as mock_embed:
-                        call_command("extract_pending_pdf_text")
-        doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
-        self.assertFalse(doc.searchable_file)
-        mock_layout_ocr.assert_called_once()
-        mock_embed.assert_not_called()
+                    return_value=("座標付きOCRで抽出した本文", self._FAKE_TEXTDATAS),
+                ):
+                    call_command("extract_pending_pdf_text")
 
-    def test_embed_skipped_for_document_with_privacy_flag(self):
-        """個人情報が含まれる文書（privacy_flag=True）は、settings.OCR_EMBED_TEXT_TO_PDF=Trueでも
-        埋め込みをスキップする（検索用PDFに個人情報を透明テキストとして複製しないための判断、
-        2026-08-19追加）。"""
+    def test_textdata_not_stored_when_setting_off(self):
+        """既定（OCR_STORE_TEXTDATA=False）では本文抽出はされるが ocr_textdata は保存されない。"""
+        doc = self._make_document("座標保存無効")
+        self._run_ocr_batch(store_textdata=False)
+        doc.refresh_from_db()
+        self.assertEqual(doc.extracted_text_normalized, normalize_for_search("座標付きOCRで抽出した本文"))
+        self.assertTrue(doc.text_extracted)
+        self.assertIsNone(doc.ocr_textdata)
+
+    def test_textdata_not_stored_for_document_with_privacy_flag(self):
+        """個人情報が含まれる文書（privacy_flag=True）は OCR_STORE_TEXTDATA=True でも
+        ocr_textdata を保存しない（本文を DB へ複製しない、2026-09-11ユーザー指示）。"""
         doc = self._make_document("個人情報を含む文書", privacy_flag=True)
-        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
-            with patch(
-                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
-            ):
-                with patch(
-                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
-                    ".extract_text_and_layout_via_ocr",
-                    return_value=("座標付きOCRで抽出した本文", [object()]),
-                ):
-                    with patch(
-                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
-                        ".embed_textdatas_into_pdf",
-                    ) as mock_embed:
-                        call_command("extract_pending_pdf_text")
+        self._run_ocr_batch(store_textdata=True)
         doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
-        self.assertTrue(doc.ocr_attempted)
-        self.assertFalse(doc.searchable_file)
-        mock_embed.assert_not_called()
+        self.assertEqual(doc.extracted_text_normalized, normalize_for_search("座標付きOCRで抽出した本文"))
+        self.assertTrue(doc.text_extracted)
+        self.assertIsNone(doc.ocr_textdata)
 
-    def test_embed_flag_saves_searchable_file(self):
-        doc = self._make_document("スキャン文書埋め込み", privacy_flag=False)
-        fake_textdatas = [object()]  # 中身はembed_textdatas_into_pdf自体をモックするため使われない
-        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
-            with patch(
-                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
-            ):
-                with patch(
-                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
-                    ".extract_text_and_layout_via_ocr",
-                    return_value=("座標付きOCRで抽出した本文", fake_textdatas),
-                ):
-                    with patch(
-                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
-                        ".embed_textdatas_into_pdf",
-                        return_value=b"%PDF-1.4 embedded",
-                    ) as mock_embed:
-                        call_command("extract_pending_pdf_text")
+    def test_textdata_stored_when_enabled_and_not_private(self):
+        doc = self._make_document("座標保存対象", privacy_flag=False)
+        self._run_ocr_batch(store_textdata=True)
         doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
-        self.assertTrue(doc.ocr_attempted)
-        self.assertTrue(doc.searchable_file)
-        mock_embed.assert_called_once()
+        self.assertTrue(doc.text_extracted)
+        self.assertEqual(
+            doc.ocr_textdata, ocr_layout_services.textdatas_to_json(self._FAKE_TEXTDATAS)
+        )
 
-    def test_embed_skipped_when_no_textdatas_leaves_searchable_file_empty(self):
-        """座標データが1件も取れなかった場合（全ページOCR失敗等）は埋め込み自体を試みず、
-        searchable_fileはnullのままにする。"""
+    def test_textdata_not_stored_when_ocr_returns_no_layout(self):
+        """座標データが1件も取れなかった場合（全ページOCR失敗等）は ocr_textdata を null のままにする。"""
         doc = self._make_document("座標データ無し文書", privacy_flag=False)
-        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
+        with override_settings(OCR_ENABLED=True, OCR_STORE_TEXTDATA=True):
             with patch(
                 "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
             ):
@@ -2340,61 +2323,31 @@ class ExtractPendingPdfTextEmbedTests(TestCase):
                     ".extract_text_and_layout_via_ocr",
                     return_value=("", []),
                 ):
-                    with patch(
-                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
-                        ".embed_textdatas_into_pdf",
-                    ) as mock_embed:
-                        call_command("extract_pending_pdf_text")
+                    call_command("extract_pending_pdf_text")
         doc.refresh_from_db()
-        self.assertTrue(doc.ocr_attempted)
-        self.assertFalse(doc.searchable_file)
-        mock_embed.assert_not_called()
-
-    def test_embed_failure_does_not_prevent_text_extraction(self):
-        """PDF埋め込みは全文検索の本体（extracted_text）に対する付加処理という位置付けのため、
-        埋め込み処理が例外を送出してもテキスト抽出自体は成功させる。"""
-        doc = self._make_document("スキャン文書埋め込み失敗", privacy_flag=False)
-        with override_settings(OCR_ENABLED=True, OCR_EMBED_TEXT_TO_PDF=True):
-            with patch(
-                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
-            ):
-                with patch(
-                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
-                    ".extract_text_and_layout_via_ocr",
-                    return_value=("座標付きOCRで抽出した本文", [object()]),
-                ):
-                    with patch(
-                        "core.management.commands.extract_pending_pdf_text.pdf_text_embed_services"
-                        ".embed_textdatas_into_pdf",
-                        side_effect=ValueError("dummy embed failure"),
-                    ):
-                        call_command("extract_pending_pdf_text")
-        doc.refresh_from_db()
-        self.assertEqual(doc.extracted_text, "座標付きOCRで抽出した本文")
-        self.assertTrue(doc.ocr_attempted)
-        self.assertFalse(doc.searchable_file)
+        self.assertTrue(doc.text_extracted)
+        self.assertIsNone(doc.ocr_textdata)
 
 
-class ShouldEmbedTests(TestCase):
-    """extract_pending_pdf_textコマンドの_should_embed（PDF埋め込みの要否判定、
-    documents.Document.privacy_flag連動、2026-08-19追加）の単体テスト。DBを使わず判定ロジック
-    だけを検証する（DB込みの結合テストはExtractPendingPdfTextEmbedTests参照）。"""
+class ShouldStoreTextdataTests(TestCase):
+    """extract_pending_pdf_textコマンドの_should_store_textdata（OCR座標データ保存の要否判定、
+    documents.Document.privacy_flag連動）の単体テスト（監査 案3、2026-09-11。旧 ShouldEmbedTests）。"""
 
     def setUp(self):
         from core.management.commands.extract_pending_pdf_text import Command
 
         self.command = Command()
 
-    def test_embeds_when_privacy_flag_false(self):
-        self.assertTrue(self.command._should_embed(SimpleNamespace(privacy_flag=False)))
+    def test_stores_when_privacy_flag_false(self):
+        self.assertTrue(self.command._should_store_textdata(SimpleNamespace(privacy_flag=False)))
 
     def test_skips_when_privacy_flag_true(self):
-        self.assertFalse(self.command._should_embed(SimpleNamespace(privacy_flag=True)))
+        self.assertFalse(self.command._should_store_textdata(SimpleNamespace(privacy_flag=True)))
 
-    def test_embeds_when_model_has_no_privacy_flag_field(self):
-        """contracts.Contractのように個人情報フラグ自体を持たないモデルは、この個別判定を
-        行わずsettings.OCR_EMBED_TEXT_TO_PDFのみに従って常に埋め込み対象とする。"""
-        self.assertTrue(self.command._should_embed(SimpleNamespace()))
+    def test_stores_when_model_has_no_privacy_flag_field(self):
+        """contracts.Contract のように個人情報フラグを持たないモデルは個別判定を行わず、
+        settings.OCR_STORE_TEXTDATA のみに従う。"""
+        self.assertTrue(self.command._should_store_textdata(SimpleNamespace()))
 
 
 class TryImmediateTextLayerExtractionTests(TestCase):
@@ -2446,22 +2399,27 @@ class TryImmediateTextLayerExtractionTests(TestCase):
         ):
             try_immediate_text_layer_extraction(self.doc, label="document")
         self.doc.refresh_from_db()
-        self.assertEqual(self.doc.extracted_text, "十分な文字数を含む本文テキストです。")
+        self.assertEqual(
+            self.doc.extracted_text_normalized, normalize_for_search("十分な文字数を含む本文テキストです。")
+        )
+        self.assertTrue(self.doc.text_extracted)
 
     def test_scanned_pdf_is_left_for_the_batch(self):
-        """テキスト層が実質無い（スキャン文書）場合は何もせず、extracted_text=""のまま据え置く
+        """テキスト層が実質無い（スキャン文書）場合は何もせず、text_extracted=False のまま据え置く
         （OCR要否の判定はcore.management.commands.extract_pending_pdf_textに委ねる）。"""
         with patch("core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber("")):
             try_immediate_text_layer_extraction(self.doc, label="document")
         self.doc.refresh_from_db()
-        self.assertEqual(self.doc.extracted_text, "")
+        self.assertEqual(self.doc.extracted_text_normalized, "")
+        self.assertFalse(self.doc.text_extracted)
 
     def test_extraction_failure_does_not_raise(self):
         """解析失敗（破損PDF等）でも例外を伝播させない（アップロード処理自体を失敗させないため）。"""
         with patch("core.text_extraction_services.pdfplumber.open", side_effect=ValueError("corrupt pdf")):
             try_immediate_text_layer_extraction(self.doc, label="document")
         self.doc.refresh_from_db()
-        self.assertEqual(self.doc.extracted_text, "")
+        self.assertEqual(self.doc.extracted_text_normalized, "")
+        self.assertFalse(self.doc.text_extracted)
 
 
 class IsImageFilenameTests(TestCase):

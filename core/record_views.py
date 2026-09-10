@@ -1,3 +1,4 @@
+import io
 import logging
 
 from django.contrib import messages
@@ -9,8 +10,9 @@ from django.utils import timezone
 from django.views import View
 
 from audit import services as audit_services
-from core import deletion_services
+from core import deletion_services, searchable_pdf_services
 from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
+from core.searchable_pdf_services import SearchablePdfUnavailable
 from permissions.services import can_download
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,59 @@ class BaseFileServeView(View):
         # （「ファイル名：契約書_001」等）に合わせ、タイトルではなく実ファイル名(display_name)を
         # 「ファイル名：」形式で記録する（原本フィデリティ監査で発見：以前は
         # 「{entity_label}「{title}」を〜しました。」という原本に無い独自形式だった）。
+        audit_services.log(
+            employee=request.user,
+            action=self.audit_action,
+            event_message=f"ファイル名：{obj.display_name}",
+            **self.audit_extra_kwargs(obj),
+        )
+        return response
+
+
+class BaseSearchablePdfView(View):
+    """検索用PDF（OCRテキスト埋め込み版）の遅延生成・配信共通実装（監査 案3、2026-09-11）。
+
+    `ocr_textdata` が保存されているスキャン文書について、原本PDF＋座標データからその場で透明
+    テキストを埋め込んだPDFを組み立てて添付ダウンロード配信する。`can_download` 権限で保護し、
+    BaseFileServeView と同じセキュリティヘッダを付与する。旧 `searchable_file`（事前生成・恒久
+    保存のFileField）を置き換えたもの。旧実装と同じく、この時点ではどの画面からもリンクして
+    いない（利用者向けUIの追加は別途）。
+
+    `model`/`kind`/`scoped_lookup`/`audit_action` をクラス変数で指定して継承する。
+    """
+
+    model = None
+    kind = None
+    scoped_lookup = None
+    audit_action = None
+
+    def audit_extra_kwargs(self, obj):
+        return {}
+
+    def get(self, request, pk):
+        obj = self.scoped_lookup(self.model.objects.filter(is_deleted=False), request.user, pk)
+        if not can_download(request.user, kind=self.kind):
+            logger.warning(
+                "検索用PDFダウンロード権限の無いユーザーによる試行: employee_no=%s %s_id=%s",
+                request.user.employee_no, self.kind, pk,
+            )
+            raise PermissionDenied("ダウンロード権限がありません。")
+        try:
+            pdf_bytes = searchable_pdf_services.build_searchable_pdf(obj)
+        except SearchablePdfUnavailable:
+            # テキスト層PDF・privacy_flag=Trueの文書・OCR前・OCR_STORE_TEXTDATA=Falseで
+            # OCRされた文書は座標データを持たないため生成できない。
+            raise Http404("この文書には検索用PDFがありません。")
+        except OSError:
+            logger.exception("検索用PDF生成時のファイル実体取得に失敗しました: %s_id=%s", self.kind, pk)
+            raise Http404("ファイルが見つかりません。")
+        response = FileResponse(
+            io.BytesIO(pdf_bytes),
+            as_attachment=True,
+            filename=f"検索用_{obj.display_name}",
+            content_type="application/pdf",
+        )
+        apply_file_response_security_headers(response)
         audit_services.log(
             employee=request.user,
             action=self.audit_action,

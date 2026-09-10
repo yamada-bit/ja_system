@@ -24,16 +24,26 @@ JAふくおか八女向け「クラウド文書管理システム」。**画面�
 - Python 3.13 / Django 5.2（`config/settings/base.py,dev.py,prod.py`）
 - PostgreSQL（`ja_db`、`Japanese_Japan.utf8`ロケールでpg_trgmが日本語トライグラムに対応。
   `django.contrib.postgres`のGinIndexでフリーワード全文検索）
-- 全文検索の本文抽出：`documents.Document`/`contracts.Contract.extracted_text`に、登録直後の
+- 全文検索の本文抽出：`documents.Document`/`contracts.Contract.extracted_text_normalized`（NFKC
+  正規化済み。**生の抽出テキストは保存しない**＝監査 案1、2026-09-11。テキスト層PDFは元ファイル
+  から決定的に再抽出でき、OCR結果は `ocr_textdata` から再導出できるため）に、登録直後の
   同期テキスト層抽出（`core.text_extraction_services`、pdfplumber、外部通信なし）→対象外
   だったレコード（スキャン文書等）は5分間隔の定期バッチ（`core.management.commands.
-  extract_pending_pdf_text`）でOCR（`core.ocr_services`、Google Cloud Vision
-  `document_text_detection`）、の2段階で反映する。OCRはPDFをpdf2imageでページごとに画像化して
-  1ページずつ投入する方式で固定しており、ページ数の上限は無い。`settings.OCR_ENABLED`
-  （既定True）でOCR自体の無効化が可能（GOOGLE_APPLICATION_CREDENTIALS未設定の環境でも、
-  バッチはOCR呼び出し失敗を1件ずつ捕捉してログに残すのみで停止しない）。poppler
-  （pdf2imageの依存バイナリ）はリポジトリに含まないため、OS PATHが通っていない環境では
-  `.env`の`POPPLER_PATH`で指定する。
+  extract_pending_pdf_text`）でOCR（`core.ocr_layout_services`、Google Cloud Vision
+  `document_text_detection`）、の2段階で反映する。抽出完了は `text_extracted`（BooleanField、
+  結果が空でも True）で管理し、バッチは `filter(text_extracted=False)` を対象にする（旧
+  `ocr_attempted`＋`extracted_text=""` 判定を1フラグに統合＝監査 案2）。OCRはPDFをpdf2imageで
+  ページごとに画像化して1ページずつ投入する方式で固定しており、ページ数の上限は無い。
+  `settings.OCR_ENABLED`（既定True）でOCR自体の無効化が可能（GOOGLE_APPLICATION_CREDENTIALS
+  未設定の環境でも、バッチはOCR呼び出し失敗を1件ずつ捕捉してログに残すのみで停止しない）。
+  poppler（pdf2imageの依存バイナリ）はリポジトリに含まないため、OS PATHが通っていない環境では
+  `.env`の`POPPLER_PATH`で指定する。誤OCR等で再抽出させたい場合は `text_extracted` を False に戻す。
+- 検索用PDF（OCRテキスト埋め込み版）：スキャン文書のOCR行レイアウトを `ocr_textdata`（JSONField、
+  `settings.OCR_STORE_TEXTDATA=True` かつ Document の `privacy_flag=False` の場合のみ保存）に持ち、
+  利用者のダウンロード要求時に `core.searchable_pdf_services.build_searchable_pdf` が原本PDF＋座標
+  データから遅延生成する（`documents/contracts:searchable_pdf` エンドポイント。まだどの画面からも
+  リンクしていない）。旧 `searchable_file`（埋め込み済みPDFの恒久保存）を、桁違いに小さい座標データ
+  ＋遅延生成に置き換えたもの＝監査 案3、2026-09-11。
 - 認証はDjangoカスタムユーザー（`accounts.Employee`、`employee_no`でログイン、Argon2ハッシュ）
 - フロントエンドはDjangoテンプレート＋素のJS（`static/js/common.js`、フレームワーク不使用）。
   原本HTMLのJS挙動（`popup-select`/`popup-detail`のドラッグ・リサイズ、各種トグル等）を

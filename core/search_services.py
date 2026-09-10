@@ -11,18 +11,17 @@ from core.text_normalization import normalize_for_search
 _SEARCH_AUDIT_EXCLUDED_FIELDS = frozenset({"title_match", "freeword_match", "save_day_kbn"})
 
 # screen-search一覧クエリ（documents/contracts.search_services.build_queryset）で
-# .defer()する重いTextFieldカラム。OCR全文（extracted_text）とその正規化シャドウ、
-# タイトル/メモの正規化シャドウは一覧テーブルに一切表示しないのに、defer無しだと
-# 1ページ100行分すべて取得してしまう（スキャン文書のextracted_textは1件数KB〜数十KBに
-# なり得るため、100行で数MBをPostgres→Pythonモデルインスタンスへ毎回転送・保持していた）。
+# .defer()する重いカラム。検索用の正規化シャドウ（title/memo/extracted_text_normalized）と
+# OCR座標データ（ocr_textdata、JSONField、スキャン文書で1〜4MBになり得る）は一覧テーブルに
+# 一切表示しないのに、defer無しだと1ページ100行分すべて取得してしまう。
 # *_normalizedはfilter()の絞り込みでは使うが、それはDB側で評価されるためdeferしても
-# 検索は正しく効く（取得列から外れるだけ）。詳細ポップアップ(core.api)・編集画面は
-# build_querysetを通らない別クエリのため影響しない。
-LIST_DEFERRED_TEXT_FIELDS = (
-    "extracted_text",
+# 検索は正しく効く（取得列から外れるだけ）。詳細ポップアップ(core.api)・編集画面・
+# 検索用PDFの遅延生成は build_queryset を通らない別クエリのため影響しない。
+LIST_DEFERRED_HEAVY_FIELDS = (
     "extracted_text_normalized",
     "title_normalized",
     "memo_normalized",
+    "ocr_textdata",
 )
 
 

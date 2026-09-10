@@ -1,5 +1,6 @@
-"""スキャンPDF（画像PDF）のOCR処理（Google Cloud Vision連携）。PDFへの透明テキスト埋め込み
-（core.pdf_text_embed_services、settings.OCR_EMBED_TEXT_TO_PDF）向けに座標付きで抽出する。
+"""スキャンPDF（画像PDF）のOCR処理（Google Cloud Vision連携）。座標付きで抽出し、
+全文テキスト（→検索用の extracted_text_normalized）と行レイアウト（→ ocr_textdata、
+検索用PDFの遅延生成 core.searchable_pdf_services で使う）の両方を返す。
 
 PDFをpdf2imageでページごとに画像化し、各ページ画像をVisionのdocument_text_detectionへ
 1ページずつ個別に投入する方式で固定する。Visionの同期API batch_annotate_files にPDFバイト列を
@@ -10,9 +11,9 @@ Visionレスポンスのbounding_box（単語・記号ごとの座標）も保�
 TextData/TextDatasとして全文テキストと合わせて返す。以前はVision標準のfull_text_annotation.text
 をそのまま使う座標無しの単純版（core.ocr_services.extract_text_via_ocr）を別モジュールとして
 持っていたが、pdf2image変換・Visionクライアント生成・ページ単位ループの大部分が重複していたため
-2026-08-19に本モジュールへ統合・削除した（settings.OCR_EMBED_TEXT_TO_PDF=Falseの間も常にこちらを
+2026-08-19に本モジュールへ統合・削除した（OCR座標データを保存しない設定でも常にこちらを
 使い、戻り値のテキスト部分だけを使う。Vision標準の再構成ではなく座標からの独自再構成になるため、
-統合前後でextracted_textの中身〈行順等〉が変わりうる点はユーザー承認済み）。
+統合前後で本文テキストの中身〈行順等〉が変わりうる点はユーザー承認済み）。
 
 settings.OCR_ENABLED が False の間はGoogle Cloud Vision API・pdf2imageを一切呼び出さない
 （機微情報を含む文書の画像データを外部クラウドAPIへ送信する経路を、設定で完全に遮断できるように
@@ -66,6 +67,34 @@ class TextDatas:
     page_width: int
     page_height: int
     textdata_list: List[TextData]
+
+
+def textdatas_to_json(textdatas):
+    """TextDatas のリストを DB(JSONField)・再構成に耐える素の list へ変換する（監査 案3）。
+    1行 = [x1, y1, x2, y2, text] の配列形式にして、キー重複ぶんの容量を抑える
+    （dict キーを毎行持つと 1000 ページ規模で無視できないため）。"""
+    return [
+        {
+            "page": td.page_no,
+            "w": td.page_width,
+            "h": td.page_height,
+            "lines": [[ln.x1, ln.y1, ln.x2, ln.y2, ln.text] for ln in td.textdata_list],
+        }
+        for td in textdatas
+    ]
+
+
+def textdatas_from_json(data):
+    """textdatas_to_json の逆変換。検索用PDFの遅延生成（core.searchable_pdf_services）で使う。"""
+    return [
+        TextDatas(
+            page_no=d["page"],
+            page_width=d["w"],
+            page_height=d["h"],
+            textdata_list=[TextData(x1, y1, x2, y2, text) for x1, y1, x2, y2, text in d["lines"]],
+        )
+        for d in data
+    ]
 
 
 def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name=""):

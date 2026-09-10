@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
+from core.text_normalization import normalize_for_search
 from documents.forms import SearchForm
 from documents.search_services import build_queryset
 from documents.services import (
@@ -273,16 +274,14 @@ class SearchQuerysetTests(TestCase):
         self.assertIn(doc, qs)
 
     def test_freeword_search_matches_extracted_text_across_katakana_width(self):
-        """フリーワード検索（extracted_text対象）でも半角全角カタカナを区別しない
-        （documents.models.Document.extracted_text_normalized参照）。
-        """
+        """フリーワード検索（本文＝extracted_text_normalized対象）でも半角全角カタカナを区別しない。"""
         from documents.models import Document
 
         doc = Document(
             title="半角カタカナ本文テスト", department=self.department, group=self.group,
             category=self.category, year=2026, retention_period=self.retention_period,
             uploader=self.employee, expiry_date=datetime.date(2030, 1, 1),
-            extracted_text="ﾃｽﾄﾃﾞｰﾀ",
+            extracted_text_normalized=normalize_for_search("ﾃｽﾄﾃﾞｰﾀ"), text_extracted=True,
         )
         doc.file.save("test.pdf", ContentFile(b"dummy"), save=False)
         doc.save()
@@ -358,22 +357,22 @@ class SearchQuerysetTests(TestCase):
         self.assertEqual(list(qs), [self.doc_apple_only])
 
     def test_list_queryset_defers_heavy_text_columns(self):
-        """一覧クエリは表示しない重いTextField（extracted_text等）を取得しない
-        （core.search_services.LIST_DEFERRED_TEXT_FIELDS）。数千件規模で1ページ100行分の
+        """一覧クエリは表示しない重いカラム（extracted_text_normalized・ocr_textdata 等）を取得しない
+        （core.search_services.LIST_DEFERRED_HEAVY_FIELDS）。数千件規模で1ページ100行分の
         OCR全文を毎回転送していた無駄を避けるための最適化のリグレッションガード。
         deferされた列へ触れると追加クエリ（DeferredAttributeの遅延ロード）が飛ぶことで検証する。
         """
         from documents.models import Document
 
         Document.objects.filter(pk=self.doc_apple_only.pk).update(
-            extracted_text="本文" * 100, extracted_text_normalized="ほんぶん" * 100
+            extracted_text_normalized="ほんぶん" * 100
         )
         form = SearchForm(data={})
         obj = next(o for o in build_queryset(form, employee=self.employee) if o.pk == self.doc_apple_only.pk)
         with self.assertNumQueries(0):
             _ = obj.title  # 通常フィールドは取得済みで追加クエリ無し
         with self.assertNumQueries(1):
-            _ = obj.extracted_text  # deferされているので遅延ロードで1クエリ
+            _ = obj.extracted_text_normalized  # deferされているので遅延ロードで1クエリ
 
 
 class SearchFormRadioDefaultsInitialAccessTests(TestCase):
@@ -1043,6 +1042,70 @@ class DownloadViewTests(TestCase):
             "django.db.models.fields.files.FieldFile.open", side_effect=OSError("missing")
         ):
             response = self.client.get(f"/documents/{self.document.pk}/download/")
+        self.assertEqual(response.status_code, 404)
+
+
+class SearchablePdfViewTests(TestCase):
+    """検索用PDF（OCRテキスト埋め込み版）の遅延生成ダウンロード（監査 案3、2026-09-11）。
+    埋め込み処理自体（core.pdf_text_embed_services）は PdfTextEmbedServicesTests で検証済みのため
+    ここではモック化し、権限・404・監査ログを確認する。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+        self.client.login(username="1", password="pass1234")
+        from documents.models import Document
+
+        self.document = Document(
+            title="検索用PDF対象", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=datetime.date(2030, 1, 1), privacy_flag=False,
+            ocr_textdata=[{"page": 1, "w": 800, "h": 1100, "lines": [[1, 1, 2, 2, "x"]]}],
+            text_extracted=True,
+        )
+        self.document.file.save("scan.pdf", ContentFile(b"%PDF-1.4 dummy"), save=False)
+        self.document.save()
+
+    def test_generates_and_serves_pdf_with_permission(self):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        with mock.patch(
+            "core.record_views.searchable_pdf_services.build_searchable_pdf",
+            return_value=b"%PDF-1.4 embedded",
+        ) as m:
+            response = self.client.get(f"/documents/{self.document.pk}/searchable-pdf/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.streaming_content), b"%PDF-1.4 embedded")
+        m.assert_called_once()
+        entry = AuditLog.objects.get(action="文書検索　検索用PDFダウンロード")
+        self.assertEqual(entry.event_message, "ファイル名：scan.pdf")
+
+    def test_denied_without_download_permission(self):
+        response = self.client.get(f"/documents/{self.document.pk}/searchable-pdf/")
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(AuditLog.objects.filter(action="文書検索　検索用PDFダウンロード").exists())
+
+    def test_404_when_no_ocr_textdata(self):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        from documents.models import Document
+
+        Document.objects.filter(pk=self.document.pk).update(ocr_textdata=None)
+        response = self.client.get(f"/documents/{self.document.pk}/searchable-pdf/")
         self.assertEqual(response.status_code, 404)
 
 
@@ -3198,8 +3261,8 @@ class UploadBlockedFileTypeTests(TestCase):
 
 class UploadStep2ImmediateExtractionTests(TestCase):
     """保管画面２登録後、core.text_extraction_services.try_immediate_text_layer_extractionが
-    呼ばれ、テキスト層のあるPDFはその場でextracted_textが埋まることを確認する
-    （全文検索基盤、2026-08-10追加）。pdfplumberの解析自体はモック化する。
+    呼ばれ、テキスト層のあるPDFはその場で extracted_text_normalized が埋まり text_extracted=True に
+    なることを確認する（全文検索基盤、2026-08-10追加）。pdfplumberの解析自体はモック化する。
     """
 
     def setUp(self):
@@ -3237,7 +3300,7 @@ class UploadStep2ImmediateExtractionTests(TestCase):
         mock_pdf.__exit__.return_value = False
         return mock_pdf
 
-    def test_registration_populates_extracted_text_for_text_layer_pdf(self):
+    def test_registration_populates_normalized_text_for_text_layer_pdf(self):
         from documents.models import Document
 
         with mock.patch(
@@ -3260,7 +3323,10 @@ class UploadStep2ImmediateExtractionTests(TestCase):
             )
         self.assertEqual(response.status_code, 200)
         document = Document.objects.get(title="テスト文書")
-        self.assertEqual(document.extracted_text, "十分な文字数を含む本文テキストです。")
+        self.assertEqual(
+            document.extracted_text_normalized, normalize_for_search("十分な文字数を含む本文テキストです。")
+        )
+        self.assertTrue(document.text_extracted)
 
 
 class ChunkUploadAPITests(TestCase):
@@ -3468,21 +3534,24 @@ class DocumentSaveNormalizationTests(TestCase):
         self.assertEqual(reloaded.title, "新タイトルＡＢＣ")
         self.assertEqual(reloaded.title_normalized, normalize_for_search("新タイトルＡＢＣ"))
 
-    def test_update_fields_extracted_text_only_still_persists_normalized_shadow_column(self):
-        from core.text_normalization import normalize_for_search
+    def test_extracted_text_normalized_is_not_derived_by_the_mixin(self):
+        """監査 案1（2026-09-11）：生 extracted_text カラム廃止に伴い、extracted_text_normalized は
+        NormalizedTextFieldsMixin の導出対象から外した。抽出サービスが直接セットする列であり、
+        通常の save() では touch しない（title 変更等で上書きされない）。"""
         from documents.models import Document
 
-        self.document.extracted_text = "本文サンプルＸＹＺ"
-        self.document.save(update_fields=["extracted_text"])
-
+        Document.objects.filter(pk=self.document.pk).update(
+            extracted_text_normalized="ほんぶん", text_extracted=True
+        )
+        self.document.refresh_from_db()
+        self.document.title = "別タイトル"
+        self.document.save(update_fields=["title"])
         reloaded = Document.objects.get(pk=self.document.pk)
-        self.assertEqual(reloaded.extracted_text, "本文サンプルＸＹＺ")
-        self.assertEqual(reloaded.extracted_text_normalized, normalize_for_search("本文サンプルＸＹＺ"))
+        self.assertEqual(reloaded.extracted_text_normalized, "ほんぶん")  # 保持される
 
     def test_logical_delete_save_does_not_recompute_normalization(self):
-        """コードレビューR-7：update_fieldsに元カラム（title/memo/extracted_text）が無いsave
-        （論理削除等）では正規化を一切走らせない。extracted_textはOCR全文で数十KBになり得るため、
-        一括削除で件数ぶん無駄なNFKC正規化を避ける。"""
+        """コードレビューR-7：update_fieldsに元カラム（title/memo）が無いsave（論理削除等）では
+        正規化を一切走らせない。"""
         with mock.patch("core.text_normalization.normalize_for_search") as normalize:
             self.document.is_deleted = True
             self.document.deleted_at = timezone.now()
@@ -3491,9 +3560,8 @@ class DocumentSaveNormalizationTests(TestCase):
 
 
 class DocumentIndexTests(SimpleTestCase):
-    """監査 B-IDX-1：フリーワード全文検索は正規化シャドウ列 extracted_text_normalized にしか
-    icontains しないため、GIN(gin_trgm_ops) は正規化列のみに張る。生 extracted_text の GIN を
-    誤って復活させないためのリグレッションガード。"""
+    """監査 B-IDX-1 / B-IDX-2：フリーワード全文検索は正規化シャドウ列にしか icontains しないため、
+    GIN(gin_trgm_ops) は正規化3列（title/memo/extracted_text_normalized）のみに張る。"""
 
     def _gin_field_sets(self):
         from django.contrib.postgres.indexes import GinIndex
@@ -3504,8 +3572,14 @@ class DocumentIndexTests(SimpleTestCase):
             tuple(idx.fields) for idx in Document._meta.indexes if isinstance(idx, GinIndex)
         ]
 
-    def test_no_gin_index_on_raw_extracted_text(self):
-        self.assertNotIn(("extracted_text",), self._gin_field_sets())
+    def test_raw_extracted_text_field_is_gone(self):
+        """監査 案1：生 extracted_text カラム自体を廃止した。"""
+        from django.core.exceptions import FieldDoesNotExist
+
+        from documents.models import Document
+
+        with self.assertRaises(FieldDoesNotExist):
+            Document._meta.get_field("extracted_text")
 
     def test_gin_index_on_normalized_extracted_text_kept(self):
         self.assertIn(("extracted_text_normalized",), self._gin_field_sets())
@@ -3594,14 +3668,6 @@ class StoragePathTests(TestCase):
         uuid_part, _, filename_part = remainder.partition("_")
         self.assertEqual(len(uuid_part), 32)
         self.assertEqual(filename_part, "報告書.pdf")
-
-    def test_document_searchable_upload_path_uses_separate_directory(self):
-        from documents.storage_paths import document_searchable_upload_path
-
-        instance = mock.Mock(year=2026, department=self.department, category=self.category)
-        path = document_searchable_upload_path(instance, "報告書.pdf")
-        self.assertTrue(path.startswith("documents/2026/001-02/010/searchable/"), path)
-        self.assertTrue(path.endswith("_報告書.pdf"))
 
     def test_upload_paths_are_unique_per_call_via_uuid(self):
         from documents.storage_paths import document_upload_path

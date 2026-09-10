@@ -1,13 +1,12 @@
 import uuid
 
 
-def build_hierarchical_upload_path(instance, filename, *, root, searchable=False):
-    """documents.Document.file/searchable_fileおよびcontracts.Contract.file/searchable_fileの
-    保存先パスを生成する共通ロジック。documents.storage_paths.document_upload_path/
-    document_searchable_upload_path/contracts.storage_paths.contract_upload_path/
-    contract_searchable_upload_pathの計4関数が、ルートディレクトリ名（"documents"/"contracts"）と
-    searchable用サブディレクトリの有無以外完全に同一実装のまま重複していたため集約した
-    （品質レビューで発見、2026-08-25修正）。
+def build_hierarchical_upload_path(instance, filename, *, root):
+    """documents.Document.file / contracts.Contract.file の保存先パスを生成する共通ロジック。
+    documents.storage_paths.document_upload_path / contracts.storage_paths.contract_upload_path が
+    ルートディレクトリ名（"documents"/"contracts"）以外完全に同一実装のまま重複していたため集約した
+    （品質レビューで発見、2026-08-25修正。旧 searchable_file 用の `searchable=` 分岐は
+    searchable_file 廃止に伴い撤去、2026-09-11、監査 案3）。
 
     HTML/xlsxはUI項目のみを規定しており、保存先ディレクトリ構成そのものはバックエンド実装の
     裁量事項（画面上に現れないため）。年・部署・カテゴリーで階層化し、運用時にファイルシステム上
@@ -23,15 +22,13 @@ def build_hierarchical_upload_path(instance, filename, *, root, searchable=False
     FileField/Storageがパストラバーサル対策（validate_file_name）を内部で行うため、ここでは
     追加のサニタイズを行っていない。
 
-    `root`は"documents"/"contracts"、`searchable`はOCRテキスト埋め込み済み検索用PDF
-    （settings.OCR_EMBED_TEXT_TO_PDF）用に原本とは別ディレクトリ（searchable/）へ置くかどうか。
+    `root`は"documents"/"contracts"。
     """
     department = instance.department
     category = instance.category
     ext_uuid = uuid.uuid4().hex
-    searchable_segment = "searchable/" if searchable else ""
     return (
         f"{root}/{instance.year}/"
         f"{department.branch_code}-{department.section_code}/"
-        f"{category.code}/{searchable_segment}{ext_uuid}_{filename}"
+        f"{category.code}/{ext_uuid}_{filename}"
     )

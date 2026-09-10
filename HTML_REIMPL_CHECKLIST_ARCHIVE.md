@@ -1665,3 +1665,90 @@ Employee は created_at/updated_at 両方持ち）と非対称だったものを
 以上で `MODEL_AUDIT_FINDINGS.md` フェーズ2の全指摘に対応完了（対応 or 理由付きで現状維持を確定）。
 D-2（電子決裁3フラグ＝現状維持）・D-4（FK方向・循環import・related_name＝問題なし）・E軸の
 `--check` 差分なし、およびセクション6「問題なし」項目は元々対応不要。
+
+---
+
+## 全文検索・OCRデータ層の再設計（案1+2+3、2026-09-11、ユーザー依頼）
+
+「1000ページPDF等で `extracted_text` と `extracted_text_normalized` の二重保持＋埋め込み済み
+searchable_file の恒久保存が容量を圧迫する」というユーザーからの容量最適化の相談を受けて、
+モデル定義妥当性監査フェーズ2の直後に別サイクルとして再設計した（xlsx/HTML 仕様外の
+OCR・検索・ストレージ再設計のため、CLAUDE.md 方針どおりユーザー承認＋独立実装。設計討議で
+「現在の ja_pj 機能はすべて満たせる」ことを機能マトリクスで確認済み。決定：privacy_flag=True は
+ocr_textdata も保存しない／保存するのは textdatas（Vision 生レスポンスではない）。推奨6ポイント
+すべてユーザー承認）。
+
+### 案1：生 `extracted_text` カラムを廃止
+
+- `documents.Document` / `contracts.Contract` から `extracted_text`（TextField）を**削除**。
+  検索の唯一の格納テキストは `extracted_text_normalized`（NFKC 正規化済み）のみ。
+- populate は `NormalizedTextFieldsMixin`（title/memo の *_normalized 導出）**ではなく**、
+  抽出サービス（`core.text_extraction_services.try_immediate_text_layer_extraction` /
+  `core.management.commands.extract_pending_pdf_text`）が `normalize_for_search(text)` を直接
+  セットして `save(update_fields=["extracted_text_normalized", "text_extracted"])` する。
+  → Mixin の `_NORMALIZED_FIELD_MAP` から `extracted_text` 対応を除去。通常の title 変更等で
+  OCR全文を無駄に再正規化する問題も消滅。
+- 根拠：テキスト層抽出（pdfplumber）は決定的・ローカル・無料で元ファイルから再実行でき、
+  OCR 結果は `ocr_textdata` から `_get_textlines` で再導出できる（privacy 除く）。生テキストを
+  DB に持つ意味が無い。原本性は原本ファイル `file` の保持でカバー。
+
+### 案2：`text_extracted`（BooleanField）で未処理判定を一本化
+
+- 新フィールド `text_extracted`（default=False, db_index=True）。テキスト層抽出 or OCR が
+  完了したら True（結果が空文字列でも「抽出は完了」＝True）。
+- 旧 `ocr_attempted` フィールドは**削除**（`text_extracted` に統合）。
+- バッチのクエリ：`filter(extracted_text="", ocr_attempted=False, ...)` →
+  `filter(text_extracted=False, is_deleted=False)`。カラムの中身に依存しないフラグ判定になり、
+  「テキスト層PDFだが本文がほぼ無い」の曖昧さも解消。
+- 誤OCR再抽出の運用手順：「`extracted_text` を空に戻す」→「`text_extracted` を False に戻す」。
+  → `doc/文書管理システム_残項目_本番リリース手順書.xlsx` 等の運用手順に手順名変更の反映が必要
+  （xlsx 直接編集はユーザー指示があれば別途）。
+
+### 案3：`searchable_file`（埋め込み済みPDF恒久保存）→ `ocr_textdata` ＋ 遅延生成
+
+- `searchable_file`（FileField）を**削除**。新フィールド `ocr_textdata`（JSONField, null可,
+  editable=False）に OCR 行レイアウト（`core.ocr_layout_services.textdatas_to_json` 形式、
+  `[{"page":n,"w":pw,"h":ph,"lines":[[x1,y1,x2,y2,text], ...]}, ...]` の配列形式でキー重複を圧縮）を
+  保存する。1000ページのスキャン文書で埋め込み済みPDF数十〜数百MB → 座標JSON 1〜4MB（圧縮後）。
+- 保存条件：`settings.OCR_STORE_TEXTDATA=True`（旧 `OCR_EMBED_TEXT_TO_PDF` からリネーム、既定
+  False のまま）かつ `_should_store_textdata(obj)`（`documents.Document.privacy_flag=True` を除外、
+  2026-09-11ユーザー指示。Contract は privacy_flag が無く設定のみに従う）。
+- 遅延生成：`core.searchable_pdf_services.build_searchable_pdf(obj)` ＝
+  `pdf_text_embed_services.embed_textdatas_into_pdf(原本PDF, textdatas_from_json(obj.ocr_textdata))`。
+  `ocr_textdata` が null なら `SearchablePdfUnavailable`。
+- エンドポイント：`documents:searchable_pdf` / `contracts:searchable_pdf`（`<pk>/searchable-pdf/`）＝
+  `core.record_views.BaseSearchablePdfView`。`can_download` 権限で保護、`apply_file_response_
+  security_headers` 付与、監査ログ（action「文書検索　検索用PDFダウンロード」等）。**まだどの画面
+  からもリンクしていない**（旧 searchable_file に読み経路が無かったのと同じ状態。利用者向けUIの
+  追加は別途）。
+- `core.ocr_layout_services` に `textdatas_to_json` / `textdatas_from_json` を追加。
+- `purge_expired_deleted_records` から `searchable_file` 実体削除分岐を撤去（`ocr_textdata` は
+  DBカラムのため `obj.delete()` で自動的に消える）。
+- `core.storage_paths.build_hierarchical_upload_path` の `searchable=` 引数、
+  `document_searchable_upload_path` / `contract_searchable_upload_path` を撤去。
+
+### マイグレーション・設定・テスト
+
+- documents / contracts の `0001_initial.py` を直書き（`extracted_text`・`ocr_attempted`・
+  `searchable_file` を削除、`text_extracted`・`ocr_textdata` を追加）。`makemigrations --check`
+  クリーン。
+- `.env.example` / `.env`（gitignore、ユーザーの意図を汲んで `OCR_STORE_TEXTDATA=True` に更新）/
+  `requirements.txt` コメント / `config/settings/base.py` を更新。
+- `core.search_services.LIST_DEFERRED_TEXT_FIELDS` → `LIST_DEFERRED_HEAVY_FIELDS`（`extracted_text`
+  を外し `ocr_textdata` を追加。一覧クエリで defer）。
+- テスト：`ExtractPendingPdfTextCommandTests` / `ExtractPendingPdfTextTextdataTests`（旧
+  ...EmbedTests）/ `ShouldStoreTextdataTests`（旧 ShouldEmbedTests）/ `TryImmediateTextLayer
+  ExtractionTests` を `extracted_text_normalized`＋`text_extracted`＋`ocr_textdata` ベースに全面
+  書き換え。`textdatas_to_json` 往復テスト、`SearchablePdfViewTests`（documents/contracts、権限・
+  404・監査）を新設。`searchable_file` の副ファイル削除テストは `ocr_textdata` の同時削除確認に
+  差し替え。`manage.py test` 全1002件 PASS。
+- 既存 dev DB はフレッシュ `migrate` で反映（squash 運用）。既存の埋め込み済み searchable_file
+  実体（`MEDIA_ROOT/documents|contracts/**/searchable/`）は運用側で手動削除。
+
+### 現在の ja_pj 機能との整合（設計討議で確認）
+
+フリーワード全文検索／登録直後の即時反映／スキャン文書OCR／OCR無限リトライ防止／privacy_flag
+除外／一覧の defer 最適化／削除時の物理削除／`OCR_ENABLED=False` 耐性 — **すべて維持**。
+劣化するのは「テキスト層PDFの登録時点の抽出結果を DB に永続保存する」という内部的な冗長性のみ
+（原本ファイル保持＋再抽出でカバー）。`extracted_text` は view/API/テンプレートのどこからも
+参照されておらず、検索スニペット・本文表示の機能は存在しないため表示系は無影響。

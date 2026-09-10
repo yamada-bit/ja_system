@@ -71,6 +71,14 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   タイムスタンプ非対称解消（B-7・B-8）／マイグレーション整容（E-1〜3）／規約準拠コメント・docstring
   （C-1〜7）。モデル変更は全て `0001_initial.py` 直書き・`--check` クリーン・全998件 PASS。
   詳細・見送り理由はアーカイブ「models定義 妥当性監査 フェーズ2：指摘対応」節参照。
+- 全文検索・OCRデータ層の再設計（2026-09-11、ユーザー依頼、**完了**）：容量最適化の相談を受けて、
+  生 `extracted_text` カラム廃止（案1、`extracted_text_normalized` のみ保持）／`ocr_attempted`＋
+  `extracted_text=""` 判定を `text_extracted` フラグに統合（案2）／`searchable_file`（埋め込み済みPDF
+  恒久保存）を `ocr_textdata`（OCR座標JSON、privacy_flag=True は保存しない）＋ `core.searchable_pdf_
+  services` による遅延生成＋ `documents/contracts:searchable_pdf` エンドポイントに置き換え（案3）。
+  `OCR_EMBED_TEXT_TO_PDF`→`OCR_STORE_TEXTDATA` にリネーム。0001 直書き・`--check` クリーン・
+  全1002件 PASS。既存機能はすべて維持（設計討議で機能マトリクス確認）。詳細はアーカイブ
+  「全文検索・OCRデータ層の再設計（案1+2+3）」節参照。
 - xlsx記載の要再確認（赤字）27箇所は全件解消済み。残る恒久的な未実装・保留事項は
   `CLAUDE.md`「既知の未実装・保留事項」に集約されている（電子決裁機能全般、論理削除
   文書・契約書の復元機能は「不要」と最終確定済み）。

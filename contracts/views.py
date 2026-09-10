@@ -696,6 +696,16 @@ class DownloadView(LoginRequiredMixin, record_views.BaseFileServeView):
     entity_label = "契約書"
 
 
+class SearchablePdfView(LoginRequiredMixin, record_views.BaseSearchablePdfView):
+    """documents.views.SearchablePdfView と対（監査 案3、2026-09-11）。旧 Contract.searchable_file を
+    置き換え。`ocr_textdata` が保存されたスキャン文書のみ生成可。まだどの画面からもリンクしていない。"""
+
+    model = Contract
+    kind = "contract"
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    audit_action = "契約書検索　検索用PDFダウンロード"
+
+
 class PreviewView(LoginRequiredMixin, record_views.BaseFileServeView):
     """documents.views.PreviewView参照。screen-search（契約書モード）「文書イメージ」欄用。実体は
     core.record_views.BaseFileServeViewに集約済み（documents.views.PreviewViewとの重複を

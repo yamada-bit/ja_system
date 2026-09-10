@@ -11,7 +11,7 @@ _YEAR_VALIDATORS = [MinValueValidator(1900), MaxValueValidator(2200)]
 
 from core.models import NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin
 from core.upload_validation import validate_no_active_content
-from documents.storage_paths import document_searchable_upload_path, document_upload_path
+from documents.storage_paths import document_upload_path
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +19,18 @@ logger = logging.getLogger(__name__)
 class Document(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Model):
     """文書（screen-storage2/screen-search「文書」モード、screen-storage1経由でアップロード）。
 
-    保管画面のフォーム項目にそのまま対応する。`extracted_text`は screen-search の「フリーワード」欄が
-    ファイル本文に対する全文検索も行う前提（2026-08-07ユーザー指示）で追加した。旧ja_pj_oldでは
-    本番DBのLC_CTYPE=Cが原因でpg_trgmが日本語トライグラムを生成できず、全文検索が実質
-    `icontains`単純部分一致にフォールバックしていたが、新ja_db（`Japanese_Japan.utf8`ロケールで
+    保管画面のフォーム項目にそのまま対応する。`extracted_text_normalized` は screen-search の
+    「フリーワード」欄がファイル本文に対する全文検索も行う前提（2026-08-07ユーザー指示）で追加した。
+    旧ja_pj_oldでは本番DBのLC_CTYPE=Cが原因でpg_trgmが日本語トライグラムを生成できず、全文検索が
+    実質`icontains`単純部分一致にフォールバックしていたが、新ja_db（`Japanese_Japan.utf8`ロケールで
     作成）ではpg_trgmが日本語で正しく機能することを確認済みのため、GinIndex(gin_trgm_ops)による
     類似検索を前提にできる。実際のPDF本文抽出処理は登録直後の同期抽出
     （core.text_extraction_services.try_immediate_text_layer_extraction、テキスト層のある
     PDFのみ対象）と、定期バッチ（core.management.commands.extract_pending_pdf_text、
     テキスト層の無いスキャン文書はGoogle Cloud VisionでOCR）の2段階で行う（2026-08-10追加）。
+    生の抽出テキストは保存せず、NFKC 正規化した `extracted_text_normalized` のみ持つ
+    （監査 案1、2026-09-11。テキスト層抽出は元ファイルから決定的に再実行でき、OCR 結果は
+    `ocr_textdata` から再導出できるため）。
     """
 
     title = models.CharField("文書タイトル", max_length=255)
@@ -66,48 +69,44 @@ class Document(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
     file = models.FileField(
         "ファイル", upload_to=document_upload_path, validators=[validate_no_active_content]
     )
-    extracted_text = models.TextField(
-        "抽出本文",
-        blank=True,
-        default="",
-        help_text="ファイルから抽出した本文テキスト。フリーワード全文検索の対象",
-    )
-    # title/memo/extracted_textそれぞれの検索用シャドウカラム（save()で自動生成、editable=False）。
-    # 半角全角を問わず検索できるようにするため（簡易設計指示書の検索要件、
-    # core.text_normalization.normalize_for_search参照）、NFKC正規化した値を保存しておき、
-    # 検索時はキーワード側も同じ正規化をした上でこちらのカラムに対してicontainsする
-    # （元のtitle/memo/extracted_text自体はユーザー入力・抽出結果をそのまま保持する）。
-    # CharField(255)で導入していたが、NFKC正規化（normalize_for_search）は文字数を増やし得る
-    # （例: 互換文字1字が複数字に展開される）ため、titleが255文字ぎりぎりの場合にDataErrorで
-    # 保存が失敗し得た（品質レビューで発見、2026-08-25修正）。他の*_normalized列と同じTextFieldにし、
-    # 上限自体を無くして原理的にオーバーフローしないようにする。
-    # verbose_name は付けない（editable=False の検索用内部列で UI・admin に出ないため。監査 C-1/Q-3）。
+    # title/memo の検索用シャドウカラム（save()で自動生成、editable=False）。半角全角を問わず
+    # 検索できるようにするため（簡易設計指示書の検索要件、core.text_normalization.
+    # normalize_for_search参照）、NFKC正規化した値を保存し、検索時はキーワード側も同じ正規化を
+    # した上でこのカラムに icontains する。CharField(255)で導入していたが、NFKC正規化は文字数を
+    # 増やし得る（互換文字1字が複数字に展開される）ため TextField にして上限を撤廃済み
+    # （品質レビューで発見、2026-08-25修正）。verbose_name は付けない（editable=False の検索用
+    # 内部列で UI・admin に出ないため。監査 C-1/Q-3）。
     title_normalized = models.TextField(blank=True, default="", editable=False)
     memo_normalized = models.TextField(blank=True, default="", editable=False)
+    # ファイル本文の全文検索用シャドウカラム（フリーワード検索の対象、2026-08-07ユーザー指示）。
+    # 生の抽出テキストは保存しない（監査 案1、2026-09-11）。テキスト層PDFは pdfplumber 抽出結果を、
+    # スキャン文書は OCR 結果を NFKC 正規化してこの列だけに保存する。populate は
+    # NormalizedTextFieldsMixin ではなく抽出サービス（core.text_extraction_services /
+    # core.management.commands.extract_pending_pdf_text）が直接行う。
     extracted_text_normalized = models.TextField(blank=True, default="", editable=False)
-    ocr_attempted = models.BooleanField(
-        "OCR実行済み",
+    text_extracted = models.BooleanField(
+        "本文抽出済み",
         default=False,
+        db_index=True,
         help_text=(
-            "core.management.commands.extract_pending_pdf_textがOCR（Google Cloud Vision）を"
-            "実行完了した場合にTrueにする。OCR結果が空文字列（画像に文字が無い等）の場合でも"
-            "extracted_text=\"\"のままだと毎回スキャン文書と判定され無限にOCRが再実行されて"
-            "しまうため、このフラグで一度実行済みのレコードをバッチの対象から除外する"
-            "（一時的なAPIエラーで例外が起きた場合はセットしないため次回リトライされる）。"
+            "テキスト層抽出または OCR による本文抽出が完了したら True（結果が空文字列でも完了は完了）。"
+            "core.management.commands.extract_pending_pdf_text は False のレコードだけを対象にする。"
+            "誤OCR等で再抽出させたい場合は運用手順で False に戻す（監査 案2、2026-09-11。旧 ocr_attempted"
+            "＋extracted_text=\"\" 判定を1フラグに統合）。"
         ),
     )
-    searchable_file = models.FileField(
-        "検索用PDF（OCRテキスト埋め込み版）",
-        upload_to=document_searchable_upload_path,
+    ocr_textdata = models.JSONField(
+        "OCR座標データ",
         null=True,
         blank=True,
+        editable=False,
         help_text=(
-            "settings.OCR_EMBED_TEXT_TO_PDF=Trueかつprivacy_flag=False（個人情報を含まない）の"
-            "場合のみ、スキャン文書のOCR結果を透明テキストとして埋め込んだPDFを"
-            "core.management.commands.extract_pending_pdf_textが生成する（既定はnull＝未生成）。"
-            "個人情報を含む文書（privacy_flag=True）は検索用PDFへの複製を避けるため対象外とする"
-            "（2026-08-19追加）。原本（fileフィールド）は変更せず別ファイルとして保持する"
-            "（監査・原本性の観点）。"
+            "スキャン文書の OCR 行レイアウト（core.ocr_layout_services.textdatas_to_json 形式）。"
+            "検索用PDF（OCRテキスト埋め込み版）を core.searchable_pdf_services が必要時に生成するための"
+            "元データ。settings.OCR_STORE_TEXTDATA=True かつ privacy_flag=False（個人情報を含まない）の"
+            "スキャン文書でのみ保存する（個人情報の本文を DB へ複製しないため）。テキスト層PDF・"
+            "privacy_flag=True の文書は null（監査 案3、2026-09-11。旧 searchable_file〈埋め込み済み"
+            "PDFの恒久保存〉を、桁違いに小さい座標データの保存＋遅延生成に置き換えた）。"
         ),
     )
 
@@ -132,10 +131,8 @@ class Document(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
             # フリーワード全文検索（core.search_services.apply_freeword_filter）は
             # title_normalized / memo_normalized / extracted_text_normalized の3列を OR で icontains、
             # タイトル検索（apply_word_filter）は title_normalized を icontains する。いずれも正規化
-            # シャドウ列に対してのみ検索するため、GIN(gin_trgm_ops) も正規化列3本に揃えて張る。
-            # 生 title / memo / extracted_text には索引を張らない（生 extracted_text の GIN は
-            # filter(extracted_text="") の等値判定にしか使われず無用だったため 2026-09-10 に撤去。
-            # 監査 B-IDX-1 / B-IDX-2）。
+            # シャドウ列に対してのみ検索するため、GIN(gin_trgm_ops) も正規化列3本に揃えて張る
+            # （監査 B-IDX-1 / B-IDX-2。生 extracted_text カラム自体は 2026-09-11 に廃止、案1）。
             GinIndex(fields=["title_normalized"], name="doc_title_norm_trgm", opclasses=["gin_trgm_ops"]),
             GinIndex(fields=["memo_normalized"], name="doc_memo_norm_trgm", opclasses=["gin_trgm_ops"]),
             GinIndex(
@@ -155,6 +152,7 @@ class Document(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
     def __str__(self):
         return self.title
 
-    # save()（*_normalizedシャドウカラムの再計算）とdisplay_nameプロパティの実体は
+    # save()（title/memo の *_normalized 再計算）とdisplay_nameプロパティの実体は
     # core.models.NormalizedTextFieldsMixin/UuidPrefixedFilenameMixinに集約済み
     # （contracts.Contractとの重複をコード監査で発見、2026-08-25修正）。
+    # extracted_text_normalized は抽出サービスが直接セットする（Mixin対象外、案1）。

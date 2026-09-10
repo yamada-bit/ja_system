@@ -74,9 +74,9 @@ class Command(BaseCommand):
     def _purge(self, queryset, *, kind, event_label, personal_info_flag_fn=None):
         """is_deleted=Trueのqueryset1件ずつをDBレコード・ファイル実体ごと完全削除する共通処理。
         documents/contractsで構造（クエリ→ループ→ファイル欄退避→delete()→ファイル削除→監査ログ）が
-        同一だったため集約した（documents側のprivacy_flagだけ personal_info_flag_fn で差分注入する。
-        Rev1.6までは契約書の関連書類ファイル退避も extra_files_fn で注入していたが、関連書類が
-        既存契約書への参照〈ContractRelation, CASCADE〉になりファイル実体を持たなくなったため撤去）。
+        同一だったため集約した（documents側のprivacy_flagだけ personal_info_flag_fn で差分注入する）。
+        ファイル実体は原本の `file` のみ（旧 searchable_file は 2026-09-11 に廃止＝監査 案3、
+        OCR座標データ ocr_textdata は DB カラムのため obj.delete() で自動的に消える）。
 
         1件ずつdelete()する設計は意図的に維持している（バルクdelete()にまとめると、1件のDB制約
         違反等で全体がロールバックされ、ゴミ箱保管中の全対象が一切物理削除されなくなる。日次実行の
@@ -91,7 +91,6 @@ class Command(BaseCommand):
             # 問題への対処）。
             obj_pk = obj.pk
             file_field = obj.file
-            searchable_file_field = obj.searchable_file
             try:
                 obj.delete()
             except DBError:
@@ -102,8 +101,6 @@ class Command(BaseCommand):
             # ファイル実体を削除し、ファイル削除の失敗自体はログに残した上で握りつぶす
             # （本処理の主目的はDBレコードを消すことであり孤児ファイルは実害が小さいため）。
             self._delete_file(file_field, kind, obj_pk)
-            if searchable_file_field:
-                self._delete_file(searchable_file_field, f"{kind}(searchable_file)", obj_pk)
             # documents/contracts.views.DeleteView（廃止前）が完全削除時に残していた監査ログを、
             # 唯一の完全削除経路になった本バッチでも引き続き記録する（CLAUDE.md「監査が必要な
             # イベント...は一元的な記録機構（auditアプリ）を通す」）。

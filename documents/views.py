@@ -596,6 +596,21 @@ class DownloadView(LoginRequiredMixin, record_views.BaseFileServeView):
         return {"personal_info_flag": obj.privacy_flag}
 
 
+class SearchablePdfView(LoginRequiredMixin, record_views.BaseSearchablePdfView):
+    """検索用PDF（OCRテキスト埋め込み版）の遅延生成ダウンロード（監査 案3、2026-09-11）。
+    旧 Document.searchable_file（事前生成・恒久保存）を置き換え。`ocr_textdata` が保存された
+    スキャン文書のみ生成可。まだどの画面からもリンクしていない（旧 searchable_file に読み経路が
+    無かったのと同じ状態。利用者向けUIの追加は別途）。"""
+
+    model = Document
+    kind = "document"
+    scoped_lookup = staticmethod(scoped_get_object_or_404)
+    audit_action = "文書検索　検索用PDFダウンロード"
+
+    def audit_extra_kwargs(self, obj):
+        return {"personal_info_flag": obj.privacy_flag}
+
+
 class PreviewView(LoginRequiredMixin, record_views.BaseFileServeView):
     """screen-search「文書イメージ」欄。原本index.htmlには実データ連携が無く固定のシミュレーション
     文言のみだったが、ユーザー要望で実ファイルのプレビュー表示に対応する。DownloadViewと同じ

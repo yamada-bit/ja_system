@@ -13,6 +13,7 @@ from audit.models import AuditLog
 from contracts.forms import CommaNumberInput, SearchForm
 from contracts.search_services import build_queryset
 from contracts.services import calculate_expiry_date, contract_edit_is_dirty
+from core.text_normalization import normalize_for_search
 from masters.models import Category, DocKbn, Group
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
@@ -124,7 +125,8 @@ class SearchQuerysetTests(TestCase):
         contract = Contract(
             title="半角カタカナ本文テスト", department=self.department, group=self.group,
             category=self.category, year=2026, uploader=self.employee,
-            expiry_date=datetime.date(2036, 1, 1), extracted_text="ﾃｽﾄﾃﾞｰﾀ",
+            expiry_date=datetime.date(2036, 1, 1),
+            extracted_text_normalized=normalize_for_search("ﾃｽﾄﾃﾞｰﾀ"), text_extracted=True,
         )
         contract.file.save("test.pdf", ContentFile(b"dummy"), save=False)
         contract.save()
@@ -151,11 +153,11 @@ class SearchQuerysetTests(TestCase):
 
     def test_list_queryset_defers_heavy_text_columns(self):
         """documents.tests.SearchQuerysetTests.test_list_queryset_defers_heavy_text_columnsと
-        同じ理由（core.search_services.LIST_DEFERRED_TEXT_FIELDS）。"""
+        同じ理由（core.search_services.LIST_DEFERRED_HEAVY_FIELDS）。"""
         from contracts.models import Contract
 
         Contract.objects.filter(pk=self.contract_apple_only.pk).update(
-            extracted_text="本文" * 100, extracted_text_normalized="ほんぶん" * 100
+            extracted_text_normalized="ほんぶん" * 100
         )
         form = SearchForm(data={})
         obj = next(
@@ -164,7 +166,7 @@ class SearchQuerysetTests(TestCase):
         with self.assertNumQueries(0):
             _ = obj.title
         with self.assertNumQueries(1):
-            _ = obj.extracted_text
+            _ = obj.extracted_text_normalized
 
 
 class DateRangeValidationTests(TestCase):
@@ -1303,13 +1305,15 @@ class RelatedSearchAPIViewTests(TestCase):
             code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
         )
 
-    def _c(self, title, *, dept=None, is_deleted=False, extracted_text=""):
+    def _c(self, title, *, dept=None, is_deleted=False, body_text=""):
         from contracts.models import Contract
 
         c = Contract(
             title=title, department=dept or self.dept, group=self.group, category=self.category,
             year=2025, uploader=self.employee, expiry_date=datetime.date(2035, 1, 1),
-            is_deleted=is_deleted, extracted_text=extracted_text,
+            is_deleted=is_deleted,
+            extracted_text_normalized=normalize_for_search(body_text),
+            text_extracted=bool(body_text),
         )
         c.file.save(f"{title}.pdf", ContentFile(b"X"), save=False)
         c.save()
@@ -1329,8 +1333,8 @@ class RelatedSearchAPIViewTests(TestCase):
         self.assertEqual(values, {hit.pk})
 
     def test_freeword_matches_extracted_text(self):
-        hit = self._c("A契約", extracted_text="重要な覚書の本文がここにある")
-        self._c("B契約", extracted_text="無関係な内容")
+        hit = self._c("A契約", body_text="重要な覚書の本文がここにある")
+        self._c("B契約", body_text="無関係な内容")
         resp = self.client.get("/contracts/api/related-search/", {"freeword": "覚書"})
         values = {item["value"] for item in resp.json()["items"]}
         self.assertEqual(values, {hit.pk})
@@ -1501,6 +1505,60 @@ class DownloadViewTests(TestCase):
             "django.db.models.fields.files.FieldFile.open", side_effect=OSError("missing")
         ):
             response = self.client.get(f"/contracts/{self.contract.pk}/download/")
+        self.assertEqual(response.status_code, 404)
+
+
+class SearchablePdfViewTests(TestCase):
+    """documents.tests.SearchablePdfViewTests と対（監査 案3、2026-09-11）。埋め込み処理はモック化。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        self.client.login(username="1", password="pass1234")
+        from contracts.models import Contract
+
+        self.contract = Contract(
+            title="検索用PDF対象", department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+            ocr_textdata=[{"page": 1, "w": 800, "h": 1100, "lines": [[1, 1, 2, 2, "x"]]}],
+            text_extracted=True,
+        )
+        self.contract.file.save("scan.pdf", ContentFile(b"%PDF-1.4 dummy"), save=False)
+        self.contract.save()
+
+    def test_generates_and_serves_pdf_with_permission(self):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
+        )
+        with mock.patch(
+            "core.record_views.searchable_pdf_services.build_searchable_pdf",
+            return_value=b"%PDF-1.4 embedded",
+        ):
+            response = self.client.get(f"/contracts/{self.contract.pk}/searchable-pdf/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(AuditLog.objects.filter(action="契約書検索　検索用PDFダウンロード").exists())
+
+    def test_denied_without_download_permission(self):
+        response = self.client.get(f"/contracts/{self.contract.pk}/searchable-pdf/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_404_when_no_ocr_textdata(self):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
+        )
+        from contracts.models import Contract
+
+        Contract.objects.filter(pk=self.contract.pk).update(ocr_textdata=None)
+        response = self.client.get(f"/contracts/{self.contract.pk}/searchable-pdf/")
         self.assertEqual(response.status_code, 404)
 
 
@@ -3217,7 +3275,7 @@ class UploadFileIOErrorTests(TestCase):
 
 class UploadStep2ImmediateExtractionTests(TestCase):
     """documents.tests.UploadStep2ImmediateExtractionTestsと同じ理由（全文検索基盤、
-    2026-08-10追加）。契約書側でも登録直後にextracted_textが埋まることを確認する。
+    2026-08-10追加）。契約書側でも登録直後に extracted_text_normalized が埋まることを確認する。
     """
 
     def setUp(self):
@@ -3258,7 +3316,7 @@ class UploadStep2ImmediateExtractionTests(TestCase):
         mock_pdf.__exit__.return_value = False
         return mock_pdf
 
-    def test_registration_populates_extracted_text_for_text_layer_pdf(self):
+    def test_registration_populates_normalized_text_for_text_layer_pdf(self):
         from contracts.models import Contract
 
         with mock.patch(
@@ -3279,7 +3337,10 @@ class UploadStep2ImmediateExtractionTests(TestCase):
             )
         self.assertEqual(response.status_code, 200)
         contract = Contract.objects.get(title="テスト契約書")
-        self.assertEqual(contract.extracted_text, "十分な文字数を含む本文テキストです。")
+        self.assertEqual(
+            contract.extracted_text_normalized, normalize_for_search("十分な文字数を含む本文テキストです。")
+        )
+        self.assertTrue(contract.text_extracted)
 
 
 class ContractEditViewFileHandlingTests(TestCase):
@@ -3686,16 +3747,19 @@ class ContractSaveNormalizationTests(TestCase):
         self.assertEqual(reloaded.title, "新タイトルＡＢＣ")
         self.assertEqual(reloaded.title_normalized, normalize_for_search("新タイトルＡＢＣ"))
 
-    def test_update_fields_extracted_text_only_still_persists_normalized_shadow_column(self):
+    def test_extracted_text_normalized_is_not_derived_by_the_mixin(self):
+        """監査 案1（2026-09-11）：documents.tests と対。extracted_text_normalized は
+        NormalizedTextFieldsMixin の導出対象外で、通常の save() では touch しない。"""
         from contracts.models import Contract
-        from core.text_normalization import normalize_for_search
 
-        self.contract.extracted_text = "本文サンプルＸＹＺ"
-        self.contract.save(update_fields=["extracted_text"])
-
+        Contract.objects.filter(pk=self.contract.pk).update(
+            extracted_text_normalized="ほんぶん", text_extracted=True
+        )
+        self.contract.refresh_from_db()
+        self.contract.title = "別タイトル"
+        self.contract.save(update_fields=["title"])
         reloaded = Contract.objects.get(pk=self.contract.pk)
-        self.assertEqual(reloaded.extracted_text, "本文サンプルＸＹＺ")
-        self.assertEqual(reloaded.extracted_text_normalized, normalize_for_search("本文サンプルＸＹＺ"))
+        self.assertEqual(reloaded.extracted_text_normalized, "ほんぶん")
 
 
 class ContractRelationConstraintTests(TestCase):
@@ -3812,8 +3876,8 @@ class FilterValidRelatedIdsTests(TestCase):
 
 
 class ContractIndexTests(SimpleTestCase):
-    """監査 B-IDX-1：documents.tests.DocumentIndexTests と対。GIN(gin_trgm_ops) は正規化列
-    extracted_text_normalized のみに張り、生 extracted_text の GIN は持たない。"""
+    """監査 B-IDX-1 / B-IDX-2：documents.tests.DocumentIndexTests と対。GIN(gin_trgm_ops) は
+    正規化3列のみに張る。"""
 
     def _gin_field_sets(self):
         from django.contrib.postgres.indexes import GinIndex
@@ -3824,8 +3888,14 @@ class ContractIndexTests(SimpleTestCase):
             tuple(idx.fields) for idx in Contract._meta.indexes if isinstance(idx, GinIndex)
         ]
 
-    def test_no_gin_index_on_raw_extracted_text(self):
-        self.assertNotIn(("extracted_text",), self._gin_field_sets())
+    def test_raw_extracted_text_field_is_gone(self):
+        """監査 案1：生 extracted_text カラム自体を廃止した。"""
+        from django.core.exceptions import FieldDoesNotExist
+
+        from contracts.models import Contract
+
+        with self.assertRaises(FieldDoesNotExist):
+            Contract._meta.get_field("extracted_text")
 
     def test_gin_index_on_normalized_extracted_text_kept(self):
         self.assertIn(("extracted_text_normalized",), self._gin_field_sets())
@@ -3932,9 +4002,9 @@ class ContractPeriodConstraintTests(TestCase):
 class StoragePathTests(TestCase):
     """contracts.storage_paths（CLAUDE.md規約準拠監査で発見：documents.tests.StoragePathTestsと
     同じ観点のテストがcontracts側に無かった。同じ集約先〈core.storage_paths.
-    build_hierarchical_upload_path〉を使うcontract_upload_path/contract_searchable_upload_pathを
-    検証する。review_rule_doc_contract.txt指摘1参照、2026-08-25追加。related_file_upload_pathは
-    Rev1.6でRelatedFileごと廃止）。
+    build_hierarchical_upload_path〉を使うcontract_upload_pathを検証する。
+    review_rule_doc_contract.txt指摘1参照、2026-08-25追加。related_file_upload_pathはRev1.6で、
+    contract_searchable_upload_pathは2026-09-11（監査 案3）にそれぞれ廃止）。
     """
 
     def setUp(self):
@@ -3957,14 +4027,6 @@ class StoragePathTests(TestCase):
         uuid_part, _, filename_part = remainder.partition("_")
         self.assertEqual(len(uuid_part), 32)
         self.assertEqual(filename_part, "契約書.pdf")
-
-    def test_contract_searchable_upload_path_uses_separate_directory(self):
-        from contracts.storage_paths import contract_searchable_upload_path
-
-        instance = mock.Mock(year=2026, department=self.department, category=self.category)
-        path = contract_searchable_upload_path(instance, "契約書.pdf")
-        self.assertTrue(path.startswith("contracts/2026/001-02/010/searchable/"), path)
-        self.assertTrue(path.endswith("_契約書.pdf"))
 
     def test_upload_paths_are_unique_per_call_via_uuid(self):
         from contracts.storage_paths import contract_upload_path

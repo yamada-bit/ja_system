@@ -18,6 +18,8 @@ import logging
 
 import pdfplumber
 
+from core.text_normalization import normalize_for_search
+
 logger = logging.getLogger(__name__)
 
 # 抽出済みテキスト層の文字数がこの値未満なら「テキスト層が実質無い＝スキャン文書」と判定し、
@@ -41,9 +43,11 @@ def extract_text_layer(obj):
 def try_immediate_text_layer_extraction(obj, *, label):
     """アップロード直後の同期抽出エントリポイント。
 
-    テキスト層のあるPDFはその場でextracted_textを確定させ、登録と同時に全文検索の対象にする
-    （従来の「バッチが5分間隔で拾うまで対象外」という待ち時間を無くす）。スキャン文書
-    （テキスト層が実質無い）や解析失敗時は何もせずextracted_text=""のまま据え置き、
+    テキスト層のあるPDFはその場で NFKC 正規化して extracted_text_normalized を確定させ、
+    text_extracted=True にして、登録と同時に全文検索の対象にする（従来の「バッチが5分間隔で
+    拾うまで対象外」という待ち時間を無くす）。生の抽出テキストは保存しない（監査 案1：テキスト層
+    抽出は決定的・ローカル・無料で、元ファイルからいつでも再実行できるため）。スキャン文書
+    （テキスト層が実質無い）や解析失敗時は何もせず text_extracted=False のまま据え置き、
     Google Cloud VisionによるOCR（外部API・処理時間が読めないため同期実行しない）が必要かの
     判定・実行はcore.management.commands.extract_pending_pdf_text（バッチ）に委ねる。
 
@@ -65,5 +69,6 @@ def try_immediate_text_layer_extraction(obj, *, label):
     if is_scanned(text):
         # スキャン文書はここでは処理しない（OCR要否の判定・実行はバッチに委ねる）。
         return
-    obj.extracted_text = text
-    obj.save(update_fields=["extracted_text"])
+    obj.extracted_text_normalized = normalize_for_search(text)
+    obj.text_extracted = True
+    obj.save(update_fields=["extracted_text_normalized", "text_extracted"])

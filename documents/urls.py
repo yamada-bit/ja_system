@@ -14,6 +14,7 @@ urlpatterns = [
     path("api/<int:pk>/", api.DetailAPIView.as_view(), name="api_detail"),
     path("<int:pk>/edit/", views.DocumentEditView.as_view(), name="edit"),
     path("<int:pk>/download/", views.DownloadView.as_view(), name="download"),
+    path("<int:pk>/searchable-pdf/", views.SearchablePdfView.as_view(), name="searchable_pdf"),
     path("<int:pk>/preview/", views.PreviewView.as_view(), name="preview"),
     path("bulk-download/", views.BulkDownloadView.as_view(), name="bulk_download"),
     path("bulk-edit/start/", views.BulkEditStartView.as_view(), name="bulk_edit_start"),

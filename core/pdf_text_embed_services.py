@@ -1,9 +1,10 @@
 """core.ocr_layout_servicesの結果（座標付きOCRテキスト）を透明テキストとしてPDFに埋め込む処理。
 
-settings.OCR_EMBED_TEXT_TO_PDF が True の間のみ、extract_pending_pdf_textコマンドから呼ばれる。
-埋め込んでも原本（documents.Document/contracts.Contractのfileフィールド）は変更しない：
-戻り値の新しいPDFバイト列は呼び出し元がsearchable_fieldへ別ファイルとして保存する
-（監査・原本性の観点。原本を差し替えない設計はユーザー確認済み）。
+検索用PDF（OCRテキスト埋め込み版）を利用者がダウンロードする際、core.searchable_pdf_services が
+原本PDF＋保存済み ocr_textdata からその場で呼び出す（2026-09-11、監査 案3：以前は
+extract_pending_pdf_text バッチが埋め込み済みPDFを事前生成して searchable_file へ恒久保存して
+いたが、遅延生成に置き換えた）。埋め込んでも原本（documents.Document/contracts.Contract の
+file フィールド）は変更しない（戻り値は新しいPDFバイト列で、呼び出し元はレスポンスに載せるだけ）。
 
 reportlab/pypdfはローカル完結（外部通信・認証情報チェック不要）のため、
 core.ocr_layout_services（google-cloud-vision・pdf2image）と異なり遅延importにしていない。
@@ -33,10 +34,7 @@ def embed_textdatas_into_pdf(pdf_bytes, textdatas):
     座標に合わせて透明テキストを重ね書きした新しいPDFのバイト列を返す。
 
     1ページの埋め込み処理に失敗しても、そのページは透明テキスト無しの原本ページのまま出力し、
-    他ページの処理は継続する（1ページの失敗で埋め込み処理全体を失敗させない。
-    extract_pending_pdf_textコマンド側でもこの関数自体の失敗は「埋め込みは失敗したが
-    テキスト抽出〈extracted_text〉は成功させる」という扱いで、本質的でない処理として
-    握りつぶす設計になっている）。
+    他ページの処理は継続する（1ページの失敗で埋め込み処理全体を失敗させない）。
     """
     pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
     pdf_writer = PdfWriter()
