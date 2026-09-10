@@ -90,7 +90,15 @@ class PermissionProfile(models.Model):
         default=False,
         help_text="OFFの場合、保存した文書の保存期間を編集できない（xlsx 権限管理!B172-175、Rev1.1で追加）",
     )
-    doc_download = models.BooleanField("文書管理-文書(ダウンロード)", default=False)
+    doc_download = models.BooleanField(
+        "文書管理-文書(ダウンロード)",
+        default=False,
+        help_text=(
+            "OFFの場合、検索・閲覧画面で文書のダウンロード／実プレビューができない"
+            "（xlsx 権限管理!B177-180、要再確認No.20〜22。permissions.services.can_download参照。"
+            "管理者はフラグ値に関わらず常に可）"
+        ),
+    )
 
     # 契約書
     contract_visible_departments = models.ManyToManyField(
@@ -118,12 +126,33 @@ class PermissionProfile(models.Model):
             "「削除」ボタン非表示、として制御する（permissions.services.can_edit_contract参照）。"
         ),
     )
-    contract_download = models.BooleanField("契約書-契約書(ダウンロード)", default=False)
+    contract_download = models.BooleanField(
+        "契約書-契約書(ダウンロード)",
+        default=False,
+        help_text=(
+            "OFFの場合、検索・閲覧画面で契約書のダウンロード／実プレビューができない"
+            "（xlsx 権限管理!B193-194、要再確認No.20〜22。permissions.services.can_download参照。"
+            "管理者はフラグ値に関わらず常に可）"
+        ),
+    )
 
-    # 電子決裁（※保留、xlsx 権限管理!B211-215。電子決裁機能自体は本実装のスコープ外）
-    eapproval_view_setting = models.BooleanField("電子決裁-書類毎の閲覧設定", default=False)
-    eapproval_doc_name_manage = models.BooleanField("電子決裁-書類名(作成・変更)", default=False)
-    eapproval_retention = models.BooleanField("電子決裁-申請書(保存期間)", default=False)
+    # 電子決裁（※保留、xlsx 権限管理!B211-215。電子決裁機能自体は本実装のスコープ外のため、
+    # 下記3フラグは値の保持のみで連動先が無い。詳細はCLAUDE.md「既知の未実装・保留事項」参照）
+    eapproval_view_setting = models.BooleanField(
+        "電子決裁-書類毎の閲覧設定",
+        default=False,
+        help_text="※保留（xlsx 権限管理!B211-215）。電子決裁機能はスコープ外のため値の保持のみ・連動先なし",
+    )
+    eapproval_doc_name_manage = models.BooleanField(
+        "電子決裁-書類名(作成・変更)",
+        default=False,
+        help_text="※保留（xlsx 権限管理!B211-215）。電子決裁機能はスコープ外のため値の保持のみ・連動先なし",
+    )
+    eapproval_retention = models.BooleanField(
+        "電子決裁-申請書(保存期間)",
+        default=False,
+        help_text="※保留（xlsx 権限管理!B211-215）。電子決裁機能はスコープ外のため値の保持のみ・連動先なし",
+    )
 
     updated_at = models.DateTimeField("更新日時", auto_now=True)
 

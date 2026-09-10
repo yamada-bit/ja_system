@@ -61,7 +61,10 @@ def resolve_ordered_pks(raw_pks, *, model, dept_ids_resolver, employee):
     if allowed_department_ids is not None:
         candidates = candidates.filter(department_id__in=allowed_department_ids)
     existing_pks = set(candidates.values_list("pk", flat=True))
-    return [pk for pk in valid_pks if pk in existing_pks]
+    # 改ざんで同じ pk が複数回 POST されても1回だけ扱う（dict.fromkeys で順序保持 dedupe）。
+    # dedupe しないと BulkEditView の確定ループが同一レコードを2回削除扱いし、削除監査ログが
+    # 重複する（コードレビュー audit/core No.3）。
+    return [pk for pk in dict.fromkeys(valid_pks) if pk in existing_pks]
 
 
 def start_bulk_edit(session, session_key, pks):
@@ -148,7 +151,10 @@ def staged_related_ids_for(state, pk):
     if not state:
         return None
     bucket = state.get("staged_related", {}).get(str(pk))
-    return bucket["related_ids"] if bucket else None
+    # bucket.get(...) で参照する（bucket["related_ids"] だと、旧形式セッションがデプロイ跨ぎで
+    # 残った場合に KeyError。本番未リリースで現状は旧形式は存在しないが、リリース済み環境への
+    # 適用時の申し送りを消すための無害化。コードレビュー audit/core No.7）。
+    return bucket.get("related_ids", []) if bucket else None
 
 
 def discard_bulk_edit(session, session_key):

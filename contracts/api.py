@@ -76,6 +76,36 @@ class DetailAPIView(LoginRequiredMixin, View):
 
         is_expired = contract.expiry_date < timezone.localdate()
         can_dl = can_download(request.user, kind="contract")
+
+        # 関連契約書のタイトルは、閲覧ユーザーの部署スコープ外なら伏せ字にする
+        # （review_security.txt No.1／S1）。本体契約書は上の line62-75 で越境を弾いて
+        # いるのに対し、関連契約書欄は download 権限だけで gating しており title 文字列が
+        # スコープに関わらず返っていた（取引先名・案件名が漏れうる）。preview_url 経由の
+        # PDF 実体配信は BaseFileServeView の scoped_lookup で別途保護済み。
+        def _related_contract_payload(link):
+            rc = link.related_contract
+            out_of_scope = (
+                allowed_department_ids is not None
+                and rc.department_id not in allowed_department_ids
+            )
+            if out_of_scope:
+                return {
+                    "title": "（閲覧権限のない関連資料）",
+                    "is_deleted": rc.is_deleted,
+                    "preview_url": None,
+                    "out_of_scope": True,
+                }
+            return {
+                "title": rc.title,
+                "is_deleted": rc.is_deleted,
+                "preview_url": (
+                    reverse("contracts:preview", args=[link.related_contract_id])
+                    if can_dl and not rc.is_deleted
+                    else None
+                ),
+                "out_of_scope": False,
+            }
+
         can_edit = can_edit_contract(request.user)
         soon = is_expiring_soon(contract.expiry_date)
         return JsonResponse(
@@ -101,19 +131,11 @@ class DetailAPIView(LoginRequiredMixin, View):
                 # 権限がある」ときだけ埋める。common.js renderDetailPopup() が
                 #  ・preview_url あり  → ファイル名をリンク化しクリックで別タブにPDFプレビュー
                 #  ・is_deleted=true   → 赤フォント＋クリックで「既に削除されている関連資料です」
-                #  ・どちらでもない    → 素テキスト（権限不足）
+                #  ・out_of_scope=true → 伏せ字ラベルを素テキスト（部署スコープ外、S1対応）
+                #  ・どれでもない      → 素テキスト（ダウンロード権限不足）
                 # に振り分ける。
                 "related_contracts": [
-                    {
-                        "title": link.related_contract.title,
-                        "is_deleted": link.related_contract.is_deleted,
-                        "preview_url": (
-                            reverse("contracts:preview", args=[link.related_contract_id])
-                            if can_dl and not link.related_contract.is_deleted
-                            else None
-                        ),
-                    }
-                    for link in contract.related_links.all()
+                    _related_contract_payload(link) for link in contract.related_links.all()
                 ],
                 "uploader": contract.uploader.name,
                 # documents.api.DetailAPIViewと同じ理由（xlsx検索・閲覧画面の詳細ポップアップ

@@ -501,7 +501,11 @@ class RetentionRegistView(BaseRetentionSaveView):
     form_id = "masters_retention_regist"
 
     def _initial(self, request):
+        # RetentionListView.get と対称に、URL クエリの kbn は既知値以外なら文書扱いへ丸める
+        # （不正・改ざんされた ?kbn= がそのままフォーム初期値に載るのを防ぐ。C15）。
         kbn = request.GET.get("kbn", RetentionKbn.DOCUMENT)
+        if kbn not in RetentionKbn.values:
+            kbn = RetentionKbn.DOCUMENT
         doc_name = request.GET.get("doc_name", "") if kbn == RetentionKbn.EAPPROVAL else ""
         return {"kbn": kbn, "doc_name": doc_name}
 

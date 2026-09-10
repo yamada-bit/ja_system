@@ -1519,6 +1519,49 @@ class BulkEditViewTests(TestCase):
             AuditLog.objects.filter(action="保管画面２　削除", event_message__contains="d1").exists()
         )
 
+    def test_bulk_commit_audit_log_action_and_personal_info_flag_are_fixed(self):
+        """U-30／T66：BaseBulkEditView._commit が書く監査ログの action 文言・personal_info_flag を
+        固定する（U-22 で audit_services.log を transaction.atomic() の外へ出す refactor の回帰保護）。
+        個人情報フラグ付き文書の更新・削除で正しく personal_info_flag=True が乗ること。"""
+        from documents.models import Document
+
+        d_upd = self._create_document("upd")
+        d_del = self._create_document("del")
+        Document.objects.filter(pk__in=[d_upd.pk, d_del.pk]).update(privacy_flag=True)
+
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d_upd.pk, d_del.pk]})
+        self.client.post("/documents/bulk-edit/", self._page_data(d_upd, action=None, bulk_nav="next"))
+        self.client.post("/documents/bulk-edit/", self._page_data(d_del, action="toggle_delete"))
+        self.client.post("/documents/bulk-edit/", self._page_data(d_del, action=None, bulk_nav="prev"))
+        # d_upd のページで実際にタイトルを変えて「更新」確定（d_del は削除予定のまま）。
+        self.client.post("/documents/bulk-edit/", self._page_data(d_upd, title="upd-new"))
+
+        upd_log = AuditLog.objects.get(action="保管画面２　更新", event_message__contains="upd")
+        self.assertTrue(upd_log.personal_info_flag)
+        del_log = AuditLog.objects.get(action="保管画面２　削除", event_message__contains="del")
+        self.assertTrue(del_log.personal_info_flag)
+
+    def test_render_complete_excludes_target_deleted_by_another_session(self):
+        """コードレビューC1：ウィザード進行中に別セッションが対象を論理削除した場合、完了サマリの
+        一覧・件数にその削除済みレコードを載せない（_committable_pks で確定対象から外れ
+        status_by_pk に入らないため）。他の全ビューの is_deleted 一貫性に揃える。"""
+        from documents.models import Document
+
+        docs = [self._create_document(f"d{i}") for i in range(3)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        # 1件目のタイトルを変更してステージし、2件目のページへ移動（3件目は開かない）。
+        self.client.post("/documents/bulk-edit/", self._page_data(docs[0], title="d0-new", action=None, bulk_nav="next"))
+
+        # 別セッションが docs[2] を論理削除（ウィザードのセッション state はそのまま）。
+        Document.objects.filter(pk=docs[2].pk).update(is_deleted=True, deleted_at=timezone.now())
+
+        resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[1]))
+        rows = resp.context["complete"]["rows"]
+        row_pks = {r["obj"].pk for r in rows}
+        self.assertEqual(row_pks, {docs[0].pk, docs[1].pk})
+        self.assertNotIn(docs[2].pk, row_pks)
+        self.assertEqual(resp.context["complete"]["counts"], {"updated": 1, "unchanged": 1, "deleted": 0})
+
     def _age_document(self, doc, *, days):
         from documents.models import Document
 
@@ -2737,6 +2780,13 @@ class DepartmentScopeAccessControlTests(TestCase):
         session.save()
         response = self.client.get("/documents/bulk-edit/")
         self.assertEqual(response.status_code, 404)
+        # T12／U-25：セッション改ざん経路でも scoped_get_object_or_404 の on_denied が発火し、
+        # 他部署リソースへの直打ち試行が操作履歴ログに残る（直打ち download/edit 等と同じ扱い）。
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="アクセス拒否", event_message__contains=f"（ID:{self.other_document.pk}）"
+            ).exists()
+        )
 
     def test_bulk_download_silently_excludes_other_department_document(self):
         import zipfile

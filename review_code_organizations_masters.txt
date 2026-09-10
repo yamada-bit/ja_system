@@ -115,11 +115,11 @@ No.4 【低】 RetentionRegistView._initial が kbn を検証していない
     書類名なし）。RetentionPeriodForm.clean で kbn==eapproval のとき doc_name 必須の
     検証を追加するのが望ましい。
 
-  【見送り／理由】優先度「低」。実害は「GET描画時点のhidden値・タイトル表示のみ」で、POST時は
-    ModelForm の choices 検証で確実に弾かれる（データ不整合は起きない）。電子決裁機能自体が
-    恒久的にスコープ外（CLAUDE.md「既知の未実装・保留事項」）で、この画面は管理者専用。
-    RetentionListView.get 側に同種の防御があるので揃える価値はあるが、今回のバッチ（高・中）の
-    対象外として見送る。
+  【対応済み（review_pending.txt 経由でリリース前に対応）】U-21。RetentionRegistView._initial に
+    「kbn not in RetentionKbn.values なら DOCUMENT へ丸める」を追加し RetentionListView.get と
+    対称化。回帰テスト：masters.tests.RetentionListViewTests.
+    test_regist_screen_invalid_kbn_query_falls_back_to_document。masters 120件 PASS。
+    ※doc_name の EAPPROVAL 時必須化は電子決裁がスコープ外のため対象外のまま。
 
 No.5 【低】 organizations/api.py: exclude が非数値のとき警告を出しつつ全件（編集中の
            部署を含む）を返す
@@ -271,7 +271,8 @@ C. CLAUDE.md 規約整合性チェック結果（明確な違反のみ）
       No.2（ゴミ箱文書を件数・削除判定に算入）........... 対応済み（2026-09-10、is_deleted=False で集計）
       No.3（RetentionDeleteView の例外処理欠如）......... 対応済み（2026-09-10）
       No.7（Retention 系ビューの重複・共通基底なし）..... 対応済み（2026-09-10）
-  低: No.4, No.5, No.6, No.8, No.9, No.10, No.11 ....... すべて見送り（各項目に理由を追記）
+  低: No.4 → 対応済み（U-21、リリース前）。No.5 → 対応予定（U-34、リリース前）。
+      No.6, No.8, No.9, No.10, No.11 ....... 見送り（各項目に理由を追記）
 
 ※ No.1・No.2 は xlsx（分類管理!B68/B119/B161、カテゴリー管理 同等箇所）の
   仕様意図の確認が必要だったため、2026-09-10 にユーザーへ確認。

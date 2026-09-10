@@ -1,3 +1,4 @@
+import datetime
 import logging
 
 from django.conf import settings
@@ -29,6 +30,20 @@ def retention_cutoff_date():
     return add_months(timezone.localdate(), -settings.AUDIT_LOG_RETENTION_MONTHS)
 
 
+def retention_cutoff_datetime():
+    """`retention_cutoff_date()` の当日0時（ローカルタイム）を表す aware datetime。
+
+    フィルタ・物理削除で `timestamp__date__gte / __date__lt`（DATE() キャストで
+    Index(fields=["-timestamp"]) が使えない）ではなく `timestamp__gte / __lt` を使うために
+    用意する（コードレビュー audit/core No.5）。`timestamp.date() >= cutoff` は
+    `timestamp >= <cutoff の0時>` と、`timestamp.date() < cutoff` は
+    `timestamp < <cutoff の0時>` と同値。
+    """
+    return timezone.make_aware(
+        datetime.datetime.combine(retention_cutoff_date(), datetime.time.min)
+    )
+
+
 def filter_audit_log_queryset(form):
     """screen-log-listの検索条件でAuditLogを絞り込む（一覧表示とCSV出力で共有）。
 
@@ -38,7 +53,8 @@ def filter_audit_log_queryset(form):
     """
     # xlsx 操作履歴ログ!B51-52：保持期間を過ぎたログは一覧にもCSVにも出さない（retention_cutoff_date
     # のdocstring参照）。検索フォームの操作日(開始)がこれより前でも、この下限より過去には遡れない。
-    qs = AuditLog.objects.filter(timestamp__date__gte=retention_cutoff_date()).order_by("-timestamp")
+    # DATE() キャストを挟まない timestamp__gte で Index(fields=["-timestamp"]) を効かせる（No.5）。
+    qs = AuditLog.objects.filter(timestamp__gte=retention_cutoff_datetime()).order_by("-timestamp")
     if form.is_valid():
         if form.cleaned_data.get("date_start"):
             qs = qs.filter(timestamp__date__gte=form.cleaned_data["date_start"])

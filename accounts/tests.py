@@ -1300,6 +1300,26 @@ class ImportStaffCsvServiceTests(TestCase):
         self.assertIn("役職コード", summary.errors[0])
         self.assertFalse(Employee.objects.filter(employee_no="0832").exists())
 
+    def test_fullwidth_employee_no_is_normalized_to_halfwidth(self):
+        """U-7／R5：CSV取込は create_user()/save() を直接呼び StaffRegistForm.clean_employee_no()
+        を経由しないため、_import_row() 内で unicodedata.normalize("NFKC", ...) して半角へ揃える
+        （xlsx 職員マスタ!B173）。手動フォーム側の
+        StaffRegistFormTests.test_fullwidth_employee_no_converted_to_halfwidth に対応する取込側
+        の回帰テスト。"""
+        upload = _csv_upload(["０８３２,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,0"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(summary.created, 1)
+        self.assertTrue(Employee.objects.filter(employee_no="0832").exists())
+        self.assertFalse(Employee.objects.filter(employee_no="０８３２").exists())
+
+    def test_non_digit_employee_no_is_rejected(self):
+        """NFKC 正規化後も半角数字以外が残る職員番号は弾く（isdigit チェック）。"""
+        upload = _csv_upload(["08A2,農協 太郎,000,本　店,09,ＤＸ推進課,16,課長,20,考査役,0"])
+        summary = import_staff_csv(upload, actor=self.actor)
+        self.assertEqual(summary.created, 0)
+        self.assertEqual(len(summary.errors), 1)
+        self.assertIn("職員番号", summary.errors[0])
+
     def test_column_count_mismatch_is_rejected(self):
         # 所属長フラグ列が欠落した10列の行（正しくは11列）。
         upload = _csv_upload(["0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役"])
@@ -1316,7 +1336,10 @@ class ImportStaffCsvServiceTests(TestCase):
         # Shift-JISのバイト列はUTF-8として不正な並びになるため、utf-8-sigでのdecodeが失敗する。
         bad_bytes = SimpleUploadedFile("staff.csv", b"\x82\xa0\x82\xa2\x82\xa4", content_type="text/csv")
         with self.assertRaises(CsvImportError):
-            import_staff_csv(bad_bytes, actor=self.actor)
+            with self.assertLogs("accounts.csv_import_services", level="WARNING") as logs:
+                import_staff_csv(bad_bytes, actor=self.actor)
+        # U-11／R11：文字コード起因の取込失敗はサーバーログに残す。
+        self.assertTrue(any("文字コード" in m for m in logs.output))
 
     def test_unexpected_exception_shows_generic_message_not_raw_text(self):
         """行処理中に想定外の例外（バグ等）が起きた場合、生の例外メッセージをそのまま
@@ -1419,6 +1442,12 @@ class ImportStaffCsvServiceTests(TestCase):
         import_staff_csv(upload, actor=self.actor)
         profile = PermissionProfile.objects.get(employee__employee_no="0832")
         self.assertEqual(profile.role, PermissionRole.MANAGER)
+        # U-20／C12：get_or_create の created 分岐でも操作履歴ログを残す（昇格・降格経路と対称）。
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="職員マスタ　CSV取込 所属長昇格", event_message__contains="0832"
+            ).exists()
+        )
 
 
 class StaffCsvImportViewTests(TestCase):

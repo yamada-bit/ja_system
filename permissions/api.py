@@ -1,11 +1,13 @@
 import logging
 
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.core.exceptions import PermissionDenied
 from django.http import JsonResponse
 from django.views import View
 
 from masters.models import DocKbn, Group
 from organizations.models import Department
+from permissions.services import can_access_settings_menu_item
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +22,28 @@ class OptionListAPIView(LoginRequiredMixin, View):
     部署を選ぶための管理者・所属長向け設定であり、閲覧者自身の検索範囲を絞るものではないため
     （permissions.services.can_manage_targetで既にアクセス制御済み）、全部署を選択肢として返す。
 
-    [優先度: 低・見送り、コード監査 2026-08-25] LoginRequiredMixinのみでSettingsMenuAccessMixin
-    等のロール制御を持たないため、権限管理画面自体へのアクセス権が無い一般ロールでも
-    `?type=dept`（全部署一覧）や`?type=group&doc_kbn=contract`（契約書向け分類一覧）を直接
-    叩いて取得できる。ただしこのAPI自体はPermissionProfileの中身を変更できず、返す情報も
-    部署名・分類名という他画面（検索・保管のpopup-select等）でも同種ロールに露出しうる情報
-    のため実害は限定的と判断し、見送った。他のpopup-select系オプションAPI
-    （core.api.BaseOptionListAPIView等）のゲーティング方針と揃えるかどうかは別途要検討。
+    アクセス制御：この画面（screen-authority-edit）自体が設定メニュー「権限管理」
+    （authority_management＝管理者・所属長限定）でゲートされているため、本APIも同じ制限を
+    サーバー側で課す（review_security.txt 追補 No.2／S2(a)、本ファイル冒頭 U-2。以前は
+    LoginRequiredMixinのみで、権限管理画面にアクセスできない一般ロールでも`?type=dept`や
+    `?type=group&doc_kbn=contract`を直叩きして部署名・分類名を取得できた）。
+    organizations/api.py OptionListAPIViewと同じくdispatch()を明示オーバーライドして
+    認証チェック→権限チェックの順序を保証する（SettingsMenuAccessMixin多重継承だと
+    未ログイン時にget_role()がAnonymousUserで落ちて500になる問題を避ける）。
     """
+
+    settings_menu_key = "authority_management"
+
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return self.handle_no_permission()
+        if not can_access_settings_menu_item(request.user, self.settings_menu_key):
+            logger.warning(
+                "設定メニュー「%s」への権限外アクセスを試行: employee_no=%s",
+                self.settings_menu_key, request.user.employee_no,
+            )
+            raise PermissionDenied("この画面を利用する権限がありません。")
+        return super().dispatch(request, *args, **kwargs)
 
     def get(self, request):
         option_type = request.GET.get("type")

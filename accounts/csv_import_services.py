@@ -63,6 +63,9 @@ def import_staff_csv(file_obj, *, actor):
     try:
         text = file_obj.read().decode("utf-8-sig")
     except UnicodeDecodeError as exc:
+        # 文字コード起因の取込失敗はサーバーログに残す（利用者には汎用メッセージのみ。
+        # 規約「I/O・外部境界の失敗は logger で記録した上で利用者にわかる応答を返す」。R11）。
+        logger.warning("職員マスタCSV取込: ファイルの文字コードをUTF-8として解釈できませんでした: %s", exc)
         raise CsvImportError("CSVファイルの文字コードを確認してください（UTF-8を想定しています）。") from exc
 
     reader = csv.reader(io.StringIO(text))
@@ -116,13 +119,8 @@ def _import_row(row, *, actor, summary):
     # フォームのclean_employee_no()を経由せず、ここで明示的に揃える必要がある
     # （コード監査で発見：以前は.strip()のみで全角数字や数字以外がそのまま保存されていた、
     # 2026-08-25修正）。
-    # [優先度: 低・見送り、規約準拠監査 2026-08-25] 上記NFKC正規化には、姉妹バグである
-    # rank_code/position_codeのchoices未検証（下記、2026-08-24修正）に対応する
-    # test_invalid_rank_code_is_rejected/test_invalid_position_code_is_rejectedと同様の
-    # 回帰テストがImportStaffCsvServiceTestsに無い（StaffRegistFormTests.
-    # test_fullwidth_employee_no_converted_to_halfwidthは手動登録フォーム側のみでCSV取込側は
-    # 未カバー）。実装済みロジックへの追加テストであり緊急性は無いため見送るが、将来
-    # _import_row()をリファクタリングした際にNFKC正規化だけ回帰が検知されないリスクは残る。
+    # 回帰テスト：ImportStaffCsvServiceTests.test_fullwidth_employee_no_is_normalized_to_halfwidth
+    # / test_non_digit_employee_no_is_rejected（U-7／R5、2026-09-10追加）。
     employee_no = unicodedata.normalize("NFKC", employee_no)
     if not employee_no.isdigit():
         raise ValueError(f"職員番号が不正です（半角数字のみ許可）: {employee_no}")
@@ -257,9 +255,26 @@ def _apply_manager_flag(employee, manager_flag, actor):
         return
     if employee.is_retired:
         return
-    profile, _ = PermissionProfile.objects.get_or_create(
+    profile, created = PermissionProfile.objects.get_or_create(
         employee=employee, defaults={"role": PermissionRole.MANAGER}
     )
+    if created:
+        # PermissionProfile 未設定の職員（レガシーデータ等）を所属長フラグで MANAGER 化した経路。
+        # 昇格・降格経路と同じく操作履歴ログへ残す（以前はここだけ audit なしで /audit/ から
+        # 追跡できなかった。コードレビュー C12）。
+        logger.info(
+            "CSV取込の所属長フラグにより権限プロファイルを新規作成しました: employee_no=%s ->manager",
+            employee.employee_no,
+        )
+        audit_services.log(
+            employee=actor,
+            action="職員マスタ　CSV取込 所属長昇格",
+            event_message=(
+                f"職員：{employee.name}({employee.employee_no}),"
+                f"所属長フラグにより権限を所属長へ更新しました"
+            ),
+        )
+        return
     if profile.role == PermissionRole.MANAGER:
         return
     # 判定〜保存は _import_row の transaction.atomic() 内で実行されるが、ここで

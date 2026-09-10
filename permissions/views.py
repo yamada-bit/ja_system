@@ -1,3 +1,4 @@
+import csv
 import logging
 
 from django.contrib import messages
@@ -5,6 +6,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db import transaction
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views import View
 
@@ -66,10 +68,6 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
     settings_menu_key = "authority_management"
 
     def get(self, request):
-        import csv
-
-        from django.http import HttpResponse
-
         # request.GET or Noneは避ける（accounts.services.filter_staff_querysetのコメント参照）。
         form = AuthoritySearchForm(request.GET)
         sort_key = request.GET.get("sort")

@@ -154,8 +154,9 @@ P-8 | permissions/api.py OptionListAPIView のロールゲート不在
     |       doc_kbn=contract を直接取得できる（api.py docstring に「低・見送り」と明記済み）。
     |       見送り判断は妥当だが、現状仕様を固定する「一般ロールでも 200 が返る」旨の
     |       意図明示テストが無く、将来ゲートを追加した際に気付きにくい。
-    | 見送り／理由: 優先度「低」。api.py docstring で設計上の見送りが明記済みで、
-    |              意図明示テストの追加は今回のスコープ（高・中の不足補完）外。
+    | 対応済み（review_pending.txt 経由でリリース前に対応）: U-2／S2(a) でロールゲートを
+    |              追加したため、意図明示テストは「STAFF→403」へ転換。
+    |              permissions.tests.OptionListAPIViewTests.test_staff_role_is_forbidden。
 
 P-9 | permissions/api.py OptionListAPIView の並び順
     | 優先度: 低
@@ -183,7 +184,12 @@ P-12 | permissions/services.py filter_authority_queryset の form.is_valid()==Fa
      | 理由: 不正な検索フォームがバインドされた場合にフィルタ節を丸ごとスキップする
      |       分岐。全フィールド required=False のため通常は発生しないが、
      |       department に不正 pk が来た場合等の挙動が未固定。
-     | 見送り／理由: 優先度「低」。全フィールド required=False で通常到達しない防御的分岐。
+     | 対応済み（review_pending.txt 経由でリリース前に対応）: U-33。実コード確認の結果、
+     |   部署スコープ絞り込みは `qs = visible_employees(viewer)` として `if form.is_valid()` の
+     |   外で適用されており、form 無効時にスキップされるのはユーザーの検索フィルタ（department
+     |   フィルタ・name フィルタ）だけ＝他部署漏れは起きない。現状仕様を固定する回帰テスト
+     |   permissions.tests.AuthorityListDepartmentScopeTests.
+     |   test_department_scope_still_applies_when_search_form_is_invalid を追加（コード変更なし）。
 
 P-13 | permissions/services.py visible_settings_menu_items
      | 優先度: 低
@@ -455,12 +461,12 @@ X-3 | core.double_submit.consume_token の単回使用（消費後の再 POST）
 ================================================================================
 ■ 補足（テスト追加時の注意・既存の明示的見送り）
 ================================================================================
-- accounts/csv_import_services.py の _import_row 内 NFKC 正規化（全角職員番号→半角）は、
-  コード内コメントで「回帰テストが ImportStaffCsvServiceTests に無い（低・見送り、
-  規約準拠監査 2026-08-25）」と既に明記済み。A-7/A-8 とあわせて CSV 取込側の
-  employee_no 正規化テストを追加する好機。
-- P-8（OptionListAPIView のロールゲート不在）は api.py docstring で「優先度: 低・見送り」と
-  判断済み。テストを追加する場合は「現状仕様（一般ロールでも取得可）を固定する意図明示」
-  として書き、ゲート追加時に FAIL させて気付けるようにする。
+- accounts/csv_import_services.py の _import_row 内 NFKC 正規化（全角職員番号→半角）：
+  対応済み（review_pending.txt 経由でリリース前に対応。U-7）。ImportStaffCsvServiceTests に
+  test_fullwidth_employee_no_is_normalized_to_halfwidth /
+  test_non_digit_employee_no_is_rejected を追加、コード内の見送りコメントも差し替え済み。
+- P-8（OptionListAPIView のロールゲート不在）：対応済み（review_pending.txt 経由でリリース前
+  に対応。U-2）。ロールゲート追加済みで、テストは
+  permissions.tests.OptionListAPIViewTests.test_staff_role_is_forbidden（STAFF→403）。
 - 「管理者0人ガード」関連は既に手厚いので新規追加不要。P-4 で role 以外の更新を足す際も
   0人ガードのバリエーションは増やさない（clean_role のみが対象で既にカバー済み）。

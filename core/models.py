@@ -1,5 +1,7 @@
 from django.db import models
 
+from core.text_normalization import normalize_for_search
+
 
 class UuidPrefixedFilenameMixin(models.Model):
     """storage_paths.*_upload_pathが付与する重複防止UUIDプレフィックス（"{uuid}_{filename}"形式）
@@ -47,8 +49,6 @@ class NormalizedTextFieldsMixin(models.Model):
         abstract = True
 
     def save(self, *args, **kwargs):
-        from core.text_normalization import normalize_for_search
-
         update_fields = kwargs.get("update_fields")
         targets = None if update_fields is None else set(update_fields)
         for src, shadow in self._NORMALIZED_FIELD_MAP:

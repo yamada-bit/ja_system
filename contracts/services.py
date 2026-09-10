@@ -215,4 +215,6 @@ def calculate_expiry_date(save_date: datetime.date) -> datetime.date:
     try:
         return save_date.replace(year=save_date.year + years)
     except ValueError:
+        # 2/29 起点の年は満了年が平年だと date.replace が ValueError。閏年ずれを 2/28 に丸める
+        # （documents.services._add_years と同じ扱い）。
         return save_date.replace(month=2, day=28, year=save_date.year + years)

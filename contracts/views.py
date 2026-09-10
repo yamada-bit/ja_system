@@ -597,7 +597,10 @@ class BulkEditView(RequiresContractEditMixin, bulk_edit_views.BaseBulkEditView):
         staged_ids = bulk_edit_services.staged_related_ids_for(state, obj.pk)
         current_ids = list(obj.related_links.values_list("related_contract_id", flat=True))
         related_ids = current_ids if staged_ids is None else staged_ids
-        related_changed = staged_ids is not None and set(staged_ids) != set(current_ids)
+        # 並び替えのみ（集合は同じで順序だけ違う）も変更として扱う。単独編集経路は
+        # apply_contract_edit を無条件に呼んで display_order を更新するため、set 比較だと
+        # 一括編集だけ並べ替えが黙って破棄されて非一貫だった（コードレビュー C7）。
+        related_changed = staged_ids is not None and list(staged_ids) != current_ids
         if contract_edit_is_dirty(
             obj, form.cleaned_data, request.user, related_changed=related_changed
         ):

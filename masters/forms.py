@@ -25,6 +25,9 @@ def _effective_department(form):
         try:
             return Department.objects.get(pk=raw)
         except (Department.DoesNotExist, ValueError, TypeError):
+            # 不正・改ざんされた department 値（存在しないpk／非数値）は重複判定用の実効部署が
+            # 引けないだけなので None にフォールバックし、フィールド本体の検証
+            # （ModelChoiceField）に不正値の指摘を任せる（ここでは握りつぶす。R14）。
             return None
     if form.instance.pk:
         return form.instance.department

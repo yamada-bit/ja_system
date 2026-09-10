@@ -332,8 +332,9 @@ No.7  対象: organizations/services.py visible_department_ids（複数 Departme
             追加した職員で、返り値が自部署＋全 visible を漏れなく含むこと。
       理由: 単一スコープのみ検証済み。複数回の統合・分割を経た部署での取りこぼしを拾えない。
             実装は単純な filter+values_list のため回帰リスクは低い。
-      見送り／理由: 優先度「低」。実装が単純な filter+values_list で回帰リスクが低く、
-            権限境界そのものではなく境界値。2026-09-10。
+      対応済み（review_pending.txt 経由でリリース前に対応）: U-36。
+            organizations.tests.ApplyDeptActionTests.test_visible_department_ids_with_multiple_stacked_scopes
+            （merge + split + merge を経た viewer_department で自部署＋visible 全4件を返す）。
 
 No.8  対象: organizations/services.py branch_choices の重複排除
       内容: 異なる branch_name を持たない同一 branch_code が複数部課にまたがるデータで、
@@ -367,8 +368,12 @@ No.11 対象: masters/views.py Group 系（Regist/Edit/Delete）・Retention 系
             class_management / retention_setting を強制していることを個別に確認。
       理由: 継承元 SettingsMenuAccessMixin は共通で List では検証済み。Category 側と同じ
             粒度が無いだけ。前回 No.16。
-      見送り／理由: 優先度「低」。継承元 Mixin が共通で List で検証済み、前回も見送り済み。
-            2026-09-10。
+      対応済み（review_pending.txt 経由でリリース前に対応）: U-29。
+            masters.tests.MasterSettingsMenuAccessControlTests に
+            test_group_views_actually_enforce_settings_menu_role_check（class_management を管理者
+            限定へ差し替え → 所属長でも regist/edit/delete が 403）と
+            test_retention_views_actually_enforce_settings_menu_role_check（retention_setting を
+            空集合へ差し替え → 管理者でも 403）を追加。
 
 No.12 対象: masters/models.py RetentionPeriod の unique_retention_period_value /
             unique_retention_permanent の DB レベル発火

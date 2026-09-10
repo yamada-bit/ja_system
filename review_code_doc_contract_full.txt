@@ -82,6 +82,13 @@ Document.objects.filter(pk__in=state["pks"]) / Contract側も同様に is_delete
 ウィザード中に別セッション・別ユーザーが同じレコードを削除した場合、完了モーダルの一覧に削除済み
 レコードがそのまま表示され得る。他の全ビューで徹底されている is_deleted 一貫性から外れている。
 
+→ 対応済み（review_pending.txt 経由でリリース前に対応。U-18）。当該ロジックは現在
+  core/bulk_edit_views.py BaseBulkEditView._render_complete に集約済み。完了サマリを
+  「今回の確定処理で実際に触れた行（status_by_pk にキーがあるもの）」に限定し、_committable_pks で
+  除外された別セッション削除/異動レコードを一覧・件数から落とす。単純な is_deleted=False では
+  今回の一括削除行（status="削除"）まで落ちるため pk 条件方式を採用。documents/contracts の
+  BulkEditViewTests に test_render_complete_excludes_target_deleted_by_another_session 追加。
+
 
 --------------------------------------------------------------------------------
 [低] contracts/forms.py:107-113（contract_amount）— 契約金額に下限バリデーションが無い
@@ -342,7 +349,8 @@ importせず生の文字列を使っている。値自体は正しいが一貫�
   apply_document_edit()呼び出しをtry/except DBErrorで囲み、contracts側と同じ形に統一。
 - [中] title_normalized NFKCオーバーフロー → 修正済み。
   CharField(255)→TextFieldに変更（documents/contracts双方、マイグレーション追加）。
-- [低] BulkEditView完了サマリにis_deletedフィルタ無し → 未対応。
+- [低] BulkEditView完了サマリにis_deletedフィルタ無し → 対応済み（review_pending.txt 経由で
+  リリース前に対応。U-18）。core/bulk_edit_views.py _render_complete を status_by_pk 限定に変更。
   実害は限定的（ウィザード中の他ユーザーによる削除という稀な競合時のみ表示が乱れる）。
 - [低] contract_amount下限バリデーション無し → 未対応。
   改ざん経路を要する低リスクな入力検証の穴で、業務データとして直ちに問題化しない。

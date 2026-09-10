@@ -14,6 +14,279 @@ review_security.txt・review_code_documents_contracts.txt の14ファイルに�
 各項目末尾の「(出典: ...)」は元のreview_*.txtファイル名。将来これらの経路を直接使う変更が
 入る場合は、その時点で出典ファイルの詳細説明を再確認してテスト追加・修正を検討すること。
 
+本ファイルは (A) 冒頭の「未対応（要対応）」＝実装予定の項目、(B) それ以降＝見送り項目、の
+2部構成。(A) の項目に着手したら、該当 U-番号の行と (B) の対応する # 注記の両方を更新する。
+
+
+================================================================================
+■ 未対応（要対応）— 2026-09-10 判断セッションで「見送り」から「直す」へ変更
+================================================================================
+既存 #1-#45（2026-08-26〜09-08 スナップショット）と、2026-09-09/09-10 の再監査
+（review_code/rule/test_permissions_accounts・_organizations_masters・_audit_core、
+review_code_documents_contracts・review_rule_doc_contract・review_test_doc_contract、
+review_security）の見送り注記を1件ずつ確認し、下記を「直す」に確定した。
+着手時は各 review_*.txt の該当節と本ファイル (B) 部の該当 # も更新すること。コミットは1件ずつ
+diff 確認＋`python manage.py test`（cwd=ja_system/ja_pj、venv の python フルパス）で検証。
+
+U-1〜U-37 は 2026-09-10 のリリース前 P8 対応セッションで1件ずつ実装した（下記「■ リリース前
+P8 対応の記録」参照）。U-34(1)（S2(b)＝permissions/api.py OptionListAPIView の type=group/dept
+返却結果を閲覧者スコープでさらに絞るか）のみユーザーへ報告して判断を仰いだ結果、
+「現状維持（実用で問題になった時点で対応）」で最終確定＝コード変更なし。→ (B)部 #46 参照。
+これで「未対応（要対応）」は全件クローズ。
+
+
+================================================================================
+■ リリース前 P8 対応の記録（2026-09-10〜）
+================================================================================
+上記「未対応（要対応）」の U-番号を1件ずつ実装し、完了分をここへ移した。
+
+U-1. [S1／review_security.txt No.1] contracts/api.py DetailAPIView の "related_contracts" が
+     閲覧部署スコープ外の関連契約書のタイトルを無条件で返していた件。allowed_department_ids を
+     関連契約書ごとに再評価し、スコープ外は title を「（閲覧権限のない関連資料）」に伏せ字化・
+     preview_url=None・out_of_scope=True で返すよう変更。common.js renderRelatedResourceLink に
+     out_of_scope の第4状態（クリップアイコン無しの素テキスト）を追加。
+     回帰テスト：contracts.tests.DetailAPIViewTests に
+     test_related_contracts_out_of_scope_department_title_is_masked /
+     test_related_contracts_admin_sees_all_titles を追加、既存3テストの assert を
+     out_of_scope キー込みに更新。contracts 204件・全体（common.js 変更のため）PASS。
+     対応済み（リリース前に P8 で対応）
+
+U-2. [S2(a)／review_security.txt 追補 No.2、本ファイル #11] permissions/api.py OptionListAPIView が
+     LoginRequiredMixin のみで STAFF ロールでも ?type=dept / ?type=group&doc_kbn=contract を
+     直接取得できた件。dispatch() を override し未認証は handle_no_permission()、認証済みは
+     can_access_settings_menu_item(request.user, "authority_management") で 403
+     （organizations/api.py と同型）。permissions.tests.OptionListAPIViewTests：正常系ユーザーに
+     MANAGER プロファイルを付与、test_staff_role_is_forbidden を追加。
+     ※type=group/dept の結果を閲覧者スコープでさらに絞る (b) は U-34 で対応。
+     permissions/accounts 177件 PASS。
+     対応済み（リリース前に P8 で対応）
+
+U-3. [S4／review_security.txt 参考 I-2] config/settings/prod.py が ALLOWED_HOSTS を override せず
+     base.py の default=["*"] が本番でも効いていた件。prod.py に
+     ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")（デフォルト無し）を追加し、未設定なら
+     ImproperlyConfigured でデプロイを止める（SECRET_KEY と同パターン）。.env.example に
+     コメント追記。config/settings/ 変更のため全体 936件 PASS（+ prod 設定の manage.py check）。
+     対応済み（リリース前に P8 で対応）
+
+U-4. [R4/R9/R13/R20/R21／review_rule_* 各アプリ、本ファイル #6] 「新しいモジュールでは logger を
+     用意する」の適用対象を CLAUDE.md「ログを整備する」節に明文化（コード変更なし）。
+     documents/contracts/accounts/permissions の models.py、organizations/masters の forms.py、
+     core の csv_services/forms/templatetags/純関数7ファイル、audit の models/forms を規約上の
+     対象外化。各 review_rule_*.txt の該当節（doc_contract No.5／permissions_accounts No.6／
+     organizations_masters No.1／audit_core No.3・No.4）も「対応済み」へ更新。
+     対応済み（リリース前に P8 で対応）
+
+U-5. [R23／review_rule_audit_core No.6] core の共有基底ビューを主題別 *_views.py に置く運用を
+     CLAUDE.md「ファイル役割分担パターン」に1文追記（コード変更なし）。
+     review_rule_audit_core.txt No.6 も「対応済み」へ更新。
+     対応済み（リリース前に P8 で対応）
+
+U-6. [review_rule_doc_contract No.4] contracts/forms.py CommaNumberInput.format_value の
+     except InvalidOperation と contracts/services.py calculate_expiry_date の except ValueError に
+     「なぜ握りつぶすか」の理由コメントを1行追記（documents 側 _add_years と対称化）。挙動不変。
+     ※対象は api.py ではなく forms.py（元指摘の行番号表記の誤り）。contracts 204件 PASS。
+     対応済み（リリース前に P8 で対応）
+
+U-7. [R5／review_rule_permissions_accounts No.1、本ファイル #12] accounts/csv_import_services.py の
+     職員番号 NFKC 正規化（全角→半角）の取込側回帰テスト。ImportStaffCsvServiceTests に
+     test_fullwidth_employee_no_is_normalized_to_halfwidth /
+     test_non_digit_employee_no_is_rejected を追加。csv_import_services.py の見送りコメントも
+     回帰テスト参照へ差し替え。accounts 97件 PASS。
+     対応済み（リリース前に P8 で対応）
+
+U-8. [R7／review_rule_permissions_accounts No.3] permissions/views.py AuthorityCsvExportView.get 内の
+     `import csv` / `from django.http import HttpResponse` をモジュール先頭へ移動
+     （accounts/views.py と揃えた）。挙動不変。permissions 82件 PASS。
+     対応済み（リリース前に P8 で対応）
+
+U-9. [R8／review_rule_permissions_accounts No.5] PermissionProfile の doc_download（B177-180）・
+     contract_download（B193-194）に xlsx 番地入り help_text、eapproval_view_setting・
+     eapproval_doc_name_manage・eapproval_retention に「※保留（B211-215）・スコープ外・連動先なし」
+     の help_text を追加。permissions/migrations/0001_initial.py へ畳み込み、makemigrations
+     --check クリーン。挙動不変。permissions 82件 PASS。
+     対応済み（リリース前に P8 で対応）
+
+U-10. [R10/R24／review_rule_permissions_accounts No.7、review_rule_audit_core No.7]
+      accounts/admin.py・permissions/admin.py・audit/admin.py の英語スキャフォールドコメントを
+      「専用の業務画面があるため admin へは登録しない（閲覧専用も含む）」旨の日本語コメントへ置換。
+      モデル登録はしない（個人情報・権限・監査ログのため）。accounts/permissions/audit 210件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-11. [R11／review_rule_permissions_accounts No.8] accounts/csv_import_services.py の
+      UnicodeDecodeError 捕捉節に logger.warning を追加（利用者には従来どおり汎用メッセージ）。
+      ImportStaffCsvServiceTests.test_invalid_encoding_raises に assertLogs アサートを追加。
+      accounts 97件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-12. [R12／review_rule_permissions_accounts No.9] templates/permissions/authority_list.html:59-61 の
+      3行連続 {# #} を {% comment %}…{% endcomment %} へ置換（CLAUDE.md 既知トラップの予防）。
+      描画不変。permissions 82件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-13. [R14／review_rule_organizations_masters No.2] masters/forms.py _effective_department の
+      except (DoesNotExist, ValueError, TypeError) 節に「不正値の指摘は ModelChoiceField 本体に
+      任せる」の理由コメントを追記。logger.warning 化はしない（U-4 の整理に従う）。挙動不変。
+      masters 119件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-14. [R15／review_rule_organizations_masters No.3] masters/models.py RetentionKbn /
+      RetentionPeriodUnit に DocKbn・EapprovalDocName と同粒度の docstring を追加。
+      migration 影響なし。masters 119件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-15. [R16／review_rule_organizations_masters No.4] templates/masters/class_list.html:86・
+      cat_list.html:92 の disabled 削除ボタンに
+      title="紐づく書類があるため削除できません（件数が0のときのみ削除可）" を追加。masters 119件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-16. [R17／review_rule_organizations_masters No.5] templates/masters/retention_list.html:43 の
+      飾り「表示」ボタン（原本 index.html:3163 に onclick 無しで存在、書類名 select の onchange で
+      表示切替が完結）であることを実確認し、直前に {% comment %} で原本踏襲の理由を追記。
+      挙動不変。masters 119件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-17. [R28／review_rule_audit_core No.11] core/models.py NormalizedTextFieldsMixin.save() 内の
+      `from core.text_normalization import normalize_for_search` をモジュール先頭へ移動
+      （循環 import なしを確認）。挙動不変。core 変更のため全体 938件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-18. [C1／review_code_doc_contract_full.txt、本ファイル #1] core/bulk_edit_views.py
+      BaseBulkEditView._render_complete の完了サマリを「今回の確定処理で実際に触れた行
+      （status_by_pk にキーがあるもの）」に限定。ウィザード進行中に別セッションが論理削除／他部署
+      異動した行は _committable_pks で除外され status_by_pk に入らないため一覧・件数から落ちる。
+      ※単純な filter(is_deleted=False) だと今回の一括削除行（status="削除"）まで落ちるため pk 条件で
+      絞る方式にした。回帰テスト：documents/contracts の BulkEditViewTests に
+      test_render_complete_excludes_target_deleted_by_another_session を追加。
+      core 変更のため全体 940件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-19. [C7／review_code_documents_contracts.txt No.3] contracts/views.py commit_one_update の
+      related_changed を set 比較から順序保持比較（list(staged_ids) != current_ids）へ変更。
+      関連書類「並べ替えのみ」も更新として確定・sync_related_contracts で display_order 更新。
+      単独編集経路（apply_contract_edit 無条件呼び）と一致。回帰テスト：contracts.tests.
+      BulkEditViewTests に test_related_contracts_reorder_only_is_committed_on_update /
+      test_related_contracts_same_order_is_not_dirty 追加（(B)部 #57／#65／#63・#64=U-37 相当を含む）。
+      accounts/contracts 304件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-20. [C12／review_code_permissions_accounts No.3] accounts/csv_import_services.py
+      _apply_manager_flag の get_or_create を `profile, created = ...` にし、created のとき
+      logger.info ＋ audit_services.log(action="職員マスタ　CSV取込 所属長昇格") を出して return。
+      回帰テスト：ImportStaffCsvServiceTests.test_manager_flag_creates_manager_profile_when_missing
+      に AuditLog アサート追加。accounts/contracts 304件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-21. [C15／review_code_organizations_masters No.4] masters/views.py RetentionRegistView._initial に
+      「kbn not in RetentionKbn.values → DOCUMENT へ丸める」を追加（RetentionListView.get と対称化）。
+      回帰テスト：masters.tests.RetentionListViewTests.
+      test_regist_screen_invalid_kbn_query_falls_back_to_document。masters 120件 PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-22. [C22／review_code_audit_core No.2] core/bulk_edit_views.py BaseBulkEditView._commit の確定
+      ループ内では監査イベントを audit_events リストに貯め、transaction.atomic() を抜けてコミット
+      成功後に audit_services.log() をまとめて発行するよう変更（BaseDeleteView / BaseFileServeView
+      と同じ「保存成功 → atomic 外で log()」に統一）。atomic 内の握りつぶし →
+      TransactionManagementError → 全件ロールバックを解消。回帰保護は U-30。
+      core 変更のため全体テスト実行（U-22〜U-35 まとめて）。
+      対応済み（リリース前に P8 で対応）
+
+U-23. [C23／review_code_audit_core No.3] core/bulk_edit_services.py resolve_ordered_pks の戻り値を
+      `[pk for pk in dict.fromkeys(valid_pks) if pk in existing_pks]` に変更（順序保持 dedupe）。
+      回帰テスト：core.tests.BaseBulkEditViewCoreTests.test_start_dedupes_duplicated_pks /
+      test_bulk_delete_of_duplicated_pk_writes_one_audit_log。
+      対応済み（リリース前に P8 で対応）
+
+U-30. [T66／review_test_audit_core No.3] U-22 の回帰保護。
+      documents.tests.BulkEditViewTests.test_bulk_commit_audit_log_action_and_personal_info_flag_are_fixed
+      を追加（個人情報フラグ付き文書の一括更新・一括削除で action 文言＝「保管画面２　更新」／
+      「保管画面２　削除」・personal_info_flag=True を固定）。
+      対応済み（リリース前に P8 で対応）
+
+U-35. [(B)部 #113／review_code_audit_core No.7] core/bulk_edit_services.py staged_related_ids_for の
+      `bucket["related_ids"]` を `bucket.get("related_ids", [])` に変更（旧形式セッションが残っても
+      KeyError にならず [] を返す＝get_bulk_edit_state docstring の約束と一致）。回帰テスト：
+      core.tests.BulkEditServicesStagingTests.test_staged_related_ids_for_tolerates_legacy_bucket_without_key。
+      対応済み（リリース前に P8 で対応）
+
+U-24. [C24+C25／review_code_audit_core No.4/No.5] audit/views.py AuditLogCsvExportView.get を
+      StreamingHttpResponse + qs.iterator(chunk_size=2000) へ（csv.writer に _Echo バッファ。
+      CSV出力の監査ログはストリーム消費完了時に1件）。audit/services.py に retention_cutoff_datetime()
+      を新設し、filter_audit_log_queryset の下限を timestamp__gte、purge_expired_audit_logs を
+      timestamp__lt に変更（DATE() キャストを外し Index(fields=["-timestamp"]) を効かせる）。
+      audit.tests.AuditLogCsvExportViewTests を streaming_content ベースに更新＋
+      test_csv_export_streams_and_starts_with_bom を追加。core 変更のため全体テスト実行。
+      対応済み（リリース前に P8 で対応）
+
+U-25. [T12／review_test_doc_contract [16]] documents/contracts の
+      test_bulk_edit_direct_access_to_other_department_*_returns_404 に、セッション改ざん経路でも
+      scoped_get_object_or_404 の on_denied が発火し AuditLog(action="アクセス拒否", event_message
+      contains "（ID:<pk>）") が残ることのアサートを追加（コード変更なし）。documents/contracts PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-26. [T16／review_test_doc_contract [20]] contracts.tests.ApplyContractEditTransactionTests.
+      test_body_save_rolls_back_when_related_sync_fails を追加（sync_related_contracts を
+      RuntimeError にモック → 本体 contract.title の変更も transaction.atomic() で巻き戻る）。
+      コード変更なし。contracts PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-27. [T22／review_test_doc_contract [30]] contracts.tests に
+      test_upload_form_reversed_contract_period_flags_only_that_file を追加（per_file_mode で
+      index=1 だけ契約期間逆転 → contract_period_end_1 のみエラー、index=0 側には付かない）。
+      コード変更なし。contracts PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-28. [T26／review_test_doc_contract [35]] DeleteViewRequiresContractEditPermissionTests.
+      test_delete_with_contract_edit_off_non_ajax_returns_403_page を追加（contract_edit OFF ＋
+      非AJAX POST → 403・論理削除されない）。コード変更なし。contracts PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-29. [T60／review_test_organizations_masters No.11、本ファイル #27] masters.tests.
+      MasterSettingsMenuAccessControlTests に test_group_views_actually_enforce_settings_menu_role_check
+      （class_management を管理者限定へ差し替え → 所属長でも regist/edit/delete が 403）と
+      test_retention_views_actually_enforce_settings_menu_role_check（retention_setting を空集合へ
+      差し替え → 管理者でも 403）を追加。コード変更なし。masters PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-33. [(B)部 #82／review_test_permissions_accounts P-12] 実コード確認：部署スコープ絞り込みは
+      filter_authority_queryset 先頭の `qs = visible_employees(viewer)` として `if form.is_valid()`
+      の外で適用されており、form 無効時にスキップされるのはユーザーの検索フィルタだけ＝他部署漏れは
+      起きない。現状仕様を固定する回帰テスト AuthorityListDepartmentScopeTests.
+      test_department_scope_still_applies_when_search_form_is_invalid を追加（コード変更なし）。
+      permissions PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-34. [(B)部 #46/#98/#107、S2(b)／AJAX スコープ境界の横断ハードニング]
+      (2) organizations/api.py OptionListAPIView に get() を追加し、?exclude= が非数値なら全件返さず
+          JsonResponse({"error":"invalid exclude"}, status=400)＋logger.warning。_department_items は
+          exclude を数値前提に簡素化。
+      (3) organizations.tests の非数値 exclude テストを 400＋assertLogs("organizations.api") 検証へ
+          置換。contracts RelatedSearchAPIView 側の assertLogs は既存テストでカバー済み。
+      (1)（S2(b)）: 2026-09-10 ユーザー確認の結果「現状維持（実用で問題になった時点で対応）」で
+          最終確定＝コード変更なし。type=dept は呼び出し元が管理者のみのため論点なし、
+          type=group（所属長も編集可）の自スコープ外分類の代理付与可否は業務ルール未確定。
+          詳細は (B)部 #46。organizations/contracts PASS。
+      (2)(3) 対応済み（リリース前に P8 で対応）／(1) 現状維持で確定
+
+U-36. [(B)部 #106／review_test_organizations_masters No.7] organizations.tests.ApplyDeptActionTests.
+      test_visible_department_ids_with_multiple_stacked_scopes を追加（merge + split + merge を経た
+      viewer_department で自部署＋visible 全4件を返す）。コード変更なし。organizations PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-37. [(B)部 #63/#64／review_test_doc_contract [17]/[18]] contracts.tests.FilterValidRelatedIdsTests
+      を新設：test_duplicate_pks_are_deduped_preserving_first_position ／
+      test_exclude_pk_is_dropped_even_when_present_in_keep_ids。コード変更なし。contracts PASS。
+      対応済み（リリース前に P8 で対応）
+
+U-31. [S3／review_security.txt 参考 I-1] コード修正対象外。RELEASE_PREP_NOTES.md「5. CSV 取込で
+      新規登録される職員の初期パスワード」に、リリース時の確認事項（(a)一括変更依頼 / (b)初回強制
+      変更の実装）として記載。review_security.txt I-1 も更新。
+      対応済み（リリース前に P8 で対応）
+
+U-32. [C13／review_code_permissions_accounts No.4] コード修正対象外。RELEASE_PREP_NOTES.md「6. 監査
+      action 文言の半角→全角スペース統一による既存 AuditLog の表記ゆれ」に、リリース時の判断
+      （初回投入なら作業不要／後追い適用時のみ既存 AuditLog の一括 UPDATE か表記ゆれ許容）として記載。
+      対応済み（リリース前に P8 で対応）
+
 
 ================================================================================
 ■ 2026-09-08 対応の記録
@@ -95,6 +368,11 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
    is_deletedフィルタ無し。ウィザード中に別セッションが同じレコードを削除した場合、完了モーダルの
    一覧に削除済みレコードが表示され得るが実害は限定的。
    (出典: review_code_doc_contract_full.txt)
+   → 2026-09-10 再判断で「直す」に変更。
+   → 対応済み（リリース前に P8 で対応）。U-18：core/bulk_edit_views.py _render_complete の
+     完了サマリを status_by_pk（今回の確定処理で触れた行）に限定。別セッションが論理削除/異動
+     した行は _committable_pks で除外されるため一覧・件数から落ちる。documents/contracts の
+     BulkEditViewTests に回帰テスト追加。全体 PASS。
 
 2. contracts/forms.py:107-113（contract_amount）に下限バリデーション無し。改ざん経路を要する
    低リスクな入力検証の穴。
@@ -120,6 +398,10 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
    ※ documents/services.py への logger 追加（旧#55）は「直す」に振り分け済みだが、こちらは
      models.py/forms.py 側の宣言済み未使用であり別件。
    (出典: review_code_doc_contract_full.txt)
+   → 2026-09-10 再判断：CLAUDE.md「ログを整備する」に logger を用意する対象の限定を明文化する
+     ことで対象外化（U-4）。R9/R13/R20/R21 も同じ扱い。
+   → 対応済み（リリース前に P8 で対応）。U-4：CLAUDE.md 明文化を実施、各 review_rule_*.txt の
+     該当節も「対応済み」へ更新。コード変更なし（logger 宣言はそのまま残す）。
 
 7. documents/views.py:238-336（DocumentEditView）, contracts/views.py:282-410
    （ContractEditView）がUpdateViewを継承しているが実質使っていない（get()/post()を完全に
@@ -155,10 +437,20 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     dispatch()に追加すること。
     (出典: review_code_permissions_accounts.txt, review_rule_permissions_accounts.txt,
     review_security.txt)
+    → 2026-09-10 再判断で「直す」に変更（(a) dispatch ロールゲート追加のみ。type=group/dept の
+      結果スコープ絞り込み (b) は (B)部 #46＝U-34 で対応）。
+    → 対応済み（リリース前に P8 で対応）。U-2：permissions/api.py OptionListAPIView に
+      dispatch() を追加し can_access_settings_menu_item(request.user, "authority_management")
+      で 403。permissions.tests.OptionListAPIViewTests に test_staff_role_is_forbidden 追加、
+      正常系は MANAGER プロファイル前提に変更。permissions/accounts 177件 PASS。
 
 12. accounts/csv_import_services.py:118のCSV職員番号NFKC正規化（全角→半角変換、2026-08-25修正）に
     対応する単体テストが無い。コード側コメントで既知・見送りと明記済み。
     (出典: review_rule_permissions_accounts.txt, review_test_permissions_accounts.txt 低12)
+    → 2026-09-10 再判断で「直す」に変更。
+    → 対応済み（リリース前に P8 で対応）。U-7：ImportStaffCsvServiceTests に
+      test_fullwidth_employee_no_is_normalized_to_halfwidth /
+      test_non_digit_employee_no_is_rejected 追加。accounts 97件 PASS。
 
 13. accounts/models.py create_superuser / has_perm / has_module_perms が未テスト。Django管理
     サイト用の経路でUI上の利用箇所は無い。
@@ -224,6 +516,8 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     （masters側の管理者sort=department）も「非管理者に効かないこと」のみ検証され、「管理者が
     指定した場合の実際の並び順」自体は未検証。default_order_by検証と重複が大きく実益が薄い。
     (出典: review_test_organizations_masters.txt 低13)
+    → 2026-09-10 review_test_organizations_masters.txt No.2（中）で「管理者の複合ソート
+      （branch_code→section_code）」テストが追加され部分解消。
 
 26. organizations/models.py DepartmentViewScope.__str__、および(viewer,visible)組の
     UniqueConstraint自体のDBレベル直接テストが無い。apply_dept_action idempotencyテストで
@@ -235,6 +529,11 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     全View個別の回帰テストが無い。共通のSettingsMenuAccessMixinをCategory系で既に個別検証済みで
     実装が完全共通のため重複テストになる。
     (出典: review_test_organizations_masters.txt 低16)
+    → 2026-09-10 再判断で「直す」に変更（Category 系の個別ゲートテストを Group系・Retention系へ
+      横展開。あるビューから mixin を外した回帰を拾う）。
+    → 対応済み（リリース前に P8 で対応）。U-29：MasterSettingsMenuAccessControlTests に
+      test_group_views_actually_enforce_settings_menu_role_check /
+      test_retention_views_actually_enforce_settings_menu_role_check を追加。
 
 28. organizations/services.py branch_choicesの重複排除（同一branch_codeが複数部課にまたがる
     場合に1件のみ列挙されること）が、複数本支所が存在するデータセットでは未検証。
@@ -267,6 +566,8 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     背後にある「date_start/date_end検索自体がどのテストからも検証されていない」というより優先度の
     高い未対応事項（review_test_audit_core.txt 優先度高3）の対応が先。
     (出典: review_test_audit_core.txt 低13)
+    → 2026-09-10 review_test_audit_core.txt で「優先度高3」（date_start/date_end 検索）は
+      AuditLogListViewTests で解消済み。残るは widget 単体テストのみで見送り継続。
 
 34. core/double_submit.py issue_token/consume_token/reject_if_resubmitted自体の直接単体テストが
     無い。organizations/masters/permissions/accounts各アプリのtests.pyが二重送信分岐を個別検証
@@ -303,6 +604,8 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     本ファイル既出の#1（BulkEditView完了サマリのis_deletedフィルタ無し）と同種で、対応するなら
     objs_by_pkのクエリにis_deleted=Falseと許可部署IDを併せて追加する。
     (出典: review_code_documents_contracts.txt C-6)
+    → 2026-09-10 review_code_audit_core.txt No.1（BaseBulkEditView._committable_pks 新設・
+      dept_ids_resolver 追加）で対応済み。
 
 39. 【C-8】core/upload_views.py:49 / core/upload_services.py:257 チャンク結合APIのtotal_chunksに
     上限が無く、巨大値を送るとrange()のリスト内包でメモリを消費し得る。ただしcombine_upload_chunks
@@ -365,18 +668,332 @@ CLAUDE.md「コーディング規約」「原本フィデリティ運用方針�
 
 
 ================================================================================
+■ 2026-09-10 判断セッション追加分（#46-#122）
+================================================================================
+2026-09-09/09-10 の再監査（review_code/rule/test_permissions_accounts・_organizations_masters・
+_audit_core、review_code_documents_contracts・review_rule_doc_contract・review_test_doc_contract、
+review_security）の見送り注記を1件ずつ確認し、「見送り」に確定した分を No.46 以降に追記。
+既存 #13/#14/#15/#17/#26/#28/#34 と重複する再監査項目は番号を振らず、該当箇所で注記した。
+今回「直す」に確定した分は本ファイル冒頭「未対応（要対応）」（U-1〜U-37）にあり、ここには含めない
+（U-33〜U-37 は所感レビューで #46/#63/#64/#82/#98/#106/#107/#113 を見送り→直すへ格上げした分）。
+
+--- セキュリティ ---
+46. [review_security.txt 追補 No.2] permissions/api.py OptionListAPIView に (a) ロールゲートを
+    追加する（未対応 U-2）一方で、(b) type=group / type=dept の返却結果を閲覧者自身の
+    visible_groups / 部署スコープでさらに絞るかは「部門間閲覧設定は他者に閲覧を許可する側の設定で
+    閲覧者自身のスコープとは無関係」という位置づけの整理が要り、仕様担当の確認待ち。→ 見送り。
+    → 2026-09-10 再判断で「直す」に変更（U-34）。
+    → 2026-09-10 P8 セッションでユーザーへ報告・判断確認の結果、S2(b)＝U-34(1) は「現状維持」
+      で最終確定。実装調査で判明した実態：
+        ・contract_visible_departments（type=dept）は Rev1.2 で管理者のみ編集（xlsx 権限管理!H182）。
+          呼び出し元が管理者＝スコープ無制限のため type=dept のスコープ絞りは論点なし。
+        ・doc_visible_groups / contract_visible_groups（type=group）は所属長も編集可。所属長が自部署
+          外の分類を部下の閲覧許可に含められる点が唯一の穴だが、xlsx/簡易設計指示書に「所属長が
+          自スコープ外の権限を代理付与してよいか」の記載が無く、業務ルール未確定。
+      → コード変更なし。実用で問題になった時点で、上記3項目を管理者のみ編集にする（案A）か
+        editor スコープで絞る（案B）を再検討する。U-34(2)（非数値 exclude の 400 化）・(3)
+        （assertLogs 検証）は #98/#107 で対応済み。
+
+--- documents / contracts（2026-09-09 再監査）---
+47. [review_code_documents_contracts.txt No.5] _strip_ext（完全一致）・_edit_delete_context
+    （reverse先以外一致）・_pending_preview_context（kind/url名以外一致）が documents/contracts
+    両方に逐語重複。数行ヘルパーで実害なし。U-19 で BulkEditView 本体を共通化する際も未着手。
+    次回の規約準拠監査でまとめて core へ移設。#51 と一括で扱う。
+48. [review_code_documents_contracts.txt No.6] contracts BulkEditView._commit の
+    prefetch_related("related_links") が .values_list() でキャッシュを使わず空振り。一括編集の
+    対象件数は一覧選択ぶんで限られ実害小。
+49. [review_code_documents_contracts.txt No.7] contracts UploadStep2View.post が保存ループ内で
+    filter_valid_related_ids → contract_searchable_department_ids（2クエリ）を毎回再発行し
+    N件で3Nクエリ。一括登録のファイル数は実運用で数件程度。ループ前解決は filter_valid_related_ids の
+    シグネチャ変更を伴う。
+50. [review_code_documents_contracts.txt No.8] contracts/api.py:25 RELATED_SEARCH_LIMIT = 50 が
+    .env 未経由のモジュール定数。SearchView.PAGE_SIZE=100 / DELETE_WINDOW_DAYS と同じ
+    「容易に変更しない内部定数」の前例あり。env 化するかはユーザー確認事項。
+51. [review_rule_doc_contract.txt No.2] contracts/views.py の再描画ヘルパー
+    （_resolve_related_rows・_related_rows_for_contract・_merge_related_into_field_sets・
+    _remap_related_ids_after_remove）が DB 引き当てを含むのに services.py 未分離。保存側検証
+    （filter_valid_related_ids 等）は分離済みで再描画側だけ非対称。副作用の無い表示用整形で実害小。
+    #47 の小ヘルパーと一括で services へ移す横断作業として扱う。
+52. [review_rule_doc_contract.txt No.3] documents/contracts の forms.py の UploadStep2Form.__init__・
+    SearchForm.__init__/clean、CommaNumberInput.value_from_datadict/format_value に docstring 無し
+    （file_data 等には有り、粒度不統一）。行内コメントで「なぜ」は説明済み。両 forms.py を
+    まとめて見直す軽微整形タスク。
+53. [review_test_doc_contract.txt [4]] DocumentEditView/ContractEditView 単独編集の consume_token
+    失敗（edit へ redirect＋エラー）が未テスト。core.double_submit 共通実装で UploadStep2View が
+    代表テスト済み。
+54. [review_test_doc_contract.txt [5]] ContractEditView バリデーションエラー再描画時の
+    _resolve_related_rows 経路（POST の関連書類 pk 並び復元）が未テスト。GET・確定後の
+    _related_rows_for_contract は間接カバー。
+55. [review_test_doc_contract.txt [6]] UploadStep2View._handle_remove 後の
+    _remap_related_ids_after_remove（related_contract_ids の添字前詰め）が未テスト。メタデータ欄の
+    保持は既存テスト済み。
+56. [review_test_doc_contract.txt [7]] BaseBulkEditView.post の bulk_nav 端での据え置き
+    （index==0 で prev / index==total-1 で next → 現ページ再表示、ステージ巻き戻らず）が未テスト。
+    通常遷移は test_edits_are_staged_and_persist_across_navigation でカバー。
+57. [review_test_doc_contract.txt [8]] contracts BulkEditView.commit_one_update の関連書類
+    「並び替えのみ」（set 同一・display_order 違い）の dirty 判定が未テスト。増減は間接カバー。
+    → 対応済み（リリース前に P8 で対応）。U-19（C7）で本体修正時に
+      test_related_contracts_reorder_only_is_committed_on_update /
+      test_related_contracts_same_order_is_not_dirty を追加。
+58. [review_test_doc_contract.txt [10]] documents/contracts DetailAPIView の存在しない pk → 404 が
+    未テスト。get_object_or_404 の Django 標準挙動。
+59. [review_test_doc_contract.txt [11]] DetailAPIView レスポンスの is_expired / is_expiring_soon /
+    save_date / updated_at のフィールド値アサートが皆無。is_expiring_soon は core.notice_services
+    への委譲で core 側の責務。
+60. [review_test_doc_contract.txt [13]] contracts RelatedSearchAPIView で title/freeword とも空 →
+    閲覧範囲全件を RELATED_SEARCH_LIMIT(50) 件で打ち切る分岐が未テスト。境界値。
+61. [review_test_doc_contract.txt [14]] contracts RelatedSearchAPIView の管理者
+    （contract_searchable_department_ids=None）→ 部署フィルタスキップが未テスト。非管理者スコープは
+    検証済みで、管理者=全件は fail-safe 方向。
+62. [review_test_doc_contract.txt [15]] contracts RelatedSearchAPIView の並び順（-updated_at 降順）の
+    アサートが無い。表示ロジック。
+63. [review_test_doc_contract.txt [17]] contracts filter_valid_related_ids の重複 pk dedupe（seen に
+    よる順序保持除去）が未テスト。非数値・スコープ外・self 除外は既存テスト済み。
+    → 2026-09-10 再判断で「直す」に変更。
+    → 対応済み（リリース前に P8 で対応）。U-37：contracts.tests.FilterValidRelatedIdsTests.
+      test_duplicate_pks_are_deduped_preserving_first_position。
+64. [review_test_doc_contract.txt [18]] contracts filter_valid_related_ids で exclude_pk が keep_ids に
+    含まれる異常データでも self が確実に落ちることが未テスト。基本の自己リンク拒否は検証済み。
+    → 2026-09-10 再判断で「直す」に変更。
+    → 対応済み（リリース前に P8 で対応）。U-37：contracts.tests.FilterValidRelatedIdsTests.
+      test_exclude_pk_is_dropped_even_when_present_in_keep_ids。
+65. [review_test_doc_contract.txt [19]] contracts sync_related_contracts の既存行 display_order 更新
+    分岐（elif row.display_order != order: row.save）が未テスト（#57 と対）。新規追加・削除は間接カバー。
+    → 対応済み（リリース前に P8 で対応）。U-19 の
+      test_related_contracts_reorder_only_is_committed_on_update が display_order の入れ替わりを
+      アサートする（並べ替えのみ → 既存2行の display_order が反転）。
+66. [review_test_doc_contract.txt [23]] documents/contracts build_queryset の save_day_kbn="expiry"
+    分岐（期間フィルタを expiry_date に適用）が未テスト。save 側は検証済み。
+67. [review_test_doc_contract.txt [24]] contracts 固有ソート列（contract_date/renewal_date/
+    contract_period_end/contract_partner）・documents 単純列（title/save_date/expiry_date/
+    updated_at）の実挙動が未テスト。複合列（no/info/uploader）は検証済み、SORT_FIELDS 登録済み。
+68. [review_test_doc_contract.txt [25]] documents build_queryset の retention_period 絞り込み
+    （qs.filter(retention_period=...)）が未テスト。選択肢生成は検証済み。契約書側に無い項目。
+69. [review_test_doc_contract.txt [28]] contracts SearchForm のラジオ既定値
+    （title_match/freeword_match=OR 等）が未テスト。apply_radio_defaults は core 共有で
+    documents 側テスト済み。
+70. [review_test_doc_contract.txt [29]] documents/contracts UploadStep2Form の per_file 複製
+    （素の "department" が fields から消える等）と first_error_file_index の「エラーなし→0」分岐が
+    未テスト。file_data/first_error_file_index の主経路は検証済み。
+71. [review_test_doc_contract.txt [32]] contracts ContractRelation の on_delete=CASCADE /
+    論理削除時の行残存が未テスト。Django 標準挙動。
+72. [review_test_doc_contract.txt [33]] contracts の論理削除 save で正規化カラムを再計算しない
+    ことのテストが無い（documents 側には有り）。NormalizedTextFieldsMixin は共有。
+73. [review_test_doc_contract.txt [34]] core.record_views.BaseDeleteView.post の非AJAX 異常系
+    （(a) 404 再 raise、(b) DBError → messages.error＋search へ redirect）が未テスト。AJAX 側の
+    JSON 404/500 は両アプリで検証済み。DeleteView は通常 AJAX で非AJAX は fallback。
+    （既出 #9 の 2026-09-09 再監査版。#9「削除済み契約書への非AJAX削除」を BaseDeleteView の
+    非AJAX 異常系全般に粒度更新）
+74. [review_test_doc_contract.txt [36]] BaseBulkEditView.post の bulk_action="cancel" で
+    セッション state が既に空のとき（多重クリック）例外にならないことが未テスト。正常系は検証済み。
+75. [review_test_doc_contract.txt [39]] contracts BulkDownloadView の非FileNotFound OSError スキップ・
+    ZIP 内名前衝突 dedupe が未テスト（documents 側には有り）。core.record_views / core.zip_services 共有。
+76. [review_test_doc_contract.txt [40]] documents BulkDownloadView.audit_extra_kwargs の
+    「1件でも privacy_flag → personal_info_flag」OR 集約が未テスト。単体DL の privacy_flag 記録は
+    検証済み。
+77. [review_test_doc_contract.txt [42]] contracts ChunkUploadAPITests の malformed(400) /
+    chunk_size 伝搬が未テスト（documents 側には有り）。BaseChunkUploadAPIView 共有。
+    （既出 #10 の 2026-09-09 再監査版）
+78. [review_test_doc_contract.txt [1]] documents/contracts UploadStep2View.post の新規登録時
+    DBError 分岐・複数ファイル途中失敗の孤児ファイル後始末は、doc/contract レビュー時点では
+    未テストだったが、UploadStep2PartialFailureCleanupTests（中、2026-09-09 追加済み）と
+    review_test_audit_core.txt No.10（中、2026-09-10 追加の BaseBulkEditViewCoreTests 等）で
+    実質解消。→ 見送り（対応済み扱い）。
+
+--- permissions / accounts（2026-09-10 再監査）---
+79. [review_test_permissions_accounts.txt P-9] permissions/api.py OptionListAPIView の並び順
+    （group=code 昇順 / dept=branch_code→section_code 昇順）を複数件でアサートするテストが無い
+    （集合一致のみ）。order_by 標準機能寄り。
+80. [review_test_permissions_accounts.txt P-10] can_select_department(kind="contract", profile=None) の
+    分岐が未テスト。同一ガード bool(profile and ...) は can_edit_contract / can_edit_retention の
+    profile なしテストでカバー。
+81. [review_test_permissions_accounts.txt P-11] contract_searchable_department_ids の
+    「非管理者・profile なし → visible_department_ids のみ」分岐が未テスト。`if profile:` の一方の
+    分岐で同一コードパス。
+82. [review_test_permissions_accounts.txt P-12] filter_authority_queryset の form.is_valid()==False
+    経路（department に不正 pk 等でフィルタ節を丸ごとスキップ）が未テスト。全フィールド
+    required=False で通常到達しない防御的分岐。
+    → 2026-09-10 再判断で「直す」に変更（is_valid()==False で department が ModelChoiceField なら
+      到達し得る＝実コード確認が要る）。未対応 U-33 参照。
+83. [review_test_permissions_accounts.txt P-14] can_access_settings_menu_item の不正キー → KeyError
+    （settings_menu_key タイポの早期検知）が未テスト。settings_menu_key はクラス属性の定数で実行時に
+    外部入力は渡らない。
+84. [review_test_permissions_accounts.txt P-15] AuthorityEditView 認証済み・存在しない pk → 404 が
+    未テスト（未認証 302 は検証済み）。get_object_or_404 標準挙動。
+85. [review_test_permissions_accounts.txt P-16] lock_active_admin_profiles を transaction 外で呼ぶと
+    TransactionManagementError になることの明示テストが無い。select_for_update 標準挙動、呼び出し側は
+    全て atomic 内。
+86. [review_test_permissions_accounts.txt P-17] AuthorityEditForm.__init__ の _FLAG_FIELDS 各 label を
+    instance の verbose_name で上書きする処理が未テスト。表示文言の回帰で、項目一覧テストが構成崩れは
+    検知。
+87. [review_test_permissions_accounts.txt P-18] AuthorityListView の未知 sort_key → 既定ソート
+    フォールバック、PAGE_SIZE=100 Paginator、不正 page パラメータが未テスト。Paginator.get_page /
+    dict.get の Django 標準挙動。
+88. [review_test_permissions_accounts.txt A-12] LoginView.redirect_authenticated_user（認証済み
+    ユーザーがログイン画面へ → リダイレクト）が未テスト。Django auth 標準機能。
+89. [review_test_permissions_accounts.txt A-13] LoginForm.confirm_login_allowed の super() 経路
+    （is_retired=False だが is_active=False の職員に AuthenticationForm 標準の "inactive" チェック）が
+    未テスト。実データ上まれ。
+90. [review_test_permissions_accounts.txt A-14] _upsert_department で branch_name/section_name とも
+    同一の場合に save() を呼ばない分岐（不要 UPDATE 抑止）が未テスト。機能的差異なし。
+91. [review_test_permissions_accounts.txt A-16] reset_permission_profile_if_needed の rank_changed のみ
+    True のケースの明示テストが無い。他フラグと完全に同一コードパス（or 条件の1項）。
+92. [review_test_permissions_accounts.txt A-17] filter_staff_queryset の rank/position/section_code
+    ソート・sort_dir="desc"・form.is_valid()==False 経路が未テスト。他キーで同一ロジック検証済み、
+    desc は prefix 付与のみ。
+93. [review_test_permissions_accounts.txt A-18] StaffCsvImportView への GET が 405 になること
+    （認証済み admin）が未テスト。HTTP メソッドディスパッチ標準挙動。
+94. [review_test_permissions_accounts.txt A-19] StaffEditView の存在しない pk → 404（GET/POST とも）が
+    未テスト。get_object_or_404 標準（StaffDetailView 側ではカバー済み）。
+95. [review_test_permissions_accounts.txt A-21] StaffCsvImportForm.clean_csv_file の単体テストが無い
+    （拡張子チェックは View 統合テストで間接カバー）。
+96. [review_test_permissions_accounts.txt X-2] SettingsMenuAccessMixin が未認証で
+    AnonymousUser.employee_no を触らず 500 にならないことの固定テストが無い。X-1 で追加した
+    UnauthenticatedAccessRedirectTests の 302 検証で実質的に同時担保済み。
+97. [review_test_permissions_accounts.txt X-3] core.double_submit.consume_token の単回使用（consume 後の
+    再 POST が弾かれる＝二重送信が実際に防げる）の End-to-End 検証が permissions/accounts 範囲内に
+    無い。core アプリ側の担保範囲（本ファイル #34 と同一論点）。
+
+--- organizations / masters（2026-09-10 再監査）---
+98. [review_code_organizations_masters.txt No.5] organizations/api.py OptionListAPIView の
+    _department_items で exclude が非数値のとき warning ログのみで qs を絞らず全件（編集中の部署自身を
+    含む）を返す。DeptEditForm.clean の自己参照チェックでサーバー側は防げ、非数値になるのはフォーム
+    改ざん時のみ。
+    → 2026-09-10 再判断で「直す」に変更。
+    → 対応済み（リリース前に P8 で対応）。U-34(2)：organizations/api.py OptionListAPIView に
+      get() を追加し、?exclude= が非数値なら全件返さず JsonResponse({"error":"invalid exclude"},
+      status=400)＋logger.warning。_department_items は exclude を数値前提に簡素化。回帰テスト
+      test_dept_options_rejects_non_numeric_exclude_with_400（既存 ignores テストを置換）。
+99. [review_code_organizations_masters.txt No.6] RetentionEditView/RetentionRegistView が
+    kbn・doc_name を編集可能な hidden フィールド（ModelForm 通常フィールド）として受け取り、POST
+    改ざんで既存の保存期間設定を別区分へ移し替えできる。管理者専用画面でデータ破壊は起きず、
+    disabled 化には edit テンプレートと clean の両方の調整が要る。
+100. [review_code_organizations_masters.txt No.8] GroupForm.clean_code と CategoryForm.clean_code が
+     実質同一。No.1 対応で重複判定本体は _duplicate_master_code_exists（＋_effective_department）に
+     共通化済みで、残る差分は NFKC 正規化＋isdigit チェックとエラー文言のみ。完全な
+     validate_numeric_master_code への切り出しは見送り。
+101. [review_code_organizations_masters.txt No.9] 更新監査メッセージの差分生成ループが
+     GroupEditView.audit_event_message / CategoryEditView.audit_event_message /
+     RetentionEditView.post の3箇所に重複。比較対象フィールドが各モデルで異なり、汎用ヘルパー化すると
+     表示変換関数の受け渡しでかえって読みにくくなる懸念。挙動不変。
+102. [review_code_organizations_masters.txt No.10] organizations/services.py
+     department_composite_order_by を core（基盤）と permissions が import しており、依存方向としては
+     core 側に置く方が素直。Department 固有知識に依存し organizations に置く理由はあり（規約準拠監査でも
+     OK 判定）、実害なし。移動は import 経路の広い変更。
+103. [review_code_organizations_masters.txt No.11] templates/masters/class_list.html:98-113 等の
+     ページャー URL が `?{{ request.GET.urlencode }}&page={{ num }}` で page= を二重付与し得る。
+     QueryDict は最後の値を採用するため動作はする。同パターンは他アプリの一覧テンプレートにも広く
+     存在、共通テンプレートタグ／フィルタ新設を伴う横断変更。
+104. [review_rule_organizations_masters.txt No.6] masters/views.py _group_queryset_with_counts /
+     _category_queryset_with_counts がほぼ完全重複（差分は対象モデルと select_related 引数のみ、
+     annotate は同一）。両 docstring が相互参照で認識済み、ロジックは正しく実害なし。無理に 1関数化
+     すると可読性が落ちる恐れ。core 横断集約含め別タスク。（本ファイル #21 は同関数の
+     「doc_count/contract_count 両方集計の無駄」で別論点）
+105. [review_rule_organizations_masters.txt No.7] organizations/models.py・masters/models.py の
+     フィールドに help_text がほぼ無く、permissions/documents 側（xlsx 番地・OFF 時挙動まで記載）と
+     粒度不揃い。規約は「help_text は日本語で統一」で "無い" ことは違反ではなく、厚いクラス docstring で
+     追跡性は確保。
+106. [review_test_organizations_masters.txt No.7] visible_department_ids の複数 DepartmentViewScope
+     積み上げ（複数回の統合・分割を経た部署で自部署＋全 visible を漏れなく返すこと）が未テスト。
+     単純な filter+values_list で回帰リスク低い境界値。
+     → 2026-09-10 再判断で「直す」に変更（閲覧権限境界のため）。
+     → 対応済み（リリース前に P8 で対応）。U-36：organizations.tests.ApplyDeptActionTests.
+       test_visible_department_ids_with_multiple_stacked_scopes。
+107. [review_test_organizations_masters.txt No.9] organizations/api.py OptionListAPIView の
+     非数値 exclude で logger.warning（"改ざんの可能性"）が出ることが assertLogs で未検証
+     （返り値の全件維持＝安全側は検証済み）。
+     → 2026-09-10 再判断で「直す」に変更。
+     → 対応済み（リリース前に P8 で対応）。U-34(3)：organizations.tests
+       test_dept_options_rejects_non_numeric_exclude_with_400 で assertLogs("organizations.api")
+       により logger.warning（"非数値"）を検証。contracts RelatedSearchAPIView 側は既存
+       test で assertLogs 検証済み。
+108. [review_test_organizations_masters.txt No.10] core.master_views.BaseScopedMasterDeleteView.post の
+     count>0 時 logger.warning（"文書件数が0件でない…削除が試行されました"）が assertLogs で未検証。
+     削除ブロック自体（is_deleted 不変）は検証済み。
+109. [review_test_organizations_masters.txt No.12] RetentionPeriod の unique_retention_period_value /
+     unique_retention_permanent の DB レベル発火（TOCTOU 競合で IntegrityError → save_or_none が
+     フレンドリーメッセージへ変換）が未検証。フォーム層では検証済み、DB 制約発火は同型の
+     unique_retention_display_order 重複で確認済み。
+110. [review_test_organizations_masters.txt No.13] RetentionListView の doc_periods / ringisho_periods /
+     keihi_periods が display_order 昇順で並ぶことが未検証。区分フィルタの内容一致は検証済み。
+111. [review_test_organizations_masters.txt No.14] RetentionDeleteView の `no`（同一 kbn/doc_name 内の
+     display_order__lte 件数＝一覧の行位置）の計算結果が未検証。欠番時の一覧 No. との整合。表示のみで
+     副作用なし。
+
+--- audit / core（2026-09-10 再監査）---
+112. [review_code_audit_core.txt No.6] core/bulk_edit_views.py _render_complete / _context が
+     filter(pk__in=pks) を select_related/prefetch_related なしでロードし、contracts は完了画面で
+     _related_rows_for_contract を別途引き直す（commit で読んだインスタンスを捨てて読み直し）。件数は
+     利用者の選択数に有界。任意。
+113. [review_code_audit_core.txt No.7] core/bulk_edit_services.py staged_related_ids_for がセッション
+     state を bucket["related_ids"] で無条件参照。Rev1.6 でセッション形式を {"add","remove"} →
+     {"related_ids"} へ非互換変更したため、デプロイ跨ぎで旧形式セッションが残ると KeyError。本番
+     未リリースのため旧形式セッションは存在せず実害なし。→ 対応不要（記録のみ）。
+     → 2026-09-10 再判断で「直す」に変更（bucket.get() へ修正でリリース申し送りを消す）。
+     → 対応済み（リリース前に P8 で対応）。U-35：`bucket.get("related_ids", [])` に変更。
+       core.tests.BulkEditServicesStagingTests に回帰テスト追加。
+114. [review_rule_audit_core.txt No.5] core/upload_views.py にビュー以外のヘルパー関数
+     （file_rows・remap_step2_initial_after_remove・file_field_sets・build_pending_preview_context）が
+     同居。core/record_views.py には無く非対称。upload 系は変更頻度が高くリグレッションリスクが分離の
+     実益に見合わない。U-5（core の *_views 命名整理）と併せて。
+115. [review_rule_audit_core.txt No.8] audit/services.py log_raw が AuditLog.objects.create() を
+     except Exception で捕捉（DB 境界としては IntegrityError/DatabaseError が精密）。「監査ログの記録
+     失敗で本処理を巻き込まない」握りつぶし判断はコメント済みで規約の例外条項に合致、監査基盤の
+     堅牢性優先で現状維持がレポート自身の結論。
+116. [review_rule_audit_core.txt No.9] core/api.py BaseOptionListAPIView（特に _department_items の
+     管理者ゲート＝過去に回帰があった分岐）と core/form_services.py save_or_none に core 直下の直接
+     ユニットテストが無い（他アプリ経由で間接実行のみ）。テストカバレッジ棚卸しの別タスク。
+     （本ファイル #31 は save_or_none の DatabaseError 未捕捉で別論点）
+117. [review_rule_audit_core.txt No.10] core/notice_services.py が contracts.models / documents.models を
+     トップレベル import（audit/services.py は関数内 import を徹底しており非対称）。文書＋契約書の
+     集計モジュールとして設計上の許容範囲、レイヤリング一貫性の留意点。
+118. [review_test_audit_core.txt No.1] audit/services.py log_denied_cross_department_access の直接単体
+     テスト（entity_name/pk の埋め込み書式）が無い。action="アクセス拒否" と書式は
+     documents/contracts/permissions の HTTP 経由テストで実質カバー、薄いラッパー。
+119. [review_test_audit_core.txt No.5] 保持下限「当日ちょうど」のログが一覧に出る（gte）・purge されない
+     （lt）ことの固定テストが無い。境界計算は AddMonthsClampTests（No.4、2026-09-10 追加済み）で
+     固定済み、gte/lt 突き合わせは実装が単純。
+120. [review_test_audit_core.txt No.8] purge_expired_audit_logs コマンド自体で
+     AUDIT_LOG_RETENTION_MONTHS の @override_settings 追随・cutoff 当日境界が未検証。コマンドとフィルタは
+     同じ retention_cutoff_date() を共有、フィルタ側の可変性テスト済み。
+121. [review_test_audit_core.txt No.14] core/notice_services.py get_notice_counts の管理者
+     （can_select_department=True）→ 全部署計上分岐の明示アサートが無い。複数テストのセットアップで
+     暗黙に通っている。
+122. [review_test_audit_core.txt No.17] core/api.py BaseOptionListAPIView の type=None（`type` キー自体が
+     無い → else 分岐 400）が未テスト。None も "unknown" と同じ else 分岐で "unknown" で実挙動固定済み。
+
+
+================================================================================
 ■ 集計
 ================================================================================
-documents/contracts: 9件（#3は2026-09-08に対応済みのため除外）
-permissions/accounts: 8件
-organizations/masters: 10件（#23・#24は2026-09-08に対応済みのため除外）
-audit/core: 7件
-documents/contracts（2026-08-28追補 / review_code_documents_contracts.txt）: 6件
-documents/contracts（2026-08-28追補 / review_rule_doc_contract.txt 再監査）: 2件
-合計: 42件の見送り指摘。
+【2026-08-28〜09-08 判断分（#1-#45）】
+  documents/contracts:        9件（#3 対応済み。#1 は2026-09-10「直す」＝U-18）
+  permissions/accounts:       8件（#11・#12 は2026-09-10「直す」＝U-2/U-7）
+  organizations/masters:     10件（#23・#24 対応済み。#27 は2026-09-10「直す」＝U-29）
+  audit/core:                 7件
+  documents/contracts 追補（review_code_documents_contracts.txt 旧版 #38-#43）: 6件
+                              （#38 は2026-09-10 review_code_audit_core No.1 で対応済み）
+  documents/contracts 追補（review_rule_doc_contract 旧版 #44-#45）:            2件
+  ＋ #6 は2026-09-10 CLAUDE.md 明文化（U-4）で対象外化。
+
+【2026-09-10 判断セッション追加分（#46-#122）】
+  セキュリティ:                                    1件（#46）
+  documents/contracts（2026-09-09 再監査）:        32件（#47-#78）
+  permissions/accounts（2026-09-10 再監査）:       19件（#79-#97）
+  organizations/masters（2026-09-10 再監査）:      14件（#98-#111）
+  audit/core（2026-09-10 再監査）:                 11件（#112-#122）
+  ※既存 #13/#14/#15/#17/#26/#28/#34 と重複する再監査項目は番号を振らず該当箇所で注記。
+
+見送り 実効合計: 約105件
+  （#1-#122 のうち 対応済み #3/#23/#24/#38、直すへ移動 #1/#6/#11/#12/#27/#46/#63/#64/#82/#98/
+   #106/#107、対応不要かつ直すへ #113 を除く）
+未対応（要対応）: 2026-09-10 のリリース前 P8 対応セッションで U-1〜U-37 を実装完了し全件クローズ
+  （「■ リリース前 P8 対応の記録」参照）。U-34(1)／S2(b) はユーザー確認の結果「現状維持
+  （実用で問題になった時点で対応）」で最終確定＝コード変更なし。（B)部 #46 参照。
+  ・U-33〜U-37 は2026-09-10の所感レビューで見送り→直すへ格上げした5件（実装済み）
+   （U-33=#82／U-34=#46+#98+#107+S2(b)／U-35=#113／U-36=#106／U-37=#63+#64）。
 
 ★要追跡: #19・#20（部署バックフィル完了後に分岐を外す想定）
 
-本ファイルは2026-08-28の判断セッション反映版（元は2026-08-26スナップショット）。将来これらの
-経路を直接使う変更が入る場合は、その時点で出典のreview_*.txtを再確認し、テスト追加・修正の
-要否を再検討すること。
+本ファイルは2026-09-10の判断セッション反映版。将来これらの経路を直接使う変更が入る場合は、
+その時点で出典の review_*.txt を再確認し、テスト追加・修正の要否を再検討すること。

@@ -90,9 +90,11 @@ No.3  対象: core/bulk_edit_views.py BaseBulkEditView._commit の監査ログ
       理由: documents/contracts の BulkEditViewTests は「更新/削除/更新なし」のステータス表示は
             見ているが、確定時に書かれる監査ログの action 文言・personal_info_flag を
             アサートしていない。単体編集経路の監査ログは検証済みのため優先度は低い。
-      → 見送り／理由: 優先度「低」。単体編集経路の監査ログ（action 文言・personal_info_flag）は
-        検証済みで、_commit は同じ audit_services.log / audit_extra_kwargs を呼ぶだけのため
-        重複が大きい。
+      → 対応済み（review_pending.txt 経由でリリース前に対応）: U-30。U-22（_commit の
+        audit_services.log を transaction.atomic() の外へ移す refactor）の回帰保護として、
+        documents.tests.BulkEditViewTests.test_bulk_commit_audit_log_action_and_personal_info_flag_are_fixed
+        を追加（個人情報フラグ付き文書の一括更新・一括削除で action 文言＝「保管画面２　更新」/
+        「保管画面２　削除」・personal_info_flag=True を固定）。
 
 ================================================================================
 ■ (2) 保存期間による除外（retention cutoff）

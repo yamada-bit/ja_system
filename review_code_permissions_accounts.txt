@@ -99,12 +99,12 @@ No.3  優先度: 低
   - 旧実装も同じ挙動のため厳密には本PRの回帰ではないが、周辺を触っている今が
     直しどき。get_or_create の created フラグを見て、新規作成時も audit ログを
     出すのが筋。
-見送り（2026-09-10）／理由:
-  優先度「低」。旧実装からの既存挙動で本PRの回帰ではない。発生条件は「既存職員かつ権限管理で
-  PermissionProfile 未設定（get_profile()=None の正常状態）かつ CSV 所属長フラグ"1"」に限られ、
-  実データではほぼ出現しない周辺ケース。No.2 対応で _apply_manager_flag は触っているが、
-  get_or_create の created 分岐で audit ログを出す修正は今回の対応方針（高・中のみ修正）から外れる
-  ため見送る。将来 audit ログの網羅性を見直す際に併せて対応する。
+対応済み（review_pending.txt 経由でリリース前に対応）: U-20。
+  _apply_manager_flag の get_or_create を `profile, created = ...` に変え、created のとき
+  logger.info ＋ audit_services.log(action="職員マスタ　CSV取込 所属長昇格") を出してから return
+  するよう修正（昇格・降格経路と対称）。回帰テスト：
+  accounts.tests.ImportStaffCsvServiceTests.test_manager_flag_creates_manager_profile_when_missing
+  に AuditLog アサートを追加。accounts/contracts 304件 PASS。
 
 ------------------------------------------------------------------------
 B. 再利用・単純化・効率 / 規約整合
@@ -124,11 +124,10 @@ No.4  優先度: 低
   - 影響は軽微。運用開始前（本番リリース前）なら既存ログを一括UPDATEするか、
     リリース後なら「表記ゆれが残る」ことを承知の上で許容する判断を明記しておくと良い。
 根拠: CLAUDE.md「原本フィデリティ」ではなく運用データの一貫性の観点。
-見送り（2026-09-10）／理由:
-  優先度「低」。実害は操作履歴ログ一覧の表示上の表記ゆれのみ（action 列は AuditLogSearchForm の
-  検索対象外）。本番リリース前の運用判断事項であり、コード修正ではなく既存ログの一括 UPDATE で
-  対応すべき性質のため、RELEASE_PREP_NOTES.md 等のリリース準備タスクとして扱う。コードとしての
-  修正対象にはしない。
+対応済み（review_pending.txt 経由でリリース前に対応）: U-32。コード修正対象外のため
+  RELEASE_PREP_NOTES.md「6. 監査 action 文言の半角→全角スペース統一による既存 AuditLog の
+  表記ゆれ」に、リリース時の判断（初回投入なら作業不要／後追い適用時のみ既存 AuditLog の
+  一括 UPDATE か表記ゆれ許容）として記載。
 
 No.5  優先度: 低
 対象: permissions/api.py:13-41  OptionListAPIView
@@ -142,11 +141,12 @@ No.5  優先度: 低
   ロールゲート（authority_management キー）を挟むのが他の設定系画面と揃う。
 根拠: CLAUDE.md「URL直打ちを想定してサーバー側も確認する」。ただし機微度が低く
   既存で明示的に保留済みのため優先度は低。
-見送り（2026-09-10）／理由:
-  優先度「低」。permissions/api.py のコード内コメントで「[優先度: 低・見送り、コード監査
-  2026-08-25]」として既に明示的に検討・保留済みの事項。返す情報は他画面でも同ロールに露出しうる
-  部署名・分類名に限られ実害は限定的、という既存判断は妥当。本レビューでも同結論のため、
-  据え置く（新規の判断変更なし）。
+対応済み（review_pending.txt 経由でリリース前に対応）:
+  U-2／S2(a)。permissions/api.py OptionListAPIView に dispatch() を追加し、未認証は
+  handle_no_permission()、認証済みは can_access_settings_menu_item(request.user,
+  "authority_management") で 403（organizations/api.py と同型）。テスト
+  permissions.tests.OptionListAPIViewTests：正常系ユーザーに MANAGER プロファイルを付与、
+  test_staff_role_is_forbidden を追加。type=group/dept の結果スコープ絞り込み (b) は U-34。
 
 ------------------------------------------------------------------------
 C. 重複ロジックの確認結果（指摘なし / 良好）
@@ -169,10 +169,10 @@ D. CLAUDE.md 規約チェック結果
   LastAdminError を捕捉。CSV取込は行単位 except ValueError / except Exception で
   logger.exception + 利用者向けメッセージ。準拠。
 - logger整備: 各 raise 経路の呼び出し側で logger.warning / logger.exception あり。
-  ただし No.3 のとおり audit ログ側に抜けあり。
+  （No.3 の audit ログ抜けは U-20 で対応済み。）
 - Argon2優先: PASSWORD_HASHERS 未変更。set_password 経由のみ。準拠。
 - 監査イベントは audit 経由: 準拠（拒否・中止は logger 止まり、成功操作は
-  audit_services.log）。No.3 が唯一の例外。
+  audit_services.log）。No.3 の抜けは U-20 で解消。
 - ページネーション: Paginator 使用。準拠。
 
 ========================================================================

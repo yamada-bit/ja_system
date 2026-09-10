@@ -64,7 +64,7 @@ No.2 【優先度: 中】 新規保管時の保存満了日が UTC 日付基準�
     ＝ 利用者が画面で見た満了日プレビューと実際に保存される値が深夜帯で食い違い、
        編集経路とも不整合。修正は save_date.date() を timezone.localdate() に統一。
 
-No.3 【優先度: 低】 一括編集（契約書）で「関連書類の並べ替えのみ」の変更が黙って破棄される  ★見送り／理由: 優先度「低」。指示により低優先度は修正せず記録のみ。並べ替えのみのケースは実運用で稀で実害が小さく、直すなら related_changed を set 比較から順序保持比較へ変える必要があり単独編集経路との整合確認も要るため、別途まとめて対応。
+No.3 【優先度: 低】 一括編集（契約書）で「関連書類の並べ替えのみ」の変更が黙って破棄される  ★対応済み（review_pending.txt 経由でリリース前に対応。U-19）。contracts/views.py commit_one_update の related_changed を set 比較から順序保持比較（list(staged_ids) != current_ids）へ変更し、単独編集経路（apply_contract_edit を無条件呼び）と揃えた。回帰テスト：contracts.tests.BulkEditViewTests に test_related_contracts_reorder_only_is_committed_on_update / test_related_contracts_same_order_is_not_dirty を追加。あわせて review_test_doc_contract [17]/[18]（U-37）・[19]（#65）相当も検証。accounts/contracts 304件 PASS。
   対象ファイル:
     - contracts/views.py:713  related_changed = staged_ids is not None and set(staged_ids) != set(current_ids)
     - contracts/services.py:160 contract_edit_is_dirty（related_changed をそのまま dirty 判定に使用）

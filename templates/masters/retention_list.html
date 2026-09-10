@@ -40,6 +40,11 @@
             <option value="keihi" {% if selected_doc_name == "keihi" %}selected{% endif %}>経費支出伺</option>
           </select>
         </div>
+        {% comment %}
+        原本 index.html:3163 に onclick 無しで存在する飾りボタン。書類名 select の onchange
+        （kbnSelectForDocSave）で表示切替が完結するため原本もハンドラを持たない。原本踏襲で
+        ハンドラは付けない（原本 HTML を実確認済み。規約準拠監査 R17）。
+        {% endcomment %}
         <button type="button" class="btn-primary" style="padding:5px 15px;">表示</button>
       </div>
 

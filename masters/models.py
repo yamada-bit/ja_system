@@ -107,6 +107,11 @@ class Category(models.Model):
 
 
 class RetentionKbn(models.TextChoices):
+    """保存期間設定マスタの大区分。RetentionPeriod をどのタブ（screen-retention-doc の
+    tbody1＝文書／tbody2〜3＝電子決裁の稟議書・経費支出伺）に属させるかを表す（xlsx
+    保存期間設定シート）。電子決裁側は EapprovalDocName と組で使う。電子決裁機能自体は
+    本実装のスコープ外だが、保存期間設定マスタ画面が管理対象に含むためモデルには残す。"""
+
     DOCUMENT = "document", "文書"
     EAPPROVAL = "eapproval", "電子決裁"
 
@@ -123,6 +128,10 @@ class EapprovalDocName(models.TextChoices):
 
 
 class RetentionPeriodUnit(models.TextChoices):
+    """保存期間の単位（screen-retention-* の「保存期間」入力の単位）。PERMANENT（永年）は
+    period_value を持たず、満了日計算では settings.RETENTION_PERMANENT_YEARS の実年数へ
+    読み替える（documents.services.calculate_expiry_date 参照）。xlsx 保存期間設定シート。"""
+
     MONTH = "month", "ヵ月"
     YEAR = "year", "年"
     PERMANENT = "permanent", "永年"

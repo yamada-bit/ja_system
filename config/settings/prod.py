@@ -10,6 +10,14 @@ DEBUG = False
 # django-environ が ImproperlyConfigured を送出してデプロイを止める。
 SECRET_KEY = env("SECRET_KEY")
 
+# セキュリティレビュー S4/I-2: base.py の ALLOWED_HOSTS は開発用に default=["*"]（全ホスト許可）
+# を持つため、本番で .env に ALLOWED_HOSTS を設定し忘れると Host ヘッダ検証が無効のまま起動し、
+# Host ヘッダ・X-Forwarded-Host を悪用したキャッシュ汚染やパスワードリセット系リンクの
+# ドメイン差し替えを許してしまう。SECRET_KEY と同じく「未設定なら起動失敗」であるべき値なので、
+# ここでデフォルト無しの env.list() で読み直し、未設定なら django-environ が
+# ImproperlyConfigured を送出してデプロイを止める。
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
+
 SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True

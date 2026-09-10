@@ -303,6 +303,12 @@ class BaseBulkEditView(View):
 
         # --- 確定パス ---
         status_by_pk = {}
+        # 監査ログは transaction.atomic() の外（コミット成功後）で出す。atomic 内で
+        # audit.services.log_raw() の握りつぶし（except Exception）が走ると、以降その atomic 内の
+        # DB 操作が TransactionManagementError → except DBError で全件ロールバックになり、真因が
+        # logger にしか残らない（コードレビュー audit/core No.2）。BaseDeleteView /
+        # BaseFileServeView と同じく「保存成功 → atomic 外で log()」に揃える。
+        audit_events = []  # [(action, event_message, extra_kwargs)]
         try:
             with transaction.atomic():
                 for pk in pks:
@@ -313,22 +319,20 @@ class BaseBulkEditView(View):
                         obj.is_deleted = True
                         obj.deleted_at = timezone.now()
                         obj.save(update_fields=["is_deleted", "deleted_at"])
-                        audit_services.log(
-                            employee=request.user,
-                            action=self.audit_delete_action,
-                            event_message=f"{self.entity_name}「{obj.title}」を削除しました。",
-                            **self.audit_extra_kwargs(obj),
-                        )
+                        audit_events.append((
+                            self.audit_delete_action,
+                            f"{self.entity_name}「{obj.title}」を削除しました。",
+                            self.audit_extra_kwargs(obj),
+                        ))
                         status_by_pk[pk] = "削除"
                     elif pk in forms_by_pk:
                         f = forms_by_pk[pk]
                         if self.commit_one_update(request, obj, f, state):
-                            audit_services.log(
-                                employee=request.user,
-                                action=self.audit_update_action,
-                                event_message=f"{self.entity_name}「{obj.title}」を更新しました。",
-                                **self.audit_extra_kwargs(obj),
-                            )
+                            audit_events.append((
+                                self.audit_update_action,
+                                f"{self.entity_name}「{obj.title}」を更新しました。",
+                                self.audit_extra_kwargs(obj),
+                            ))
                             status_by_pk[pk] = "更新"
                         else:
                             status_by_pk[pk] = "更新なし"
@@ -343,15 +347,28 @@ class BaseBulkEditView(View):
             messages.error(request, "更新に失敗しました。もう一度お試しください。")
             return redirect(self.bulk_edit_url_name)
 
+        for action, event_message, extra_kwargs in audit_events:
+            audit_services.log(
+                employee=request.user,
+                action=action,
+                event_message=event_message,
+                **extra_kwargs,
+            )
+
         bulk_edit_services.clear_bulk_edit_state(request.session, self.session_key)
         return self._render_complete(request, pks, status_by_pk)
 
     def _render_complete(self, request, pks, status_by_pk):
+        # 完了サマリに載せるのは今回の確定処理で実際に触れた行（status_by_pk にキーがあるもの）
+        # だけに限る。ウィザード進行中に別セッション・別ユーザーが同じレコードを削除／他部署へ
+        # 異動させた行は確定ループの _committable_pks 段階で除外されて status_by_pk に入らないため、
+        # ここで弾く（コードレビューC1、is_deleted 一貫性。単純に filter(is_deleted=False) を足すと、
+        # 今回の一括削除で is_deleted=True にした行〈status="削除"〉まで落ちてしまうので pk 条件で絞る）。
         rows_objs = {o.pk: o for o in self.model.objects.filter(pk__in=pks)}
         rows = [
-            {"obj": rows_objs[pk], "status": status_by_pk.get(pk, "更新なし")}
+            {"obj": rows_objs[pk], "status": status_by_pk[pk]}
             for pk in pks
-            if pk in rows_objs
+            if pk in rows_objs and pk in status_by_pk
         ]
         counts = {
             "updated": sum(1 for r in rows if r["status"] == "更新"),

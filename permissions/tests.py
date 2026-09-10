@@ -456,6 +456,22 @@ class AuthorityListDepartmentScopeTests(TestCase):
         self.assertIn(self.same_dept, listed)
         self.assertNotIn(self.other, listed)
 
+    def test_department_scope_still_applies_when_search_form_is_invalid(self):
+        """review_test_permissions_accounts P-12／U-33：検索フォームの department に不正な pk が
+        混入して is_valid()==False になっても、部署スコープ絞り込み（visible_employees）は
+        `if form.is_valid()` の外で適用されるため、所属長の一覧に他部署職員は漏れない。"""
+        form = AuthoritySearchForm(data={"department": "999999"})  # 存在しない pk
+        self.assertFalse(form.is_valid())
+        qs = filter_authority_queryset(self.manager, form)
+        listed = set(qs)
+        self.assertIn(self.manager, listed)
+        self.assertIn(self.same_dept, listed)
+        self.assertNotIn(self.other, listed)
+
+        # HTTP 経由でも同じ（不正 department を GET に付けても他部署は出ない）。
+        response = self.client.get("/permissions/", {"department": "999999"})
+        self.assertNotIn(self.other, set(response.context["page_obj"].object_list))
+
 
 class AuthorityEditFormTests(TestCase):
     """権限管理編集フォームは原本の全項目を含むこと（Rev1.1で権限管理!B167-215の構成に
@@ -946,7 +962,21 @@ class OptionListAPIViewTests(TestCase):
             employee_no="1", name="テスト太郎", password="pass1234",
             department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
+        # 権限管理画面（authority_management）は管理者・所属長限定。このAPIも同じゲートを
+        # 課すため（U-2）、正常系テストの実行ユーザーには所属長プロファイルを与える。
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.MANAGER)
         self.client.login(username="1", password="pass1234")
+
+    def test_staff_role_is_forbidden(self):
+        """U-2／S2(a)：権限管理画面にアクセスできない一般ロールは 403（以前は 200 が返っていた）。"""
+        staff = Employee.objects.create_user(
+            employee_no="9", name="一般花子", password="pass1234",
+            department=self.department, rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        PermissionProfile.objects.create(employee=staff, role=PermissionRole.STAFF)
+        self.client.force_login(staff)
+        response = self.client.get("/permissions/api/options/", {"type": "dept"})
+        self.assertEqual(response.status_code, 403)
 
     def test_group_type_returns_document_groups_by_default(self):
         doc_group = Group.objects.create(code="A", name="文書分類", doc_kbn=DocKbn.DOCUMENT)

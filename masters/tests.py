@@ -495,6 +495,45 @@ class MasterSettingsMenuAccessControlTests(TestCase):
             self.assertEqual(self.client.get(f"/masters/cat/{category.pk}/edit/").status_code, 403)
             self.assertEqual(self.client.get(f"/masters/cat/{category.pk}/delete/").status_code, 403)
 
+    def test_group_views_actually_enforce_settings_menu_role_check(self):
+        """review_test_organizations_masters No.11／U-29：Category 系と同じ手法で、GroupRegist/
+        Edit/Delete も class_management キーを個別に強制していることを確認する（あるビューから
+        SettingsMenuAccessMixin / settings_menu_key を外した回帰を拾う）。class_management を
+        一時的に管理者限定へ差し替え、所属長でも各 URL が 403 になること。"""
+        from unittest.mock import patch as mock_patch
+
+        self._login_as(PermissionRole.MANAGER)
+        group = Group.objects.create(
+            code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        with mock_patch.dict(
+            "permissions.services.SETTINGS_MENU_VISIBLE_ROLES",
+            {"class_management": {PermissionRole.ADMIN}},
+        ):
+            self.assertEqual(self.client.get("/masters/class/").status_code, 403)
+            self.assertEqual(self.client.get("/masters/class/regist/").status_code, 403)
+            self.assertEqual(self.client.get(f"/masters/class/{group.pk}/edit/").status_code, 403)
+            self.assertEqual(self.client.get(f"/masters/class/{group.pk}/delete/").status_code, 403)
+
+    def test_retention_views_actually_enforce_settings_menu_role_check(self):
+        """review_test_organizations_masters No.11／U-29：RetentionRegist/Edit/Delete も
+        retention_setting キーを個別に強制していること。retention_setting を一時的に空集合へ
+        差し替え、管理者でも各 URL が 403 になること。"""
+        from unittest.mock import patch as mock_patch
+
+        self._login_as(PermissionRole.ADMIN)
+        period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR,
+            display_order=1,
+        )
+        with mock_patch.dict(
+            "permissions.services.SETTINGS_MENU_VISIBLE_ROLES", {"retention_setting": set()}
+        ):
+            self.assertEqual(self.client.get("/masters/retention/").status_code, 403)
+            self.assertEqual(self.client.get("/masters/retention/regist/").status_code, 403)
+            self.assertEqual(self.client.get(f"/masters/retention/{period.pk}/edit/").status_code, 403)
+            self.assertEqual(self.client.get(f"/masters/retention/{period.pk}/delete/").status_code, 403)
+
 
 class MasterDeleteViewTests(TestCase):
     """screen-class-delete/screen-cat-delete: 文書件数0件の場合のみ削除できる（xlsx分類管理!B68）。"""
@@ -857,6 +896,12 @@ class RetentionListViewContentTests(TestCase):
             "/masters/retention/", {"kbn": RetentionKbn.EAPPROVAL, "doc_name": "bogus"}
         )
         self.assertEqual(response.context["selected_doc_name"], "ringisho")
+
+    def test_regist_screen_invalid_kbn_query_falls_back_to_document(self):
+        """C15／U-21：新規登録画面の ?kbn= も RetentionListView.get と対称に、既知値以外は
+        文書扱いへ丸める（改ざんされた kbn がフォーム初期値に載らない）。"""
+        response = self.client.get("/masters/retention/regist/", {"kbn": "bogus"})
+        self.assertEqual(response.context["form"].initial["kbn"], RetentionKbn.DOCUMENT)
 
     def test_querysets_filtered_by_kbn_and_doc_name(self):
         doc_period = RetentionPeriod.objects.create(

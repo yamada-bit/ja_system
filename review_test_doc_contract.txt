@@ -194,7 +194,10 @@ documents / contracts アプリ テストカバレッジ棚卸し
       set(staged) != set(current) で判定するため、**並び替えだけ**の変更は related_changed=False。
       これが意図通りか（並び替えだけでは更新扱いにならない）を固定するテストが無い。
       sync_related_contracts 側の display_order 更新分岐（[19]参照）とセットで空白。
-    見送り／理由: 優先度「低」。関連書類の増減は間接カバーあり。並び替えのみの dirty 判定は本タスク範囲外。
+    対応済み（review_pending.txt 経由でリリース前に対応）: U-19。commit_one_update の
+      related_changed を順序保持比較へ変更（並び替えのみも「更新」扱い）。回帰テスト
+      contracts.tests.BulkEditViewTests.test_related_contracts_reorder_only_is_committed_on_update /
+      test_related_contracts_same_order_is_not_dirty。
 
 ── B. api.py ──────────────────────────────────────────────────────────────
 
@@ -272,8 +275,9 @@ documents / contracts アプリ テストカバレッジ棚卸し
        経由（セッションの pks に他部署 pk を注入）で 404＋audit 記録になる経路は
        test_bulk_edit_direct_access_to_other_department_* が 404 は見るものの audit 記録の
        アサートを含むかは要確認（含んでいなければ空白）。
-     見送り／理由: 優先度「低」。直打ち経路の audit 記録は DepartmentScopeAccessControlTests で
-       カバー済み。一括編集経路の on_denied は本タスク範囲外。
+     対応済み（review_pending.txt 経由でリリース前に対応）: U-25。
+       documents/contracts の test_bulk_edit_direct_access_to_other_department_*_returns_404 に
+       AuditLog(action="アクセス拒否", event_message contains "（ID:<pk>）") のアサートを追加。
 
 [17] contracts.services.filter_valid_related_ids
      ── 重複 pk の除去（seen による dedupe、順序保持）
@@ -281,7 +285,8 @@ documents / contracts アプリ テストカバレッジ棚卸し
      優先度: 低
      理由: 非数値除外・スコープ外除外・self 除外・keep_ids 維持は（主にビュー経由で）
        テスト済みだが、同じ pk を2回送った時に1回だけ残る dedupe は未検証。
-     見送り／理由: 優先度「低」。非数値・スコープ外・self 除外は既存テスト済み。dedupe は本タスク範囲外。
+     対応済み（review_pending.txt 経由でリリース前に対応）: U-37。
+       contracts.tests.FilterValidRelatedIdsTests.test_duplicate_pks_are_deduped_preserving_first_position。
 
 [18] contracts.services.filter_valid_related_ids
      ── exclude_pk が keep_ids に含まれていても必ず除外される分岐
@@ -290,7 +295,8 @@ documents / contracts アプリ テストカバレッジ棚卸し
      優先度: 低
      理由: test_self_link_is_rejected はあるが、「自分自身が既存の紐付け(keep_ids)にも
        入っている異常データ」で self が確実に落ちることの回帰テストが無い。
-     見送り／理由: 優先度「低」。self 除外の基本経路は既存テスト済み。異常データ組合せは本タスク範囲外。
+     対応済み（review_pending.txt 経由でリリース前に対応）: U-37。
+       contracts.tests.FilterValidRelatedIdsTests.test_exclude_pk_is_dropped_even_when_present_in_keep_ids。
 
 [19] contracts.services.sync_related_contracts
      ── 既存行の display_order 更新分岐（elif row.display_order != order: row.save）
@@ -298,7 +304,9 @@ documents / contracts アプリ テストカバレッジ棚卸し
      優先度: 低
      理由: 新規追加・削除は間接的にカバーされるが、「同じ紐付け集合で並び順だけ変更」→
        ContractRelation.display_order が更新される分岐が未テスト（[8]と対）。
-     見送り／理由: 優先度「低」。新規追加・削除は間接カバーあり。display_order 更新分岐は本タスク範囲外。
+     対応済み（review_pending.txt 経由でリリース前に対応）: U-19 で相乗り。
+       contracts.tests.BulkEditViewTests.test_related_contracts_reorder_only_is_committed_on_update が
+       「並び順だけ反転 → 既存2行の display_order が入れ替わる」をアサートする。
 
 [20] contracts.services.apply_contract_edit
      ── transaction.atomic() 内で contract.save() 後に sync_related_contracts が失敗した場合、
@@ -307,7 +315,9 @@ documents / contracts アプリ テストカバレッジ棚卸し
      優先度: 低
      理由: docstring が「関連書類の同期も本体保存と同じトランザクションにまとめる」と明記
        するが、sync 側で例外を起こして本体変更が巻き戻ることの検証が無い。
-     見送り／理由: 優先度「低」。異常系（transaction.atomic の巻き戻し）。本タスク範囲外。
+     対応済み（review_pending.txt 経由でリリース前に対応）: U-26。
+       contracts.tests.ApplyContractEditTransactionTests.test_body_save_rolls_back_when_related_sync_fails
+       （sync_related_contracts を RuntimeError にモック → 本体 contract.title の変更も巻き戻る）。
 
 ── D. search_services.py ──────────────────────────────────────────────────
 
@@ -417,8 +427,10 @@ documents / contracts アプリ テストカバレッジ棚卸し
      理由: test_upload_form_rejects_reversed_contract_period_create_mode は単一ファイル想定。
        ファイルごとに validate_date_range を回すループ（f"..._{i}"）が複数ファイルで
        正しく該当ファイルのみを弾くかは未検証。
-     見送り／理由: 優先度「低」。単一ファイルの契約期間逆転は既存テスト済み。複数ファイルの
-       ファイル単位エラー付与は本タスク範囲外。
+     対応済み（review_pending.txt 経由でリリース前に対応）: U-27。
+       contracts.tests（SearchFormDateRangeValidationTests 系）に
+       test_upload_form_reversed_contract_period_flags_only_that_file を追加（index=1 だけ逆転 →
+       contract_period_end_1 のみエラー、index=0 側には付かない）。
 
 ── F. models.py ──────────────────────────────────────────────────────────
 
@@ -467,7 +479,9 @@ documents / contracts アプリ テストカバレッジ棚卸し
      優先度: 低
      理由: DeleteViewRequiresContractEditPermissionTests は AJAX（JSON 403）中心。
        非AJAX で 403 ページになる分岐は未検証。
-     見送り／理由: 優先度「低」。AJAX 経路の権限拒否は既存テスト済み。非AJAX 403 は本タスク範囲外。
+     対応済み（review_pending.txt 経由でリリース前に対応）: U-28。
+       DeleteViewRequiresContractEditPermissionTests.test_delete_with_contract_edit_off_non_ajax_returns_403_page
+       （非AJAX POST → 403・論理削除されない）。
 
 [36] core.bulk_edit_views.BaseBulkEditView.post — bulk_action="cancel" で state 無しのとき
      分類: 境界値

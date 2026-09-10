@@ -247,12 +247,16 @@ class OptionListAPIResponseContentTests(TestCase):
             response.json(), {"items": [{"value": self.dept_b.pk, "label": str(self.dept_b)}]}
         )
 
-    def test_dept_options_ignores_non_numeric_exclude(self):
-        """excludeに非数値が来ても500にせず全件返す（改ざん・不正リンクへの防御）。"""
-        response = self.client.get(
-            "/organizations/api/options/", {"type": "dept", "exclude": "abc"}
-        )
-        self.assertEqual(len(response.json()["items"]), 2)
+    def test_dept_options_rejects_non_numeric_exclude_with_400(self):
+        """U-34(2)／review_code_organizations_masters No.5：excludeに非数値が来たら、全件返す
+        （＝編集中の部署も候補に出る）のをやめ、400 で弾く＋改ざんの兆候を logger.warning に残す。"""
+        with self.assertLogs("organizations.api", level="WARNING") as cm:
+            response = self.client.get(
+                "/organizations/api/options/", {"type": "dept", "exclude": "abc"}
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "invalid exclude"})
+        self.assertTrue(any("非数値" in m for m in cm.output))
 
 
 class DeptRegistEditAuditLogTests(TestCase):
@@ -473,6 +477,29 @@ class ApplyDeptActionTests(TestCase):
             department=self.dept_x, rank=Rank.KOSAYAKU, position=Position.KACHO,
         )
         self.assertEqual(set(visible_department_ids(employee)), {self.dept_x.pk, self.dept_y.pk})
+
+    def test_visible_department_ids_with_multiple_stacked_scopes(self):
+        """review_test_organizations_masters No.7／U-36：同一 viewer_department に複数回の統合・分割
+        で複数の DepartmentViewScope が積み上がった職員が、自部署＋全 visible を漏れなく返すこと
+        （単純な filter+values_list だが閲覧権限の境界のため固定する）。"""
+        dept_w = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="04", section_name="部署W"
+        )
+        # 統合：dept_x に dept_y を統合（viewer=dept_x, visible=dept_y）。
+        apply_dept_action(self.dept_x, DepartmentViewScope.ACTION_MERGE, [self.dept_y])
+        # 分割：dept_z を dept_x・dept_w へ分割（viewer=dept_x/dept_w, visible=dept_z）。
+        apply_dept_action(self.dept_z, DepartmentViewScope.ACTION_SPLIT, [self.dept_x, dept_w])
+        # さらに統合：dept_x に dept_w を統合（viewer=dept_x, visible=dept_w）。
+        apply_dept_action(self.dept_x, DepartmentViewScope.ACTION_MERGE, [dept_w])
+
+        employee = Employee.objects.create_user(
+            employee_no="2", name="部署X太郎", password="x",
+            department=self.dept_x, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.assertEqual(
+            set(visible_department_ids(employee)),
+            {self.dept_x.pk, self.dept_y.pk, self.dept_z.pk, dept_w.pk},
+        )
 
     def test_action_is_updated_when_same_pair_reached_via_different_action(self):
         """以前はget_or_createのdefaultsが新規作成時にしか適用されず、先にsplitで作られた

@@ -268,6 +268,26 @@ class DateRangeValidationTests(TestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
 
+    def test_upload_form_reversed_contract_period_flags_only_that_file(self):
+        """review_test_doc_contract [30]／U-27：複数ファイル一括登録（per_file_mode）で、特定1
+        ファイル（index=1）だけ契約期間を逆転させると、そのファイルの contract_period_end_1 に
+        だけエラーが付き、正常な index=0 側には付かない（validate_date_range の f"..._{i}" ループ）。"""
+        from contracts.forms import UploadStep2Form
+
+        data = {
+            "year_0": 2026, "title_0": "契約書A",
+            "department_0": self.department.pk, "group_0": self.group.pk, "category_0": self.category.pk,
+            "contract_period_start_0": "2026-01-01", "contract_period_end_0": "2026-12-31",
+            "year_1": 2026, "title_1": "契約書B",
+            "department_1": self.department.pk, "group_1": self.group.pk, "category_1": self.category.pk,
+            "contract_period_start_1": "2026-12-31", "contract_period_end_1": "2026-01-01",
+        }
+        form = UploadStep2Form(data=data, employee=self.admin, file_count=2, edit_mode=False)
+        self.assertFalse(form.is_valid())
+        self.assertIn("contract_period_end_1", form.errors)
+        self.assertNotIn("contract_period_end_0", form.errors)
+        self.assertNotIn("contract_period_start_0", form.errors)
+
 
 class SearchFormDepartmentScopeQueryTests(TestCase):
     """SearchForm.__init__の部署スコープ計算（contract_searchable_department_ids）。
@@ -952,6 +972,12 @@ class DepartmentScopeAccessControlTests(TestCase):
         session.save()
         response = self.client.get("/contracts/bulk-edit/")
         self.assertEqual(response.status_code, 404)
+        # T12／U-25：セッション改ざん経路でも on_denied が発火し操作履歴ログに残る（documents 側と対称）。
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="アクセス拒否", event_message__contains=f"（ID:{self.other_contract.pk}）"
+            ).exists()
+        )
 
     def test_bulk_download_silently_excludes_other_department_contract(self):
         import zipfile
@@ -1078,6 +1104,21 @@ class DeleteViewRequiresContractEditPermissionTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.contract.refresh_from_db()
         self.assertFalse(self.contract.is_deleted)
+
+    def test_delete_with_contract_edit_off_non_ajax_returns_403_page(self):
+        """review_test_doc_contract [35]／U-27（[28]）：非AJAX POST でも
+        extra_permission_check が PermissionDenied を raise し 403 ページになる
+        （AJAX の JSON 403 だけでなく URL 直打ち・通常フォーム送信も塞ぐ）。"""
+        from contracts.models import Contract
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=False
+        )
+        response = self.client.post(f"/contracts/{self.contract.pk}/delete/")
+        self.assertEqual(response.status_code, 403)
+        self.contract.refresh_from_db()
+        self.assertFalse(self.contract.is_deleted)
+        self.assertTrue(Contract.objects.filter(pk=self.contract.pk, is_deleted=False).exists())
 
     def test_delete_with_contract_edit_on_succeeds(self):
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.STAFF, contract_edit=True)
@@ -1689,6 +1730,22 @@ class BulkEditViewTests(TestCase):
         self.assertEqual(AuditLog.objects.filter(action="保管画面２　更新").count(), 1)
         self.assertIsNone(self.client.session.get("contracts_bulk_edit"))
 
+    def test_render_complete_excludes_target_deleted_by_another_session(self):
+        """コードレビューC1：ウィザード進行中に別セッションが対象を論理削除した場合、完了サマリの
+        一覧・件数にその削除済みレコードを載せない（documents 側と対称）。"""
+        from contracts.models import Contract
+
+        cs = [self._create_contract(f"c{i}") for i in range(3)]
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
+        self.client.post("/contracts/bulk-edit/", self._page_data(cs[0], title="c0-new", action=None, bulk_nav="next"))
+
+        Contract.objects.filter(pk=cs[2].pk).update(is_deleted=True, deleted_at=timezone.now())
+
+        resp = self.client.post("/contracts/bulk-edit/", self._page_data(cs[1]))
+        row_pks = {r["obj"].pk for r in resp.context["complete"]["rows"]}
+        self.assertEqual(row_pks, {cs[0].pk, cs[1].pk})
+        self.assertEqual(resp.context["complete"]["counts"], {"updated": 1, "unchanged": 1, "deleted": 0})
+
     def test_delete_mark_and_commit_logical_deletes(self):
         cs = [self._create_contract(f"c{i}") for i in range(2)]
         self.client.post("/contracts/bulk-edit/start/", {"pks": [c.pk for c in cs]})
@@ -1881,6 +1938,49 @@ class BulkEditViewTests(TestCase):
         )
         self.assertEqual(linked, [new_target.pk])
         self.assertEqual(resp.context["complete"]["counts"]["updated"], 1)
+
+    def test_related_contracts_reorder_only_is_committed_on_update(self):
+        """コードレビュー C7：一括編集で関連書類を「並べ替えただけ」（集合は同じ・順序のみ違う）でも
+        「更新」として確定され display_order が入れ替わる（単独編集経路は apply_contract_edit を
+        無条件に呼ぶため元々並べ替えが保存され、set 比較だと一括編集だけ非一貫だった）。"""
+        from contracts.models import ContractRelation
+
+        c1 = self._create_contract("c1")
+        r0 = self._create_contract("rel-0")
+        r1 = self._create_contract("rel-1")
+        ContractRelation.objects.create(contract=c1, related_contract=r0, display_order=0)
+        ContractRelation.objects.create(contract=c1, related_contract=r1, display_order=1)
+
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk]})
+        data = self._page_data(c1)
+        resp = self.client.post(
+            "/contracts/bulk-edit/",
+            {**data, "related_contract_ids": [str(r1.pk), str(r0.pk)]},  # 順序を反転
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["complete"]["counts"]["updated"], 1)
+        ordered = list(
+            ContractRelation.objects.filter(contract=c1)
+            .order_by("display_order")
+            .values_list("related_contract_id", flat=True)
+        )
+        self.assertEqual(ordered, [r1.pk, r0.pk])
+
+    def test_related_contracts_same_order_is_not_dirty(self):
+        """並び順も集合も同じなら「更新なし」（無駄な監査ログ・保存を出さない）。"""
+        from contracts.models import ContractRelation
+
+        c1 = self._create_contract("c1")
+        r0 = self._create_contract("rel-0")
+        ContractRelation.objects.create(contract=c1, related_contract=r0, display_order=0)
+
+        self.client.post("/contracts/bulk-edit/start/", {"pks": [c1.pk]})
+        data = self._page_data(c1)
+        resp = self.client.post(
+            "/contracts/bulk-edit/",
+            {**data, "related_contract_ids": [str(r0.pk)]},
+        )
+        self.assertEqual(resp.context["complete"]["counts"], {"updated": 0, "unchanged": 1, "deleted": 0})
 
 
 class PreviewViewTests(TestCase):
@@ -2405,6 +2505,56 @@ class ContractEditExpiryDateUnchangedTests(TestCase):
         self.assertEqual(self.contract.expiry_date, self.original_expiry)
 
 
+class ApplyContractEditTransactionTests(TestCase):
+    """review_test_doc_contract [20]／U-26：apply_contract_edit は docstring で「関連書類の同期も
+    本体保存と同じトランザクションにまとめる」と保証している。sync_related_contracts が失敗すると
+    contract.save() で書いた本体の変更も transaction.atomic() で巻き戻ることを検証する。"""
+
+    def setUp(self):
+        from contracts.models import Contract
+
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        self.contract = Contract(
+            title="元タイトル", department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+            contract_date=None, contract_period_start=None, contract_period_end=None,
+            renewal_date=None, contract_amount=None, contract_partner="", memo="",
+        )
+        self.contract.file.save("c.pdf", ContentFile(b"x"), save=False)
+        self.contract.save()
+
+    def _cleaned(self):
+        return {
+            "title_0": "巻き戻るべき新タイトル", "department": self.department, "group": self.group,
+            "category": self.category, "year": 2026, "contract_date": None,
+            "contract_period_start": None, "contract_period_end": None, "renewal_date": None,
+            "contract_amount": None, "contract_partner": "", "memo": "",
+        }
+
+    def test_body_save_rolls_back_when_related_sync_fails(self):
+        from unittest.mock import patch
+
+        from contracts.services import apply_contract_edit
+
+        with patch("contracts.services.sync_related_contracts", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                apply_contract_edit(self.contract, self._cleaned(), self.employee, [])
+
+        self.contract.refresh_from_db()
+        self.assertEqual(self.contract.title, "元タイトル")
+
+
 class UploadStep2FormDepartmentInitialTests(TestCase):
     """documents.tests.UploadStep2FormDepartmentInitialTestsと同じ理由（contracts.forms.
     UploadStep2Form、xlsx 保管!B412-416「※保管画面(文書)と同じ」）。新規登録画面
@@ -2607,8 +2757,10 @@ class DetailAPIViewTests(TestCase):
         self.assertEqual(
             data["related_contracts"],
             [
-                {"title": "関連A", "is_deleted": False, "preview_url": f"/contracts/{a.pk}/preview/"},
-                {"title": "関連B", "is_deleted": False, "preview_url": f"/contracts/{b.pk}/preview/"},
+                {"title": "関連A", "is_deleted": False, "preview_url": f"/contracts/{a.pk}/preview/",
+                 "out_of_scope": False},
+                {"title": "関連B", "is_deleted": False, "preview_url": f"/contracts/{b.pk}/preview/",
+                 "out_of_scope": False},
             ],
         )
 
@@ -2623,7 +2775,8 @@ class DetailAPIViewTests(TestCase):
         data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
         self.assertEqual(
             data["related_contracts"],
-            [{"title": "削除された関連", "is_deleted": True, "preview_url": None}],
+            [{"title": "削除された関連", "is_deleted": True, "preview_url": None,
+              "out_of_scope": False}],
         )
 
     def test_related_contracts_without_download_permission_no_preview_url(self):
@@ -2632,6 +2785,62 @@ class DetailAPIViewTests(TestCase):
         data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
         self.assertEqual(data["related_contracts"][0]["preview_url"], None)
         self.assertEqual(data["related_contracts"][0]["is_deleted"], False)
+        self.assertFalse(data["related_contracts"][0]["out_of_scope"])
+
+    def test_related_contracts_out_of_scope_department_title_is_masked(self):
+        """review_security.txt No.1／S1：閲覧ユーザーの部署スコープ外の関連契約書は
+        タイトルを伏せ字にし preview_url=None・out_of_scope=True で返す（本体契約書の
+        越境チェックと対称化。common.js renderRelatedResourceLink の4状態目）。"""
+        from contracts.models import Contract, ContractRelation
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
+        )
+        other_dept = Department.objects.create(
+            branch_code="999", branch_name="他店", section_code="99", section_name="他部署"
+        )
+        outsider = Contract(
+            title="他部署の機微な取引先名", department=other_dept, group=self.group,
+            category=self.category, year=2025, uploader=self.employee,
+            expiry_date=datetime.date(2035, 1, 1),
+        )
+        outsider.file.save("x.pdf", ContentFile(b"R"), save=False)
+        outsider.save()
+        ContractRelation.objects.create(
+            contract=self.contract, related_contract=outsider, display_order=0
+        )
+
+        data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
+        self.assertEqual(
+            data["related_contracts"],
+            [{"title": "（閲覧権限のない関連資料）", "is_deleted": False,
+              "preview_url": None, "out_of_scope": True}],
+        )
+
+    def test_related_contracts_admin_sees_all_titles(self):
+        """管理者は contract_searchable_department_ids=None のため伏せ字にしない。"""
+        from contracts.models import Contract, ContractRelation
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.ADMIN
+        )
+        other_dept = Department.objects.create(
+            branch_code="999", branch_name="他店", section_code="99", section_name="他部署"
+        )
+        outsider = Contract(
+            title="他部署契約書", department=other_dept, group=self.group,
+            category=self.category, year=2025, uploader=self.employee,
+            expiry_date=datetime.date(2035, 1, 1),
+        )
+        outsider.file.save("x.pdf", ContentFile(b"R"), save=False)
+        outsider.save()
+        ContractRelation.objects.create(
+            contract=self.contract, related_contract=outsider, display_order=0
+        )
+
+        data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
+        self.assertEqual(data["related_contracts"][0]["title"], "他部署契約書")
+        self.assertFalse(data["related_contracts"][0]["out_of_scope"])
 
     def test_contract_amount_zero_is_returned_as_string_not_blank(self):
         """コードレビューC-5：契約金額0円はDecimal('0')でfalsyのため、以前は`if amount`判定で
@@ -3543,6 +3752,63 @@ class ContractRelationConstraintTests(TestCase):
             ContractRelation.objects.create(
                 contract=self.a, related_contract=self.a, display_order=0
             )
+
+
+class FilterValidRelatedIdsTests(TestCase):
+    """review_test_doc_contract [17]/[18]／U-37：contracts.services.filter_valid_related_ids の
+    順序保持 dedupe と、exclude_pk（自分自身）が keep_ids に混ざっている異常データでも必ず
+    落ちる分岐を、サービス関数を直接呼んで固定する（非数値・スコープ外・self 除外の主経路は
+    ビュー経由で検証済み）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="x",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+        self.a = self._contract("契約A")
+        self.b = self._contract("契約B")
+        self.c = self._contract("契約C")
+
+    def _contract(self, title):
+        from contracts.models import Contract
+
+        obj = Contract(
+            title=title, department=self.department, group=self.group, category=self.category,
+            year=2026, uploader=self.employee, expiry_date=datetime.date(2036, 1, 1),
+        )
+        obj.file.save(f"{title}.pdf", ContentFile(b"X"), save=False)
+        obj.save()
+        return obj
+
+    def test_duplicate_pks_are_deduped_preserving_first_position(self):
+        from contracts.services import filter_valid_related_ids
+
+        result = filter_valid_related_ids(
+            [str(self.b.pk), str(self.c.pk), str(self.b.pk), str(self.c.pk)],
+            employee=self.employee,
+            exclude_pk=self.a.pk,
+        )
+        self.assertEqual(result, [self.b.pk, self.c.pk])
+
+    def test_exclude_pk_is_dropped_even_when_present_in_keep_ids(self):
+        from contracts.services import filter_valid_related_ids
+
+        # 異常データ：self（a）が既存の紐付け（keep_ids）にも入っている。
+        result = filter_valid_related_ids(
+            [str(self.a.pk), str(self.b.pk)],
+            employee=self.employee,
+            exclude_pk=self.a.pk,
+            keep_ids=[self.a.pk, self.b.pk],
+        )
+        self.assertEqual(result, [self.b.pk])
 
 
 class StoragePathTests(TestCase):

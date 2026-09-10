@@ -144,9 +144,10 @@ No.1・No.2 に再掲）。
 --------------------------------------------------------------------------------
 No.1 ［低］CSV 職員番号の NFKC 正規化に対応する CSV 取込側の回帰テストが依然として無い
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。実装済みロジックへの追加テストで、規約準拠上の
-  違反ではない。前回監査でも見送り済みでコード内コメントにも記録済み。今回の高・中対応の
-  スコープ外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-7。
+  ImportStaffCsvServiceTests に test_fullwidth_employee_no_is_normalized_to_halfwidth /
+  test_non_digit_employee_no_is_rejected を追加。csv_import_services.py の「優先度: 低・見送り」
+  コメントも回帰テスト参照へ差し替え。accounts 97件 PASS。】
 
 対象ファイル:
   - accounts/csv_import_services.py:126（_import_row 内 unicodedata.normalize("NFKC", employee_no)）
@@ -169,10 +170,11 @@ No.1 ［低］CSV 職員番号の NFKC 正規化に対応する CSV 取込側の
 --------------------------------------------------------------------------------
 No.2 ［低］permissions/api.py OptionListAPIView がロールベースのアクセス制御を持たない
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。前回監査で見送り済み・コード側 docstring に理由
-  （この API 自体は PermissionProfile を変更できず、返す情報は他の popup-select 系でも
-  同種ロールに露出しうる）明記済み。他の popup-select 系 API のゲーティング方針全体と
-  揃える議論が必要で、単体修正の対象外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-2／S2(a)。
+  permissions/api.py OptionListAPIView に dispatch() を追加し can_access_settings_menu_item(
+  request.user, "authority_management") で 403（organizations/api.py と同型）。テスト
+  permissions.tests.OptionListAPIViewTests に test_staff_role_is_forbidden 追加、正常系は
+  MANAGER プロファイル前提に変更。type=group/dept のスコープ絞り込みは U-34。】
 
 対象ファイル:
   - permissions/api.py:13-30（OptionListAPIView。docstring 内に「優先度: 低・見送り、
@@ -196,8 +198,9 @@ No.2 ［低］permissions/api.py OptionListAPIView がロールベースのア�
 --------------------------------------------------------------------------------
 No.3 ［低］permissions/views.py で csv / HttpResponse をメソッド内ローカルインポートしている
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。動作影響なし・スタイルの不統一のみで規約に明文
-  規定なし。今回の高・中対応のスコープ外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-8。permissions/views.py の
+  `import csv` / `from django.http import HttpResponse` をモジュール先頭へ移動（accounts/views.py
+  と揃えた）。挙動不変。permissions 82件 PASS。】
 
 対象ファイル:
   - permissions/views.py:69-71（AuthorityCsvExportView.get 内の
@@ -256,8 +259,11 @@ No.4 ［中］AuthorityEditView の他部署職員編集試行が logger.warning
 --------------------------------------------------------------------------------
 No.5 ［低］PermissionProfile の一部 BooleanField に help_text が無く、隣接フィールドと粒度が不揃い
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。規約「help_text は日本語」自体は満たしており
-  （"無い"だけ）、改善余地レベル。今回の高・中対応のスコープ外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-9。PermissionProfile の
+  doc_download・contract_download に xlsx 番地入り help_text（B177-180／B193-194、can_download
+  参照）、eapproval_view_setting・eapproval_doc_name_manage・eapproval_retention に「※保留
+  （B211-215）・スコープ外・連動先なし」の help_text を追加。0001_initial.py へ畳み込み、
+  makemigrations --check クリーン。permissions 82件 PASS。】
 
 対象ファイル:
   - permissions/models.py:93（doc_download）
@@ -277,8 +283,10 @@ No.5 ［低］PermissionProfile の一部 BooleanField に help_text が無く�
 --------------------------------------------------------------------------------
 No.6 ［低］accounts/models.py・permissions/models.py の logger が定義のみで未使用
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。規約「logger を用意する」の趣旨は満たしており
-  違反ではない（前回監査でも OK 判定）。今回の高・中対応のスコープ外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-4。CLAUDE.md
+  「ログを整備する」節に logger を用意する対象の限定（モデル定義のみの models.py は宣言不要・
+  宣言のみ未使用も許容）を明文化したため、accounts/permissions の models.py は規約上の
+  対象外＝指摘解消（コード変更なし）。】
 
 対象ファイル:
   - accounts/models.py:6（logger = logging.getLogger(__name__)、発火箇所なし）
@@ -297,8 +305,11 @@ No.6 ［低］accounts/models.py・permissions/models.py の logger が定義の
 --------------------------------------------------------------------------------
 No.7 ［低］accounts/admin.py・permissions/admin.py が Django 雛形のまま（英語コメント・モデル未登録）
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。他アプリの admin.py 実態と揃えるべきかが要確認
-  （本監査の範囲外と記載あり）。今回の高・中対応のスコープ外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-10。accounts/admin.py・
+  permissions/admin.py の英語スキャフォールドコメントを「専用の業務画面があるため admin へは
+  登録しない（個人情報／管理者0人ガード等を迂回させないため、閲覧専用も含め未登録）」の日本語
+  コメントへ置換。モデル登録はしない（organizations/masters と異なり個人情報・権限データのため）。
+  accounts/permissions/audit 210件 PASS。】
 
 対象ファイル:
   - accounts/admin.py（全内容が `from django.contrib import admin` + `# Register your models here.`）
@@ -319,8 +330,11 @@ No.7 ［低］accounts/admin.py・permissions/admin.py が Django 雛形のま�
 --------------------------------------------------------------------------------
 No.8 ［低］CSV 取込のファイル文字コード不正（UnicodeDecodeError）が logger に記録されない
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。具体型で捕捉し利用者向けメッセージへ変換済みで
-  規約の主要要件は満たす。今回の高・中対応のスコープ外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-11。
+  accounts/csv_import_services.py の UnicodeDecodeError 捕捉節に logger.warning を追加
+  （利用者には従来どおり汎用メッセージ）。回帰テスト：
+  ImportStaffCsvServiceTests.test_invalid_encoding_raises に assertLogs アサートを追加。
+  accounts 97件 PASS。】
 
 対象ファイル:
   - accounts/csv_import_services.py:63-66（file_obj.read().decode("utf-8-sig") の
@@ -343,8 +357,10 @@ No.8 ［低］CSV 取込のファイル文字コード不正（UnicodeDecodeErro
 --------------------------------------------------------------------------------
 No.9 ［低］templates/permissions/authority_list.html の3行連続 {# #} コメントは {% comment %} が望ましい
 --------------------------------------------------------------------------------
-【2026-09-10 見送り／理由: 優先度「低」。各行が単独で閉じた1行コメントで描画は正常、
-  既知トラップには現状該当しない。今回の高・中対応のスコープ外。】
+【2026-09-10 対応済み（review_pending.txt 経由でリリース前に対応）: U-12。
+  templates/permissions/authority_list.html:59-61 の3行連続 {# #} を
+  {% comment %}…{% endcomment %} へ置換（CLAUDE.md 既知トラップの予防）。描画不変。
+  permissions 82件 PASS。】
 
 対象ファイル:
   - templates/permissions/authority_list.html:59-61（{# … #} が3行連続）

@@ -3,7 +3,7 @@ import logging
 
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.paginator import Paginator
-from django.http import HttpResponse
+from django.http import StreamingHttpResponse
 from django.shortcuts import render
 from django.views import View
 
@@ -43,40 +43,55 @@ class AuditLogCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
 
     settings_menu_key = "audit_log"
 
+    class _Echo:
+        """csv.writer 用の疑似バッファ。write() が渡された行文字列をそのまま返すので、
+        StreamingHttpResponse に1行ずつ渡せる（Django公式のストリーミングCSVパターン）。"""
+
+        def write(self, value):
+            return value
+
+    HEADER = ["操作日時", "職員番号", "部署名", "職員名", "操作内容", "イベントメッセージ", "個人情報"]
+
     def get(self, request):
         # request.GET or Noneは避ける（AuditLogListViewと同じ理由）。
         form = AuditLogSearchForm(request.GET)
         qs = audit_services.filter_audit_log_queryset(form)
+        writer = csv.writer(self._Echo())
+        employee_no = request.user.employee_no
 
-        response = HttpResponse(content_type="text/csv; charset=utf-8-sig")
-        response["Content-Disposition"] = 'attachment; filename="audit_log_list.csv"'
-        writer = csv.writer(response)
-        writer.writerow(["操作日時", "職員番号", "部署名", "職員名", "操作内容", "イベントメッセージ", "個人情報"])
-        count = 0
-        for log in qs:
-            # employee_name/action/event_messageは職員の自由入力（文書タイトル等）に由来しうるため、
-            # Excel等で開いた際の数式インジェクション対策としてsanitize_csv_rowを通す。
-            writer.writerow(
-                sanitize_csv_row(
-                    [
-                        log.timestamp.strftime("%Y/%m/%d %H:%M"),
-                        log.employee_no,
-                        log.department_name,
-                        log.employee_name,
-                        log.action,
-                        log.event_message,
-                        "1" if log.personal_info_flag else "",
-                    ]
+        def stream():
+            # 保存期間の絞り込み後でも全期間分のログは大きくなり得るため、HttpResponse に全量を
+            # 積まず StreamingHttpResponse + qs.iterator() で1行ずつ返す（コードレビュー
+            # audit/core No.4。CSVヘッダ行の直前に BOM を1回だけ付けて Excel の文字化けを防ぐ）。
+            yield "﻿" + writer.writerow(self.HEADER)
+            count = 0
+            for log in qs.iterator(chunk_size=2000):
+                # employee_name/action/event_messageは職員の自由入力（文書タイトル等）に由来しうる
+                # ため、Excel等の数式インジェクション対策として sanitize_csv_row を通す。
+                yield writer.writerow(
+                    sanitize_csv_row(
+                        [
+                            log.timestamp.strftime("%Y/%m/%d %H:%M"),
+                            log.employee_no,
+                            log.department_name,
+                            log.employee_name,
+                            log.action,
+                            log.event_message,
+                            "1" if log.personal_info_flag else "",
+                        ]
+                    )
                 )
+                count += 1
+            logger.info("操作履歴ログCSV出力を実行しました: employee_no=%s 件数=%s", employee_no, count)
+            # accounts.views.StaffCsvExportView等と同様、職員名等の個人情報を含む一覧をファイルとして
+            # 出力するイベントのため、監査ログにも記録する（ストリーム消費完了後に1件だけ記録）。
+            audit_services.log(
+                employee=request.user,
+                action="操作履歴ログ　CSV出力",
+                event_message=f"操作履歴ログ一覧CSV出力,件数：{count}件",
+                personal_info_flag=True,
             )
-            count += 1
-        logger.info("操作履歴ログCSV出力を実行しました: employee_no=%s 件数=%s", request.user.employee_no, count)
-        # accounts.views.StaffCsvExportView等と同様、職員名等の個人情報を含む一覧をファイルとして
-        # 出力するイベントのため、監査ログにも記録する。
-        audit_services.log(
-            employee=request.user,
-            action="操作履歴ログ　CSV出力",
-            event_message=f"操作履歴ログ一覧CSV出力,件数：{count}件",
-            personal_info_flag=True,
-        )
+
+        response = StreamingHttpResponse(stream(), content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="audit_log_list.csv"'
         return response

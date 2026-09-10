@@ -109,13 +109,12 @@ contract_searchable_department_ids(request.user) を評価し、範囲外の
 関連書類欄における部署スコープの扱い（download 権限不足時の素テキスト
 表示と同列に扱うか、完全に隠すか）を確認した上で対応する。
 
-対応 : 見送り
-理由 : 優先度「低」。開示範囲は関連契約書のタイトル1項目のみで PDF 実体・
-       その他メタデータは scoped_lookup で保護済み。かつ「関連書類を見せる」
-       機能の設計意図と解釈する余地があり（確度 7/10・深刻度 低）、修正すると
-       仕様上どちらが正か（伏せ字か完全除外か）を仕様担当と確定する必要がある。
-       ユーザー指示によりコード修正は行わず、リリース前の仕様確認事項として
-       記録するに留める。
+対応 : 対応済み（review_pending.txt 経由でリリース前に対応）
+       DetailAPIView.get で allowed_department_ids を関連契約書ごとに再評価し、
+       スコープ外は title を「（閲覧権限のない関連資料）」へ伏せ字化・preview_url=None・
+       out_of_scope=True で返す。common.js renderRelatedResourceLink に out_of_scope の
+       第4状態（クリップアイコン無しの素テキスト）を追加。伏せ字方式（完全除外はしない）で
+       確定。回帰テスト contracts.tests.DetailAPIViewTests に追加。
 
 --------------------------------------------------------------------
 参考（脆弱性ではないが記録）
@@ -126,11 +125,19 @@ I-1  CSV 取込で新規登録される職員の初期パスワードが "ja"＋
      初回ログイン時のパスワード変更強制がないため、リリース前に
      「初期パスワードの一括変更依頼」または「初回強制変更」の要否を
      業務側と確認することが望ましい。
+     → S3 対応済み（review_pending.txt 経由。U-31）：コード修正対象外のため
+       RELEASE_PREP_NOTES.md「5. CSV 取込で新規登録される職員の初期パスワード」に
+       リリース時の確認事項（(a)一括変更依頼 / (b)初回強制変更の実装）として記載。
 
 I-2  config/settings/base.py:17 の SECRET_KEY 既定値
      "django-insecure-dev-key-change-me"。.env / prod.py 運用前提であり
      既存事項。本番デプロイ時に SECRET_KEY・ALLOWED_HOSTS・DEBUG が
      .env で適切に設定されていることをリリースチェックリストで担保すること。
+     → S4 対応済み（review_pending.txt 経由でリリース前に対応。U-3）：
+       ALLOWED_HOSTS についてはリリースチェックリスト頼みをやめ、prod.py で
+       ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")（デフォルト無し）を追加。SECRET_KEY と同じく
+       未設定なら ImproperlyConfigured でデプロイを止める。.env.example にコメント追記。
+       SECRET_KEY・DEBUG は既に prod.py で固く、DEBUG=False も prod.py で固定済み。
 
 ====================================================================
 
@@ -278,14 +285,20 @@ visible_groups / contract_searchable_department_ids でスコープするかは�
 「部門間閲覧設定は他者に閲覧を許可する側の設定で閲覧者自身のスコープとは
 無関係」（同ファイル docstring）という位置づけを踏まえ仕様担当と確認する。
 
-対応 : 見送り
-理由 : 優先度「低」。開示されるのは部署名・契約書分類名の名称のみで、文書・
-       契約書の実体、件数、個人情報、権限設定の中身は取得できず、
-       PermissionProfile を変更する手段も無い。permissions/api.py の
-       クラス docstring に既知の見送り（コード監査 2026-08-25）として
-       明記済みの事項であり、本ブランチの新規事項ではない。ロールゲート
-       追加自体は organizations/api.py と同じパターンで可能だが、あわせて
-       検討すべき type=group / type=dept のスコープ方針が仕様担当の確認
-       待ちのため、ユーザー指示により今回はコード修正を行わず見送る。
+対応 : (a) ロールゲート追加は対応済み（review_pending.txt 経由でリリース前に対応）。
+       permissions/api.py OptionListAPIView に dispatch() を追加し、未認証は
+       handle_no_permission()、認証済みは can_access_settings_menu_item(
+       request.user, "authority_management") で 403（organizations/api.py と同型）。
+       テスト permissions.tests.OptionListAPIViewTests：正常系ユーザーに MANAGER
+       プロファイルを付与、test_staff_role_is_forbidden（STAFF→403）を追加。
+       (b) type=group / type=dept の結果を閲覧者スコープでさらに絞るかは、2026-09-10 の
+       リリース前 P8 対応セッションでユーザーへ報告・確認した結果「現状維持（実用で問題に
+       なった時点で対応）」で最終確定＝コード変更なし。実態：contract_visible_departments
+       （type=dept）は Rev1.2 で管理者のみ編集（xlsx 権限管理!H182）＝呼び出し元が管理者のみで
+       スコープ無制限のため論点なし。doc_visible_groups / contract_visible_groups（type=group、
+       所属長も編集可）で所属長が自スコープ外の分類を部下の閲覧許可に含められる点は残るが、
+       「所属長が自スコープ外の権限を代理付与してよいか」の業務ルールが xlsx/簡易設計指示書に
+       無く未確定。将来 (案A) 3項目を管理者のみ編集にする or (案B) editor スコープで絞る、で再検討。
+       詳細は review_pending.txt (B)部 #46。
 
 ====================================================================

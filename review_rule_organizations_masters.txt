@@ -201,10 +201,11 @@ No.1 ［低］organizations/forms.py・masters/forms.py の logger が定義の�
   (a) 未使用なら削除する、または (b) No.2 のような検出箇所で実際に logger.warning を出す、の
   どちらかに倒すと意図が明確になる。
 
-対応: 見送り／理由: 規約が求める「新しいモジュールでは logger を用意する」趣旨は充足しており
-  違反ではない。実際に記録すべき改ざん的入力の検知は organizations/api.py 側で既に
-  logger.warning 済みで、forms.py 側に新たな発火点を作るかは No.2 の方針と一体で判断すべき事項。
-  単独の削除は将来 clean 系で警告を出したくなった際に再定義コストが生じるため現状維持とする。
+対応: 対応済み（review_pending.txt 経由でリリース前に対応）: U-4。CLAUDE.md「ログを整備する」節に
+  logger を用意する対象の限定（記録すべき事象を持たない単純な forms.py は宣言不要・宣言のみ
+  未使用も許容）を明文化したため、organizations/masters の forms.py は規約上の対象外＝指摘解消
+  （コード変更なし）。なお masters/forms.py _effective_department の except 節への理由コメント
+  追記は別項目 U-13（No.2）で対応。
 
 --------------------------------------------------------------------------------
 No.2 ［低］masters/forms.py _effective_department が例外を無言で握りつぶしている
@@ -231,10 +232,11 @@ No.2 ［低］masters/forms.py _effective_department が例外を無言で握り
   最低限、except 節に 1 行コメントを付け、ValueError/TypeError 経路のみ logger.warning を
   入れると規約の趣旨・organizations 側との一貫性が揃う。
 
-対応: 見送り／理由: 実効部署が引けない場合の None フォールバックは docstring に理由を明記済みで、
-  最終的な一意性はモデルの UniqueConstraint が担保するため実害は限定的。except 節への 1 行
-  コメント追加・ValueError/TypeError 経路の logger.warning 化は軽微だが、No.1（forms.py の
-  logger 運用をどちらに倒すか）と一体で扱うべき事項のため、方針確定まで見送る。
+対応: 対応済み（review_pending.txt 経由でリリース前に対応）: U-13。_effective_department の
+  except (DoesNotExist, ValueError, TypeError) 節に「なぜ握りつぶすか」（不正な department 値は
+  実効部署が引けないだけで、不正値の指摘は ModelChoiceField 本体の検証に任せる）の理由コメントを
+  追記。logger.warning 化は行わない（No.1＝U-4 で forms.py の logger は対象外と整理）。挙動不変。
+  masters 119件 PASS。
 
 --------------------------------------------------------------------------------
 No.3 ［低］masters/models.py の RetentionKbn / RetentionPeriodUnit に docstring が無い
@@ -253,9 +255,10 @@ No.3 ［低］masters/models.py の RetentionKbn / RetentionPeriodUnit に docst
   DocKbn / EapprovalDocName と同じ粒度で「どの画面のどのプルダウン固定値か」「電子決裁は
   スコープ外だがマスタ画面が管理対象に含むため残す」といった 1〜2 行を付けると揃う。
 
-対応: 見送り／理由: いずれも ヵ月／年／永年・文書／電子決裁 の単純な列挙で、値の意味は
-  同ファイルの RetentionPeriod / EapprovalDocName の docstring 側で既に説明されており実害なし。
-  docstring 粒度の統一は改善余地だが規約違反ではないため見送る。
+対応: 対応済み（review_pending.txt 経由でリリース前に対応）: U-14。RetentionKbn（大区分＝
+  screen-retention-doc の tbody 割り当て、電子決裁はスコープ外だがマスタ画面が管理対象に含む）と
+  RetentionPeriodUnit（単位＝永年は period_value を持たず満了計算で実年数へ読み替え）に
+  DocKbn / EapprovalDocName と同粒度の docstring を追加。masters 119件 PASS。
 
 --------------------------------------------------------------------------------
 No.4 ［低］class_list.html / cat_list.html の削除ボタン disabled に title 属性が無い
@@ -276,9 +279,11 @@ No.4 ［低］class_list.html / cat_list.html の削除ボタン disabled に ti
   （pager-bottom の disabled ボタンは has_previous/has_next 連動の動的状態で、他アプリの一覧
   画面と同じく title 対象外。こちらは指摘しない）
 
-対応: 見送り／理由: このボタンは「未実装・対象外の機能」ではなく業務ルールによる一時無効化で、
-  前回監査でも規約の disabled+title 対象外と整理済み。サーバー側でも二重検証されており誤解の
-  実害は小さい。UX 上の改善提案に留まるため見送る。
+対応: 対応済み（review_pending.txt 経由でリリース前に対応）: U-15。class_list.html:86 /
+  cat_list.html:92 の disabled 削除ボタンに
+  title="紐づく書類があるため削除できません（件数が0のときのみ削除可）" を追加（分類・カテゴリー
+  とも document 種別は doc_count、contract 種別は contract_count で判定するため「書類」表記）。
+  masters 119件 PASS。
 
 --------------------------------------------------------------------------------
 No.5 ［低／要原本確認］templates/masters/retention_list.html の「表示」ボタンが機能しない
@@ -300,11 +305,11 @@ No.5 ［低／要原本確認］templates/masters/retention_list.html の「表�
   「ハンドラ付け忘れ」と誤認しない。原本にそもそも無い／原本でも無反応なら削除候補。
   → 原本 HTML の確認が必要。
 
-対応: 見送り／理由: 原本 index.html の screen-retention-doc に同じ「表示」ボタンが存在し、原本でも
-  onchange 連動で表示切替が済むため onclick を持たない（原本踏襲・モック的挙動）。実害は
-  「押しても何も起きない」に留まり、CLAUDE.md「原本の JS がモックとして壊れている箇所は文字通り
-  再現する必要はないが、最終仕様として機能している原本挙動は踏襲する」に沿う。原本仕様の確定・
-  1 行コメント追記は本監査スコープ外の別タスクとして見送る。
+対応: 対応済み（review_pending.txt 経由でリリース前に対応）: U-16。原本 index.html:3163 に
+  onclick 無しで存在する飾りボタン（書類名 select の onchange=kbnSelectForDocSave で表示切替が
+  完結するため原本もハンドラを持たない）であることを実確認し、retention_list.html:43 の直前に
+  {% comment %} で「原本踏襲・onchange で代替済みのため onclick なし」の説明を追記
+  （後任が「ハンドラ付け忘れ」と誤認しないため）。挙動不変。masters 119件 PASS。
 
 --------------------------------------------------------------------------------
 No.6 ［低］_group_queryset_with_counts と _category_queryset_with_counts がほぼ完全重複

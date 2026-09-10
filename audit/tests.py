@@ -318,11 +318,17 @@ class AuditLogCsvExportViewTests(TestCase):
             action="文書　ダウンロード", event_message="ファイル名：規定一覧", personal_info_flag=True,
         )
 
+    @staticmethod
+    def _csv_text(response):
+        """StreamingHttpResponse（U-24 でメモリ一括 → ストリーミングへ変更）の全チャンクを
+        連結して文字列にする。副作用（CSV出力の監査ログ記録）はストリーム消費時に走る。"""
+        return b"".join(response.streaming_content).decode("utf-8-sig")
+
     def test_csv_export_with_no_matching_rows_returns_header_only(self):
         """検索条件に一致するレコードが無い場合、ヘッダー行のみのCSVを返すこと
         （フィルタ側で例外にならず正常系として完結することの確認）。"""
         response = self.client.get("/audit/csv/", {"employee_name": "存在しない職員"})
-        content = response.content.decode("utf-8-sig")
+        content = self._csv_text(response)
         lines = [line for line in content.splitlines() if line]
         self.assertEqual(len(lines), 1)
         self.assertIn("操作日時,職員番号,部署名,職員名,操作内容,イベントメッセージ,個人情報", lines[0])
@@ -330,8 +336,9 @@ class AuditLogCsvExportViewTests(TestCase):
     def test_csv_export_contains_filtered_rows(self):
         """一覧画面と同じ検索条件（絞込み結果）をCSV化する（accounts.StaffCsvExportViewと同方針）。"""
         response = self.client.get("/audit/csv/", {"employee_name": "山田"})
-        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8-sig")
-        content = response.content.decode("utf-8-sig")
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
+        self.assertTrue(response.streaming)
+        content = self._csv_text(response)
         self.assertIn("山田花子", content)
         self.assertNotIn("ログイン,ログイン", content)
 
@@ -344,7 +351,7 @@ class AuditLogCsvExportViewTests(TestCase):
             personal_info_flag=False,
         )
         response = self.client.get("/audit/csv/")
-        content = response.content.decode("utf-8-sig")
+        content = self._csv_text(response)
         self.assertIn("'=cmd|'/c calc'!A1", content)
 
     def test_csv_export_excludes_records_older_than_retention(self):
@@ -355,18 +362,29 @@ class AuditLogCsvExportViewTests(TestCase):
             timestamp=timezone.now() - datetime.timedelta(days=200)
         )
         response = self.client.get("/audit/csv/")
-        content = response.content.decode("utf-8-sig")
+        content = self._csv_text(response)
         self.assertIn("山田花子", content)  # 直近のレコードは出る
         self.assertNotIn("ログイン,ログイン", content)  # 200日前のログイン行は出ない
 
     def test_csv_export_records_audit_log(self):
-        """CSV出力自体も職員名等の個人情報を含む一覧のファイル出力のため、監査ログに記録する。"""
+        """CSV出力自体も職員名等の個人情報を含む一覧のファイル出力のため、監査ログに記録する
+        （StreamingHttpResponse のため、ストリーム消費完了時に1件記録される）。"""
         before_count = AuditLog.objects.count()
-        self.client.get("/audit/csv/")
+        response = self.client.get("/audit/csv/")
+        list(response.streaming_content)  # ストリームを消費して副作用を発火させる
         entry = AuditLog.objects.order_by("-id").first()
         self.assertEqual(AuditLog.objects.count(), before_count + 1)
         self.assertEqual(entry.action, "操作履歴ログ　CSV出力")
         self.assertTrue(entry.personal_info_flag)
+
+    def test_csv_export_streams_and_starts_with_bom(self):
+        """U-24／audit/core No.4：StreamingHttpResponse で返し、先頭に UTF-8 BOM を1回だけ付ける
+        （Excel の文字化け防止。従来 HttpResponse(charset=utf-8-sig) 相当）。"""
+        response = self.client.get("/audit/csv/")
+        self.assertTrue(response.streaming)
+        raw = b"".join(response.streaming_content)
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(raw.count(b"\xef\xbb\xbf"), 1)
 
 
 class AuditLogRetentionTests(TestCase):

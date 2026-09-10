@@ -1,6 +1,7 @@
 import logging
 
 from django.core.exceptions import PermissionDenied
+from django.http import JsonResponse
 
 from core.api import BaseOptionListAPIView
 from masters.models import DocKbn
@@ -46,18 +47,30 @@ class OptionListAPIView(BaseOptionListAPIView):
             raise PermissionDenied("この画面を利用する権限がありません。")
         return super().dispatch(request, *args, **kwargs)
 
-    def _department_items(self, request):
-        qs = Department.objects.order_by("branch_code", "section_code")
-        # screen-dept-editの統合・分割対象ポップアップから編集中の部署自体を除外する
-        # （DeptEditForm.__init__がapi_urlに?exclude=<pk>を付与。2026-09-03ユーザー依頼）。
-        exclude_pk = request.GET.get("exclude")
-        if exclude_pk:
+    def get(self, request, *args, **kwargs):
+        # ?exclude= は編集中の部署自体を統合・分割対象から外すために DeptEditForm が付与する。
+        # 非数値なら「全件返す」（＝編集中の部署も候補に出る）のをやめ、400 で弾く
+        # （フォーム改ざんの兆候。以前は warning ログのみで全件返しており、編集中 pk が
+        # 除外されないまま候補に出ていた。review_code_organizations_masters No.5／U-34(2)）。
+        exclude_raw = request.GET.get("exclude")
+        if exclude_raw:
             try:
-                qs = qs.exclude(pk=int(exclude_pk))
+                int(exclude_raw)
             except (TypeError, ValueError):
                 logger.warning(
                     "部署統合・分割ポップアップのexcludeに非数値が渡されました（改ざんの可能性）: "
                     "value=%r employee_no=%s",
-                    exclude_pk, request.user.employee_no,
+                    exclude_raw, request.user.employee_no,
                 )
+                return JsonResponse({"error": "invalid exclude"}, status=400)
+        return super().get(request, *args, **kwargs)
+
+    def _department_items(self, request):
+        qs = Department.objects.order_by("branch_code", "section_code")
+        # screen-dept-editの統合・分割対象ポップアップから編集中の部署自体を除外する
+        # （DeptEditForm.__init__がapi_urlに?exclude=<pk>を付与。2026-09-03ユーザー依頼）。
+        # 非数値は get() で 400 済みなので、ここに来る exclude は数値または未指定。
+        exclude_pk = request.GET.get("exclude")
+        if exclude_pk:
+            qs = qs.exclude(pk=int(exclude_pk))
         return [{"value": d.pk, "label": str(d)} for d in qs]

@@ -1361,6 +1361,17 @@ class BulkEditServicesStagingTests(TestCase):
         self.assertEqual(staged_related_ids_for(self.session[self.KEY], 10), [7])
         self.assertIsNone(staged_related_ids_for(self.session[self.KEY], 20))
 
+    def test_staged_related_ids_for_tolerates_legacy_bucket_without_key(self):
+        """U-35／audit_core No.7：旧形式セッション（"related_ids" キーの無い bucket）が
+        デプロイ跨ぎで残っても KeyError にならず [] を返す（bucket.get(...) 参照）。"""
+        from core.bulk_edit_services import staged_related_ids_for
+
+        self._start([10])
+        state = self.session[self.KEY]
+        state["staged_related"] = {"10": {"add": [1], "remove": [2]}}  # 旧形式
+        self.assertEqual(staged_related_ids_for(state, 10), [])
+        self.assertIsNone(staged_related_ids_for(state, 20))
+
     def test_discard_bulk_edit_clears_state(self):
         from core.bulk_edit_services import discard_bulk_edit, stage_related_ids
 
@@ -1494,6 +1505,28 @@ class BaseBulkEditViewCoreTests(TestCase):
             ).exists()
         )
         self.assertTrue(any("スコープ外/論理削除済み" in message for message in cm.output))
+
+    def test_start_dedupes_duplicated_pks(self):
+        """U-23／audit_core No.3：改ざんで同じ pk を複数回 POST しても、resolve_ordered_pks が
+        dict.fromkeys で順序保持 dedupe するため、ウィザードの pks には1回しか入らない
+        （dedupe しないと確定ループが同一レコードを2回削除扱いし削除監査ログが重複する）。"""
+        docs = [self._create_document(f"d{i}") for i in range(2)]
+        self.client.post(
+            "/documents/bulk-edit/start/",
+            {"pks": [docs[0].pk, docs[1].pk, docs[0].pk, docs[1].pk, docs[0].pk]},
+        )
+        state = self.client.session["documents_bulk_edit"]
+        self.assertEqual(state["pks"], [docs[0].pk, docs[1].pk])
+
+    def test_bulk_delete_of_duplicated_pk_writes_one_audit_log(self):
+        """dedupe の効果：同一 pk を2回送って一括削除しても削除監査ログは1件だけ。"""
+        doc = self._create_document("dup")
+        self.client.post("/documents/bulk-edit/start/", {"pks": [doc.pk, doc.pk]})
+        self.client.post("/documents/bulk-edit/", self._page_data(doc, bulk_action="toggle_delete"))
+        self.client.post("/documents/bulk-edit/", self._page_data(doc))
+        self.assertEqual(
+            AuditLog.objects.filter(action="保管画面２　削除", event_message__contains="dup").count(), 1
+        )
 
     def test_commit_drops_pk_logically_deleted_after_wizard_start(self):
         """[review_test_audit_core.txt No.18 シナリオ(b)] 別タブ／他ユーザーが対象を論理削除した

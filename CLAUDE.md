@@ -123,6 +123,11 @@ xlsx側の「要再確認（赤字）」箇所や資料不足、業務要件未�
 - **ログを整備する**。新しいモジュールでは `logger = logging.getLogger(__name__)` を用意し、
   権限拒否・想定外の分岐・セキュリティ上意味のある事象は `logger.warning` で記録する。
   ログ出力先は設定ファイルの `LOGGING` 設定に一元化する。
+  `logger` を用意する対象は「リクエスト処理・I/O・権限判定・失敗しうる分岐を持つモジュール」
+  （`views.py`／`api.py`／`services.py`／`mixins`／`clean` 系を持つ `forms.py`／management
+  コマンド 等）に限る。純粋な値変換ユーティリティ、モデル定義のみの `models.py`、記録すべき
+  事象を持たない単純な `forms.py` は `logger` 宣言不要。宣言だけあって未使用の状態も、将来の
+  ログ追加を見越したものとして許容する（規約準拠監査 R4/R9/R13/R20/R21 の整理）。
 - **例外処理を完成させる**。ファイルI/O・外部境界（ストレージ、DBの制約違反等）は
   try/exceptで具体的な例外型を捕捉し、`logger.exception(...)` で原因を記録した上で、
   利用者にわかるエラー応答を返す。bare `except:` は使わない。「本質的でない処理の失敗で
@@ -140,6 +145,9 @@ xlsx側の「要再確認（赤字）」箇所や資料不足、業務要件未�
   DRF不使用）／`services.py`（ビューから分離したビジネスロジック）／`storage_paths.py`
   （アップロードファイルの保存パス生成）／`validators.py`／`forms.py`／
   `urls.py`・`admin.py`・`apps.py`（標準構成ファイル）。
+  `core` の共有基底ビューは主題別に分割した `*_views.py`（`master_views.py`／`record_views.py`／
+  `bulk_edit_views.py`／`upload_views.py`）へ置く（`core/views.py` に全部入れない。
+  規約準拠監査 R23）。
 - **新機能追加時は同様の観点でユニットテストを追加**する（`tests.py`、`python manage.py test`。
   実行時は`ja_system/ja_pj`をカレントディレクトリにすること。テストDB作成に
   `permission denied to create database`が出た場合はDBユーザーにCREATEDB権限が無いため、

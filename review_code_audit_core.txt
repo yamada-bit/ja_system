@@ -63,7 +63,11 @@ No.1  [中]  core/bulk_edit_views.py  BaseBulkEditView._commit / commit_queryset
 
 
 No.2  [低]  core/bulk_edit_views.py  BaseBulkEditView._commit
-      【見送り／理由: 優先度「低」。指示により低優先度は修正せず記録のみ。】
+      【対応済み（review_pending.txt 経由でリリース前に対応）: U-22。確定ループ内では監査
+        イベントを audit_events リストに貯め、transaction.atomic() を抜けてコミット成功後に
+        audit_services.log() をまとめて発行するよう変更（BaseDeleteView / BaseFileServeView と
+        同じ「保存成功 → atomic 外で log()」に統一）。回帰保護は U-30（下記 review_test_audit_core
+        No.3）。core 変更のため全体テストで確認。】
       audit_services.log() を transaction.atomic() ブロック内のループで呼んでおり、
       audit.services.log_raw() は `except Exception` で握りつぶす。
 
@@ -88,7 +92,10 @@ No.2  [低]  core/bulk_edit_views.py  BaseBulkEditView._commit
 
 
 No.3  [低]  core/bulk_edit_services.py  resolve_ordered_pks
-      【見送り／理由: 優先度「低」。指示により低優先度は修正せず記録のみ。】
+      【対応済み（review_pending.txt 経由でリリース前に対応）: U-23。戻り値を
+        `[pk for pk in dict.fromkeys(valid_pks) if pk in existing_pks]` にして順序保持 dedupe。
+        回帰テスト：core.tests.BaseBulkEditViewCoreTests.test_start_dedupes_duplicated_pks /
+        test_bulk_delete_of_duplicated_pk_writes_one_audit_log。】
       戻り値 `[pk for pk in valid_pks if pk in existing_pks]` は valid_pks が
       リストのため、POST の pks に重複値が含まれると重複したまま返る。
 
@@ -106,7 +113,12 @@ B. 再利用性・単純化・効率性
 --------------------------------------------------------------------------------
 
 No.4  [低]  audit/views.py  AuditLogCsvExportView.get
-      【見送り／理由: 優先度「低」。指示により低優先度は修正せず記録のみ。】
+      【対応済み（review_pending.txt 経由でリリース前に対応）: U-24。StreamingHttpResponse ＋
+        qs.iterator(chunk_size=2000) へ変更（csv.writer に write() が値を返す _Echo バッファを
+        渡す Django 公式パターン）。CSV出力の監査ログはストリーム消費完了時に1件記録する。
+        BOM はヘッダ行の直前に1回だけ付ける（charset=utf-8）。回帰テスト：
+        audit.tests.AuditLogCsvExportViewTests を streaming_content ベースに更新、
+        test_csv_export_streams_and_starts_with_bom を追加。】
       `for log in qs:` を .iterator() なしで回し、HttpResponse で CSV 全体を
       メモリ上に構築している。操作履歴ログはシステム内で唯一「無制限に増え続ける」
       テーブル（audit/models.py コメントにも明記）。
@@ -125,7 +137,12 @@ No.4  [低]  audit/views.py  AuditLogCsvExportView.get
 
 
 No.5  [低]  audit/services.py  filter_audit_log_queryset / retention_cutoff_date
-      【見送り／理由: 優先度「低」。指示により低優先度は修正せず記録のみ。】
+      【対応済み（review_pending.txt 経由でリリース前に対応）: U-24。audit.services に
+        retention_cutoff_datetime()（cutoff 当日0時の aware datetime）を新設し、
+        filter_audit_log_queryset の下限を `timestamp__gte=retention_cutoff_datetime()`、
+        purge_expired_audit_logs を `timestamp__lt=retention_cutoff_datetime()` に変更（DATE()
+        キャストを外し Index(fields=["-timestamp"]) を効かせる。フォームの date_start/date_end は
+        ユーザー入力の日付範囲なので __date__ のまま）。audit/core 186件・全体 PASS。】
       下限フィルタが `timestamp__date__gte=<date>` で、timestamp を ::date に
       キャストするため AuditLog の btree インデックス（Index(fields=["-timestamp"])）を
       範囲述語に使えない。一覧はページャの LIMIT ＋ -timestamp 並びで実害小だが、
@@ -208,8 +225,11 @@ D. core 後方互換に関する補足
 補足の No.7 として下記を記録:
 
 No.7  [低]  core/bulk_edit_services.py  staged_related_ids_for
-      【見送り／理由: 優先度「低」。本番未リリースのため旧形式セッションは存在せず実害なし。
-      指示により低優先度は修正せず記録のみ。】
+      【対応済み（review_pending.txt 経由でリリース前に対応）: U-35。
+        `bucket["related_ids"]` を `bucket.get("related_ids", [])` に変更（旧形式セッションが
+        残っても KeyError にならず [] を返す＝get_bulk_edit_state docstring の約束と一致）。
+        回帰テスト：core.tests.BulkEditServicesStagingTests.
+        test_staged_related_ids_for_tolerates_legacy_bucket_without_key。】
       "staged_related" のセッション形式が旧 {"add","remove"} から
       {"related_ids"} へ非互換変更。staged_related_ids_for は
       `bucket["related_ids"]` を無条件参照するため、旧形式のセッションが残ると
@@ -221,12 +241,12 @@ No.7  [低]  core/bulk_edit_services.py  staged_related_ids_for
 まとめ（優先度順）
 --------------------------------------------------------------------------------
 中: No.1  一括編集 commit がスコープ/is_deleted を再検証しない        → 対応済み（2026-09-10）
-低: No.2  _commit の atomic 内 audit ログ握りつぶし                  → 見送り（優先度低）
-低: No.3  resolve_ordered_pks の pks 重複素通り                      → 見送り（優先度低）
-低: No.4  AuditLog CSV 出力のメモリ一括構築                          → 見送り（優先度低）
-低: No.5  timestamp__date キャストでインデックス不使用               → 見送り（優先度低）
+低: No.2  _commit の atomic 内 audit ログ握りつぶし                  → 対応済み（U-22、リリース前）
+低: No.3  resolve_ordered_pks の pks 重複素通り                      → 対応済み（U-23、リリース前）
+低: No.4  AuditLog CSV 出力のメモリ一括構築                          → 対応済み（U-24、リリース前）
+低: No.5  timestamp__date キャストでインデックス不使用               → 対応済み（U-24、リリース前）
 低: No.6  完了画面のインスタンス読み直し（任意）                     → 見送り（優先度低）
-低: No.7  staged_related 旧形式セッションで KeyError（リリース済み環境のみ） → 見送り（優先度低）
+低: No.7  staged_related 旧形式セッションで KeyError（リリース済み環境のみ） → 対応済み（U-35、リリース前）
 
 高: 該当なし
 

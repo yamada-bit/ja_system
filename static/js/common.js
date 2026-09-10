@@ -752,10 +752,15 @@ function closeDetailPopup() {
  * 検索結果詳細ポップアップ「関連書類」欄の1行（xlsx 検索・閲覧・変更!B677-680, Rev1.6）。
  *  - preview_url あり → ファイル名をリンク化し、クリックで別タブに紐付け先契約書のPDFプレビュー。
  *  - is_deleted      → 赤フォント。クリックで「既に削除されている関連資料です」とだけ表示。
- *  - どちらでもない  → 素テキスト（ダウンロード権限が無いケース）。
- * rc は contracts.api.DetailAPIView が返す {title, is_deleted, preview_url}。
+ *  - out_of_scope    → 閲覧ユーザーの部署スコープ外。API 側で伏せ字ラベルに置換済みなので
+ *                      クリップアイコンを付けず素テキストで出す（review_security.txt No.1／S1）。
+ *  - どれでもない    → 素テキスト（ダウンロード権限が無いケース）。
+ * rc は contracts.api.DetailAPIView が返す {title, is_deleted, preview_url, out_of_scope}。
  */
 function renderRelatedResourceLink(rc) {
+  if (rc.out_of_scope) {
+    return escapeHtml(rc.title);
+  }
   const name = `\u{1F4CE} ${escapeHtml(rc.title)}`;
   if (rc.is_deleted) {
     return `<a href="#" style="color:#c0392b;" onclick="alertDeletedRelatedResource();return false;">${name}</a>`;

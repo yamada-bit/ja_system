@@ -47,6 +47,9 @@ class CommaNumberInput(forms.TextInput):
         try:
             number = Decimal(value)
         except InvalidOperation:
+            # 壊れた入力値（改ざん・不正データ）でも format_value が例外で画面全体を落とさない
+            # よう、整形せず素の値を返す（documents 側 _add_years の閏年フォールバックと同じく
+            # 「本質的でない整形の失敗で本処理を巻き込まない」判断。回帰テストあり）。
             return value
         return f"{number:,.0f}"
 
