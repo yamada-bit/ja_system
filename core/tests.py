@@ -502,6 +502,50 @@ class NoticeCountsTests(TestCase):
         counts = get_notice_counts(self.employee)
         self.assertEqual(counts.expired_contracts, 0)
 
+    def test_other_department_contract_counted_when_in_view_scope(self):
+        """[review_test_audit_core.txt No.11] 文書側の
+        test_other_department_document_counted_when_in_view_scope に対応する契約書側の正の分岐。
+        契約書お知らせ集計も permissions.services.contract_searchable_department_ids() 経由で
+        閲覧部署範囲テーブル（部署統合・分割）の他部署を計上する（負の分岐＝
+        test_other_department_contract_not_counted_for_staff だけでは片肺だった）。"""
+        other_department = Department.objects.create(
+            branch_code="998", branch_name="別支店", section_code="08", section_name="別部署"
+        )
+        DepartmentViewScope.objects.create(
+            viewer_department=self.department, visible_department=other_department
+        )
+        today = timezone.localdate()
+        other_contract = self._create_contract(expiry_date=today - datetime.timedelta(days=1))
+        other_contract.department = other_department
+        other_contract.save()
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expired_contracts, 1)
+
+    def test_expiry_and_deletion_boundary_days_belong_to_inclusive_side(self):
+        """[review_test_audit_core.txt No.12] _expiry_counts の「境界当日」の帰属を固定する。
+        expiry_date == today は expired ではなく expiring_soon 側（Q は expiry_date__lt=today と
+        expiry_date__gte=today）、expiry_date == soon_limit ちょうどは expiring_soon に含まれる
+        （__lte）、deleted_at の日付 == deleted_since ちょうどは recently_deleted に含まれる
+        （__date__gte）。お知らせ件数と検索結果件数の一致という設計目標に直結する off-by-one。"""
+        today = timezone.localdate()
+        soon_limit = add_months(today, settings.NOTICE_EXPIRING_THRESHOLD_MONTHS)
+        deleted_since = add_months(today, -settings.NOTICE_DELETED_THRESHOLD_MONTHS)
+
+        self._create_document(expiry_date=today)  # 当日 → expiring_soon
+        self._create_document(expiry_date=soon_limit)  # 上限ちょうど → expiring_soon
+        self._create_document(
+            expiry_date=today + datetime.timedelta(days=100),
+            is_deleted=True,
+            deleted_at=timezone.make_aware(
+                datetime.datetime.combine(deleted_since, datetime.time(12, 0))
+            ),
+        )  # 削除下限ちょうど → recently_deleted
+
+        counts = get_notice_counts(self.employee)
+        self.assertEqual(counts.expired_documents, 0)
+        self.assertEqual(counts.expiring_soon_documents, 2)
+        self.assertEqual(counts.recently_deleted_documents, 1)
+
 
 @override_settings(NOTICE_DELETED_THRESHOLD_MONTHS=1)
 class PurgeExpiredDeletedRecordsCommandTests(TestCase):
@@ -639,6 +683,38 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
         log = AuditLog.objects.get(action="物理削除バッチ　完全削除", event_message__contains=title)
         self.assertIn(title, log.event_message)
 
+    def test_purge_audit_log_propagates_document_privacy_flag(self):
+        """[review_test_audit_core.txt No.2] purge_expired_deleted_records は監査ログの
+        personal_info_flag に文書の privacy_flag を伝播させる（`_purge` の
+        `personal_info_flag_fn=lambda obj: obj.privacy_flag`）。個人情報書類フラグは操作履歴ログ
+        画面・CSV の抽出条件（personal_info_flag 検索）に直結するため、伝播が切れても気付ける
+        よう固定する。契約書は privacy_flag 自体が無いため常に False（対比）。"""
+        from documents.models import Document
+
+        private_doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        Document.objects.filter(pk=private_doc.pk).update(title="個人情報書類", privacy_flag=True)
+        plain_doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        Document.objects.filter(pk=plain_doc.pk).update(title="通常書類", privacy_flag=False)
+        self._create_contract(deleted_at=timezone.now() - datetime.timedelta(days=40))
+
+        call_command("purge_expired_deleted_records")
+
+        self.assertTrue(
+            AuditLog.objects.get(
+                action="物理削除バッチ　完全削除", event_message__contains="個人情報書類"
+            ).personal_info_flag
+        )
+        self.assertFalse(
+            AuditLog.objects.get(
+                action="物理削除バッチ　完全削除", event_message__contains="通常書類"
+            ).personal_info_flag
+        )
+        self.assertFalse(
+            AuditLog.objects.get(
+                action="物理削除バッチ　完全削除", event_message__contains="テスト契約書"
+            ).personal_info_flag
+        )
+
     def test_document_file_deletion_failure_logs_real_pk(self):
         """document.delete()成功後はDjangoがpkをNoneにリセットするため、ファイル実体削除の失敗ログに
         削除前のpkを使うよう修正した（2026-08-24。修正前はpk=Noneでログに残り追跡不能だった）。"""
@@ -653,6 +729,72 @@ class PurgeExpiredDeletedRecordsCommandTests(TestCase):
 
         self.assertTrue(any(f" pk={doc_pk}" in message for message in cm.output))
         self.assertFalse(any(" pk=None" in message for message in cm.output))
+
+    def test_one_delete_failure_does_not_stop_purge_of_other_records(self):
+        """[review_test_audit_core.txt No.6] `_purge` が「バルク delete() にせず1件ずつ
+        delete する」設計判断そのものの回帰テスト。1件の obj.delete() が DBError を投げても
+        (a) その1件だけ failed に計上して残り、(b) 後続の正常な対象は purge され続け、
+        (c) stdout に「失敗1件」が出る。ここが壊れるとゴミ箱の1件の異常でゴミ箱全体の自動物理
+        削除が止まる（xlsx メイン画面!B50-51 の要件が満たせなくなる）。"""
+        from io import StringIO
+
+        from django.db import Error as DBError
+        from documents.models import Document
+
+        docs = [
+            self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+            for _ in range(3)
+        ]
+        Document.objects.filter(pk=docs[0].pk).update(title="削除失敗する文書")
+        Document.objects.filter(pk=docs[1].pk).update(title="正常文書1")
+        Document.objects.filter(pk=docs[2].pk).update(title="正常文書2")
+
+        original_delete = Document.delete
+
+        def flaky_delete(inner_self, *args, **kwargs):
+            if inner_self.title == "削除失敗する文書":
+                raise DBError("simulated constraint violation")
+            return original_delete(inner_self, *args, **kwargs)
+
+        out = StringIO()
+        with patch.object(Document, "delete", flaky_delete):
+            call_command("purge_expired_deleted_records", stdout=out)
+
+        # (a) 失敗した1件は残る
+        self.assertTrue(Document.objects.filter(pk=docs[0].pk).exists())
+        # (b) 後続の正常な2件は物理削除される
+        self.assertFalse(Document.objects.filter(pk=docs[1].pk).exists())
+        self.assertFalse(Document.objects.filter(pk=docs[2].pk).exists())
+        # (c) stdout の「失敗N件」表記
+        self.assertIn("文書2件（失敗1件）", out.getvalue())
+        # 失敗した1件は監査ログも残さない（delete 前に continue するため）
+        self.assertFalse(
+            AuditLog.objects.filter(
+                action="物理削除バッチ　完全削除", event_message__contains="削除失敗する文書"
+            ).exists()
+        )
+
+    def test_purge_deletes_searchable_file_side_car(self):
+        """[review_test_audit_core.txt No.7] `_purge` の searchable_file 実体削除分岐
+        （`if searchable_file_field: self._delete_file(..., f"{kind}(searchable_file)", ...)`）。
+        既存テストは searchable_file を持たない文書しか作っておらず、OCR 透明テキスト埋め込み済み
+        PDF（searchable_file セット済み）を purge したとき副ファイルも消えることが未検証だった
+        （消え残ると孤児ファイルが storage に残り続ける）。"""
+        from documents.models import Document
+
+        doc = self._create_document(deleted_at=timezone.now() - datetime.timedelta(days=40))
+        doc.searchable_file.save("test_searchable.pdf", ContentFile(b"searchable"), save=False)
+        doc.save(update_fields=["searchable_file"])
+        file_name = doc.file.name
+        searchable_name = doc.searchable_file.name
+        storage = doc.searchable_file.storage
+        self.assertTrue(storage.exists(searchable_name))
+
+        call_command("purge_expired_deleted_records")
+
+        self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
+        self.assertFalse(storage.exists(file_name))
+        self.assertFalse(storage.exists(searchable_name))
 
 
 class AddMonthsClampTests(TestCase):
@@ -674,6 +816,20 @@ class AddMonthsClampTests(TestCase):
     def test_year_boundary_crossed_correctly(self):
         self.assertEqual(add_months(datetime.date(2026, 12, 15), 2), datetime.date(2027, 2, 15))
 
+    def test_negative_months_cross_year_boundary(self):
+        """[review_test_audit_core.txt No.4] audit.services.retention_cutoff_date /
+        purge_expired_deleted_records / *.search_services._apply_notice_filter はいずれも負の
+        months で add_months を呼ぶ（例: 1月起点で -3 ヶ月 → 前年10月）。既存ケースは正の months
+        のみで、`month_index` が負のときの `year + month_index // 12`（フロア除算）・
+        `month_index % 12 + 1` の年跨ぎが直接検証されていなかった。保持期間・自動物理削除の
+        起点日という重要な値の計算式のため固定する。"""
+        # 単純な年跨ぎ（前年へ）。
+        self.assertEqual(add_months(datetime.date(2026, 1, 15), -3), datetime.date(2025, 10, 15))
+        # ちょうど1月 → 前年12月（month_index=-1、% 12 が 11 になる境界）。
+        self.assertEqual(add_months(datetime.date(2026, 1, 20), -1), datetime.date(2025, 12, 20))
+        # 12ヶ月を超える負値（複数年戻る）＋月末日クランプの併用。
+        self.assertEqual(add_months(datetime.date(2026, 1, 31), -14), datetime.date(2024, 11, 30))
+
 
 class IsExpiringSoonTests(TestCase):
     """popup-detail「まもなく有効期限（更新月）」バナー用の判定（原本index.html:1146に対応する
@@ -690,6 +846,16 @@ class IsExpiringSoonTests(TestCase):
     def test_far_future_is_not_expiring_soon(self):
         today = timezone.localdate()
         self.assertFalse(is_expiring_soon(today + datetime.timedelta(days=400)))
+
+    def test_threshold_boundary_day_is_expiring_soon(self):
+        """[review_test_audit_core.txt No.12] is_expiring_soon の閾値ちょうど
+        （expiry_date == add_months(today, NOTICE_EXPIRING_THRESHOLD_MONTHS)）は境界を含む（`<=`）。
+        当日（まだ期限切れではない）も expiring_soon 側。既存ケースは境界から日数が離れた値のみ。"""
+        today = timezone.localdate()
+        self.assertTrue(
+            is_expiring_soon(add_months(today, settings.NOTICE_EXPIRING_THRESHOLD_MONTHS))
+        )
+        self.assertTrue(is_expiring_soon(today))
 
 
 class SessionIdleTimeoutMiddlewareTests(TestCase):
@@ -735,6 +901,25 @@ class SessionIdleTimeoutMiddlewareTests(TestCase):
         session.save()
         response = self.client.get("/", follow=True)
         self.assertRedirects(response, "/accounts/login/?next=/")
+
+    @override_settings(SESSION_IDLE_TIMEOUT_MINUTES=1)
+    def test_database_error_on_query_falls_back_to_settings_value(self):
+        """[review_test_audit_core.txt No.13] SystemSetting.objects.first() のクエリ自体が
+        DatabaseError を投げたとき settings.SESSION_IDLE_TIMEOUT_MINUTES にフォールバックする分岐
+        （2026-09-10 1e4f528 で `except Exception` → `except DatabaseError` に限定）。
+        test_no_system_setting_falls_back_to_settings_value は「レコード0件」の別分岐で、
+        こちらは例外種別を絞った直後の握りつぶし範囲の回帰を検知する。"""
+        session = self.client.session
+        session[SESSION_LAST_ACTIVITY_KEY] = time.time() - 120
+        session.save()
+        with self.assertLogs("core.middleware", level="ERROR") as cm:
+            with patch(
+                "masters.models.SystemSetting.objects.first",
+                side_effect=DatabaseError("connection lost"),
+            ):
+                response = self.client.get("/", follow=True)
+        self.assertRedirects(response, "/accounts/login/?next=/")
+        self.assertTrue(any("既定値にフォールバック" in message for message in cm.output))
 
 
 class OtherSettingsRoutingTests(TestCase):
@@ -1183,6 +1368,244 @@ class BulkEditServicesStagingTests(TestCase):
         stage_related_ids(self.session, self.KEY, 10, [3])
         discard_bulk_edit(self.session, self.KEY)
         self.assertIsNone(self.session.get(self.KEY))
+
+
+class BaseBulkEditViewCoreTests(TestCase):
+    """core.bulk_edit_views.BaseBulkEditView のうち、documents/contracts の BulkEditViewTests に
+    対応テストが無い分岐（review_test_audit_core.txt No.10 / No.18）を、具象サブクラス
+    documents.views.BulkEditView を実際に HTTP で叩いて検証する（BaseBulkEditView は抽象クラスの
+    ため単体では叩けない）。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.other_department = Department.objects.create(
+            branch_code="999", branch_name="他支店", section_code="09", section_name="他部署"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR,
+            display_order=1,
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def _create_document(self, title, department=None):
+        from documents.models import Document
+
+        doc = Document(
+            title=title, department=department or self.department, group=self.group,
+            category=self.category, year=2026, retention_period=self.retention_period,
+            uploader=self.employee, expiry_date=datetime.date(2030, 1, 1),
+        )
+        doc.file.save(f"{title}.txt", ContentFile(b"hello"), save=False)
+        doc.save()
+        return doc
+
+    def _get_token(self):
+        import re
+
+        get_response = self.client.get("/documents/bulk-edit/")
+        return re.search(
+            r'name="token" value="([^"]+)"', get_response.content.decode("utf-8")
+        ).group(1)
+
+    def _page_data(self, obj, *, title=None, bulk_action="update", **extra):
+        """表示中ページの送信データ（既定は obj の現在値そのまま＝dirty でない「更新」）。
+        `bulk_action=None` を渡すと bulk_action を送らない（ページ移動 bulk_nav 用）。"""
+        data = {
+            "token": self._get_token(),
+            "department": obj.department_id,
+            "group": obj.group_id,
+            "category": obj.category_id,
+            "year": obj.year,
+            "retention_period": obj.retention_period_id,
+            "privacy_flag": "True" if obj.privacy_flag else "False",
+            "memo": obj.memo or "",
+            "title_0": title if title is not None else obj.title,
+        }
+        if bulk_action is not None:
+            data["bulk_action"] = bulk_action
+        data.update(extra)
+        return data
+
+    def test_update_post_with_invalid_token_aborts_without_committing(self):
+        """[review_test_audit_core.txt No.10] BaseBulkEditView.post のインライン consume_token
+        失敗分岐（bulk_edit_views.py:145-147。reject_if_resubmitted ではない別実装）。一括編集
+        「更新」POST でトークン不一致 → messages.error ＋ bulk_edit_url へ redirect ＋ ステージ内容が
+        確定されない（DB 無変更・監査ログ無し・セッション状態は保持）ことを固定する。"""
+        from django.contrib.messages import get_messages
+
+        docs = [self._create_document(f"d{i}") for i in range(2)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        data = self._page_data(docs[0], title="d0-new")
+        data["token"] = "bogus-token"
+
+        resp = self.client.post("/documents/bulk-edit/", data)
+
+        self.assertRedirects(resp, "/documents/bulk-edit/")
+        texts = [str(m) for m in get_messages(resp.wsgi_request)]
+        self.assertTrue(any("二重に送信された可能性がある" in t for t in texts))
+        docs[0].refresh_from_db()
+        self.assertEqual(docs[0].title, "d0")
+        self.assertEqual(AuditLog.objects.filter(action="保管画面２　更新").count(), 0)
+        self.assertIsNotNone(self.client.session.get("documents_bulk_edit"))
+
+    def test_commit_drops_pk_that_left_department_scope_after_wizard_start(self):
+        """[review_test_audit_core.txt No.18 シナリオ(a)] ウィザード開始後に閲覧部署範囲が縮小
+        （＝ステージ済みの対象が部署スコープ外に）なった pk は、_committable_pks の
+        dept_ids_resolver 再適用で確定対象から静かに除外され、ステージ済み編集が反映されない
+        （＋dropped の logger.warning）。開始時除外のテストはあるが確定経路は未カバーだった。"""
+        self.employee.permission_profile.role = PermissionRole.STAFF
+        self.employee.permission_profile.save(update_fields=["role"])
+        scope = DepartmentViewScope.objects.create(
+            viewer_department=self.department, visible_department=self.other_department
+        )
+        own = self._create_document("own")
+        other = self._create_document("other", department=self.other_department)
+        self.client.post("/documents/bulk-edit/start/", {"pks": [own.pk, other.pk]})
+        self.client.post(
+            "/documents/bulk-edit/", self._page_data(own, bulk_action=None, bulk_nav="next")
+        )
+        self.client.post(
+            "/documents/bulk-edit/",
+            self._page_data(other, title="other-new", bulk_action=None, bulk_nav="prev"),
+        )
+        # 開始後に閲覧部署範囲を取り消す（管理者が当該職員のスコープを縮小したのと同義）。
+        scope.delete()
+
+        with self.assertLogs("core.bulk_edit_views", level="WARNING") as cm:
+            resp = self.client.post("/documents/bulk-edit/", self._page_data(own))
+
+        self.assertEqual(resp.status_code, 200)
+        other.refresh_from_db()
+        self.assertEqual(other.title, "other")
+        self.assertFalse(
+            AuditLog.objects.filter(
+                action="保管画面２　更新", event_message__contains="other"
+            ).exists()
+        )
+        self.assertTrue(any("スコープ外/論理削除済み" in message for message in cm.output))
+
+    def test_commit_drops_pk_logically_deleted_after_wizard_start(self):
+        """[review_test_audit_core.txt No.18 シナリオ(b)] 別タブ／他ユーザーが対象を論理削除した
+        後に「更新」しても、_committable_pks の is_deleted=False 再適用でゴミ箱内レコードは確定
+        対象から除外され、編集も「更新」監査ログも発生しない。"""
+        from documents.models import Document
+
+        docs = [self._create_document(f"d{i}") for i in range(2)]
+        self.client.post("/documents/bulk-edit/start/", {"pks": [d.pk for d in docs]})
+        self.client.post(
+            "/documents/bulk-edit/", self._page_data(docs[0], bulk_action=None, bulk_nav="next")
+        )
+        self.client.post(
+            "/documents/bulk-edit/",
+            self._page_data(docs[1], title="d1-new", bulk_action=None, bulk_nav="prev"),
+        )
+        Document.objects.filter(pk=docs[1].pk).update(is_deleted=True, deleted_at=timezone.now())
+
+        with self.assertLogs("core.bulk_edit_views", level="WARNING") as cm:
+            resp = self.client.post("/documents/bulk-edit/", self._page_data(docs[0]))
+
+        self.assertEqual(resp.status_code, 200)
+        docs[1].refresh_from_db()
+        self.assertEqual(docs[1].title, "d1")
+        self.assertFalse(
+            AuditLog.objects.filter(
+                action="保管画面２　更新", event_message__contains="d1"
+            ).exists()
+        )
+        self.assertTrue(any("スコープ外/論理削除済み" in message for message in cm.output))
+
+
+class OptionListAPIScopeExtensionTests(TestCase):
+    """core.api.BaseOptionListAPIView の部署スコープ拡張／自部署スコープ絞り込み分岐
+    （review_test_audit_core.txt No.15 / No.16）。documents/contracts の OptionsAPIViewTests は
+    「STAFF=自部署のみ」「ADMIN=全部署」の2択しか無く、非管理者の閲覧範囲が1件広がった中間状態や
+    「他部署の分類・カテゴリーを popup に出さない」部署スコープ層が未検証だった。core 側の基底
+    クラスの分岐のため、両アプリのエンドポイントを叩いて確認する。"""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.scope_dept = Department.objects.create(
+            branch_code="111", branch_name="A支店", section_code="01", section_name="営業部"
+        )
+        self.unrelated_dept = Department.objects.create(
+            branch_code="222", branch_name="B支店", section_code="01", section_name="経理部"
+        )
+        self.employee = Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.profile = PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF
+        )
+        self.client.login(username="1", password="pass1234")
+
+    def test_document_dept_options_add_one_department_from_view_scope(self):
+        """[No.15/文書] 非管理者に DepartmentViewScope で他部署が1件許可されると、その部署だけが
+        popup 選択肢に加わる（＝documents.search_services.build_queryset の絞り込み範囲と一致）。"""
+        DepartmentViewScope.objects.create(
+            viewer_department=self.department, visible_department=self.scope_dept
+        )
+        response = self.client.get("/documents/api/options/", {"type": "dept"})
+        values = {i["value"] for i in response.json()["items"]}
+        self.assertEqual(values, {self.department.pk, self.scope_dept.pk})
+        self.assertNotIn(self.unrelated_dept.pk, values)
+
+    def test_contract_dept_options_add_one_department_from_contract_view_setting(self):
+        """[No.15/契約書] 契約書-部門間閲覧設定（PermissionProfile.contract_visible_departments）で
+        追加された部署だけが popup 選択肢に加わる（permissions.services.
+        contract_searchable_department_ids と一致）。"""
+        self.profile.contract_visible_departments.add(self.scope_dept)
+        response = self.client.get("/contracts/api/options/", {"type": "dept"})
+        values = {i["value"] for i in response.json()["items"]}
+        self.assertEqual(values, {self.department.pk, self.scope_dept.pk})
+        self.assertNotIn(self.unrelated_dept.pk, values)
+
+    def test_document_group_options_exclude_other_department_groups(self):
+        """[No.16] _scope_by_department（permissions.services.department_ids_for_group_scope による
+        自部署スコープ絞り込み）。visible_groups（権限）とは別レイヤーで、他部署の分類は popup に
+        出さない（フォームの queryset 差し替えでは効かず API 本体で再適用している分岐）。"""
+        own = Group.objects.create(
+            code="A", name="自部署分類", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        other = Group.objects.create(
+            code="B", name="他部署分類", doc_kbn=DocKbn.DOCUMENT, department=self.unrelated_dept
+        )
+        response = self.client.get("/documents/api/options/", {"type": "group"})
+        values = {i["value"] for i in response.json()["items"]}
+        self.assertIn(own.pk, values)
+        self.assertNotIn(other.pk, values)
+
+    def test_document_category_options_exclude_other_department_categories(self):
+        """[No.16] _category_items 経由の _scope_by_department。_category_items には visible_groups
+        相当のフィルタが無いぶん、部署スコープが唯一の絞り込みになる。"""
+        group = Group.objects.create(
+            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+        )
+        Category.objects.create(
+            code="001", name="自部署カテゴリー", group=group, doc_kbn=DocKbn.DOCUMENT,
+            department=self.department,
+        )
+        Category.objects.create(
+            code="002", name="他部署カテゴリー", group=group, doc_kbn=DocKbn.DOCUMENT,
+            department=self.unrelated_dept,
+        )
+        response = self.client.get("/documents/api/options/", {"type": "category"})
+        labels = {i["label"] for i in response.json()["items"]}
+        self.assertIn("自部署カテゴリー", labels)
+        self.assertNotIn("他部署カテゴリー", labels)
 
 
 class ChunkUploadServiceTests(TestCase):

@@ -1,409 +1,364 @@
-audit/core アプリ テストカバレッジ棚卸し
-対象: audit/{models,views,forms,services}.py + tests.py
-      core/{models,views,api,forms,middleware,widgets,scoping_services,upload_services,
-      upload_views,record_views,master_views,search_services,notice_services,double_submit,
-      deletion_services,storage_paths,text_extraction_services,text_normalization,
-      ocr_layout_services,pdf_text_embed_services,zip_services,csv_services,file_type_services,
-      bulk_edit_services,form_services}.py + tests.py
-      （core/test_runner.pyはDjangoカスタムテストランナーのため対象外。core/master_views.pyは
-      organizations/masters棚卸し〈review_test_organizations_masters.txt〉で意図的に除外された
-      裏返しとして今回の対象に含める）
-実施日: 2026-08-26
-方式: 各ソースファイルの公開関数・View・分岐を洗い出し、audit/tests.py（4クラス）・
-      core/tests.py（26クラス）の既存テストと突き合わせた。coreは他アプリから広く呼ばれる
-      共通基盤のため、documents/tests.py・contracts/tests.py・organizations/tests.py・
-      masters/tests.py・permissions/tests.py・accounts/tests.pyをGrep・通読し、「coreに
-      単体テストは無いが呼び出し元アプリのテストで実質カバーされている」箇所と「呼び出し元にも
-      検証が無く本当に無検証」の箇所を区別した。既存の関連棚卸し3本
-      （review_test_permissions_accounts.txt、review_test_organizations_masters.txt、および
-      documents/contracts側の既存棚卸しreview_test_doc_contract.txt）の内容・その後の対応記録も
-      突き合わせに利用した。`manage.py test audit core`実行済み（115件、全件PASS。venv:
-      C:\Users\yamad\Claude\JA\ja_system\venv\Scripts\python.exe）。本レポートは棚卸しのみで、
-      テスト追加・修正は行っていない。
-凡例: [済] 直接/実質的にカバー  [部分] 一部の分岐のみカバー  [無] テスト無し
+audit / core アプリ テストカバレッジ棚卸し（第2版）
+================================================================================
+実施日 : 2026-09-10
+対象   : ユーザー指定の6論点に絞って再棚卸し
+         (1) AuditLog 記録（audit/services.py log / log_raw / build_diff_message /
+             log_denied_cross_department_access、各 View・バッチからの記録呼び出し）
+         (2) 保存期間による除外（audit/services.py retention_cutoff_date /
+             filter_audit_log_queryset、一覧・CSV の下限適用）
+         (3) 日次バッチ purge 系（core/management/commands/purge_expired_audit_logs.py、
+             purge_expired_deleted_records.py）
+         (4) 二重送信対策（core/double_submit.py issue_token / consume_token /
+             reject_if_resubmitted、および各 POST View の失敗分岐）
+         (5) お知らせ集計（core/notice_services.py get_notice_counts / _expiry_counts /
+             is_expiring_soon / add_months / _days_in_month）
+         (6) popup-select / detail 用 API 基底クラス（core/api.py BaseOptionListAPIView）
+方式   : 各ソースの分岐を洗い出し、audit/tests.py（6クラス）・core/tests.py（39クラス）に
+         加え、共通基盤の間接カバー元として documents/tests.py・contracts/tests.py・
+         permissions/tests.py・accounts/tests.py・organizations/tests.py・masters/tests.py を
+         Grep / 通読。第1版（2026-08-26、本ファイル旧内容）の指摘のうち解消済みのものを消し込み、
+         その後の改修（特に 2026-09-10 の bbe79c7 / 1e4f528）で新設された未カバー分岐を追記した。
+         `manage.py test audit core` = 167件 全PASS
+         （venv: C:\Users\yamad\Claude\JA\ja_system\venv\Scripts\python.exe）。
+         本レポートは棚卸しのみ。テストの追加・修正は行っていない。
+凡例   : [済] 直接/実質カバー  [部分] 一部分岐のみ  [無] テスト無し
 
 ================================================================================
-■ 総合評価
+■ 第1版（2026-08-26）からの消し込み（対応済み・今回は指摘しない）
 ================================================================================
-auditは4クラス・見た目の少なさに反して分岐は薄くない：filter_audit_log_queryset の主要検索軸
-（職員番号完全一致・氏名フルネーム検索・イベントメッセージAND検索・個人情報フラグ・ページング）は
-View経由でいずれもテストされているが、date_start/date_endという最初に定義されている2条件だけが
-どのテストからも一度も指定されておらず抜けている。auditはPOSTフォームを持たない画面
-（一覧・CSV出力のみ）のため、他アプリで頻出する二重送信対策の指摘は該当しない。
-
-coreは「documents/contracts経由での間接カバー」が非常に手厚い。2026-08-25の重複ロジック集約
-（search_services/deletion_services/zip_services/scoping_services/storage_paths/record_views/
-upload_views/bulk_edit_services等をcoreへ集約した際、documents/contracts側の既存テストが
-そのまま移植先の間接カバーとして機能している）により、これらのファイルは実質[済]と判定できる
-ものが大半だった。一方で、以下の3パターンで「coreそのものにしか呼び出し元が無い、または
-coreの中でも独立した分岐」のためどのアプリのテストにも一度も現れない抜けが見つかった：
-  (a) core/views.pyが自ら持つ3つのPOSTフォーム（OtherSettingsView/OtherMainEditView/
-      OtherLogoutEditView）の二重送信トークン不正時分岐。他アプリ（organizations/masters/
-      permissions/accounts）は同種の分岐を自アプリのtests.pyで検証済みだが、core自身の3画面は
-      それらの「間接カバー元」が存在しないため今回初めて可視化された空白になっている。
-  (b) core/middleware.py SessionIdleTimeoutMiddleware（自動ログアウト本体）が、設定値の保存
-      （core/tests.py OtherMainEditViewTests等）は検証されている一方、ミドルウェア自身の
-      アイドル判定・ログアウト実行・SystemSetting未設定時のフォールバックが一切テストされて
-      いない。呼び出し元という概念が無い（全リクエストに横断適用される）ため、他アプリ経由の
-      間接カバーも成立しない。
-  (c) core.notice_services.add_months（月またぎ・月末日クランプの汎用ヘルパー）が、
-      NoticeCountsTestsの間接利用だけでは月末境界（1/31→2/28等）やうるう年を踏んでおらず、
-      実質的に無検証に近い。
-
-優先度高：4件、中：7件、低：6件（詳細は末尾「■ 優先度別まとめ」参照）。
+- 旧・優先度高1 SessionIdleTimeoutMiddleware 無検証
+    → core/tests.py SessionIdleTimeoutMiddlewareTests で解消（アイドル判定・ログアウト・
+      SystemSetting 未設定フォールバックの3ケース）。※新たな穴は本レポート No.13 参照。
+- 旧・優先度高2 core/views.py 3画面の二重送信トークン不正時分岐
+    → OtherViewsDoubleSubmitTokenTests で解消（2026-09-10 に reject_if_resubmitted へ集約）。
+- 旧・優先度高3 filter_audit_log_queryset の date_start/date_end 未検証
+    → AuditLogListViewTests.test_filter_by_date_range / test_reversed_operation_date_range_shows_error
+      / test_same_day_operation_date_range_is_valid で解消。
+- 旧・優先度中5 契約書側お知らせ集計（expiring_soon/recently_deleted・部署スコープ）
+    → NoticeCountsTests.test_contract_expiring_soon_and_recently_deleted_counted /
+      test_other_department_contract_not_counted_for_staff で解消（正の DepartmentViewScope
+      分岐だけ残 → 本レポート No.8）。
+- 旧・優先度中6 OtherSettings/OtherMainEdit の DB 書き込み失敗分岐
+    → OtherViewsDatabaseWriteFailureTests で解消。
+- 旧・優先度中7 add_months の月末日クランプ・うるう年
+    → AddMonthsClampTests で解消（負符号＋年跨ぎ分岐だけ残 → 本レポート No.3）。
+- purge_expired_audit_logs 全般
+    → AuditLogRetentionTests で新規カバー（expired のみ削除・自ログを残さない）。
 
 ================================================================================
-■ audit アプリ
+■ (1) AuditLog 記録
 ================================================================================
+[済] audit/services.py log / log_raw
+     AuditLogServiceTests：スナップショット4項目の非正規化保存、記録失敗時に例外を
+     伝播させないこと（log / log_raw 双方）。
+[済] audit/services.py build_diff_message / _redact_sensitive_change
+     BuildDiffMessageRedactionTests：非機微はそのまま、パスワード系ラベルは呼び出し側が
+     実値を渡してもマスク、大小文字無視の部分一致、混在ケース。
+[済] 各経路からの記録
+     CSV出力（AuditLogCsvExportViewTests.test_csv_export_records_audit_log）、
+     パスワード変更（OtherSettingsRoutingTests.test_password_change_creates_audit_log）、
+     メイン画面項目/自動ログアウト設定更新（OtherMainEditViewTests）、
+     物理削除バッチ（core/tests.py test_document_purge_creates_audit_log /
+     test_contract_purge_creates_audit_log）、他部署直打ち（documents/contracts/permissions の
+     action="アクセス拒否" テスト群）。
 
---- audit/models.py ---
-[部分] AuditLog（フィールド定義・pg_trgm GinIndex×2）
-     フィールド値自体はAuditLogServiceTests/AuditLogListViewTests等で厚くカバーされている。
-     [無] `__str__`（`f"{timestamp} {employee_name} {action}"`）を直接検証するテストが無い。
-     [無] GinIndex（employee_name正規化式・event_message）自体はDBインデックス定義のため
-          Djangoユニットテストの通常の手段では検証しづらく、実質的に無検証（他アプリの
-          UniqueConstraint等と同様、実害は小さい）。
+No.1  対象: audit/services.py log_denied_cross_department_access（直接単体テスト）
+      優先度: 低
+      理由: action="アクセス拒否" とメッセージ書式は documents/contracts/permissions の
+            各テストで HTTP 経由に検証されているが、audit/tests.py にこの関数自体を直接
+            呼ぶテストが無い。薄いラッパーのため実害は小さいが、entity_name / pk の
+            埋め込み書式は audit 側の責務として1件持っておきたい。
+      → 見送り／理由: 優先度「低」。action="アクセス拒否" とメッセージ書式は
+        documents/contracts/permissions の HTTP 経由テストで実質カバー済みで、
+        薄いラッパーのため回帰リスクが小さい。
 
---- audit/forms.py ---
-[部分] AuditLogSearchForm
-     employee_no/employee_name/event_message/personal_info_flagの4フィールドはView経由の
-     AuditLogListViewTestsで実質カバー。
-     [無] date_start/date_end自体のwidget定義（type="date"）・フォーム単体としての直接テストは
-          無い（View経由の実利用にも同条件のテストが無いため、後述services.pyの指摘と表裏）。
+No.2  対象: core/management/commands/purge_expired_deleted_records.py の監査ログ
+            personal_info_flag（`personal_info_flag_fn=lambda obj: obj.privacy_flag`）
+      優先度: 中
+      理由: test_document_purge_creates_audit_log は action と event_message しか
+            アサートしておらず、privacy_flag=True の文書を purge したとき監査ログの
+            personal_info_flag が True で残ることを検証していない。個人情報書類フラグは
+            操作履歴ログ画面・CSV の抽出条件（personal_info_flag 検索）に直結するため、
+            伝播が切れても誰も気付けない。契約書側（フラグ無し＝常に False）の対比も欲しい。
+      → 追加済み（core.tests.PurgeExpiredDeletedRecordsCommandTests.
+        test_purge_audit_log_propagates_document_privacy_flag。privacy_flag=True/False の文書＋
+        契約書の3件を purge し、監査ログの personal_info_flag が True/False/False になることを固定）。
 
---- audit/services.py ---
-[部分] filter_audit_log_queryset
-     employee_no完全一致・employee_name全角スペース区切りフルネーム検索・event_messageの
-     スペース区切りAND検索・personal_info_flag・無条件時の全件表示はAuditLogListViewTestsで
-     手厚くカバー。
-     [無] date_start/date_end（`timestamp__date__gte`/`timestamp__date__lte`）の2条件が
-          AuditLogListViewTests・AuditLogCsvExportViewTestsのいずれからも一度も指定されておらず、
-          フォームの先頭2フィールド（xlsx 操作履歴ログ!B33-34相当の日付範囲検索）が事実上無検証
-          のまま残っている。
-[済] log（スナップショット保存、監査ログ記録失敗時に例外を伝播させないこと）
-     AuditLogServiceTests.test_log_creates_record_with_snapshot_fields/
-     test_log_failure_does_not_raiseで直接カバー。
-[済] log_raw（Employeeインスタンス非経由の記録、失敗時の非伝播）
-     AuditLogServiceTests.test_log_raw_creates_record_without_employee_instance/
-     test_log_raw_failure_does_not_raiseで直接カバー。
-
---- audit/views.py ---
-[済] AuditLogListView（GET、request.GET or None回避の回帰確認、全検索軸の絞り込み、
-     Django Paginatorによるページング境界〈100件超で2ページ目に分かれること〉）
-     AuditLogSettingsMenuAccessControlTests（管理者のみ、所属長/一般は403）と合わせて
-     アクセス制御・機能面とも厚い。ただし上記のdate_start/date_end分岐のみ未検証。
-[済] AuditLogCsvExportView（ヘッダーのみ返却、絞込み結果のCSV化、CSVインジェクション対策の
-     エスケープ、CSV出力自体の監査ログ記録）AuditLogCsvExportViewTestsで直接カバー。
-     本Viewはaudit_log_list.csv固定名のダウンロードのみでPOSTフォームを持たないため、
-     他アプリで頻出する二重送信対策の対象外（該当分岐自体が存在しない）。
+No.3  対象: core/bulk_edit_views.py BaseBulkEditView._commit の監査ログ
+            （audit_update_action / audit_delete_action ＋ audit_extra_kwargs）
+      優先度: 低
+      理由: documents/contracts の BulkEditViewTests は「更新/削除/更新なし」のステータス表示は
+            見ているが、確定時に書かれる監査ログの action 文言・personal_info_flag を
+            アサートしていない。単体編集経路の監査ログは検証済みのため優先度は低い。
+      → 見送り／理由: 優先度「低」。単体編集経路の監査ログ（action 文言・personal_info_flag）は
+        検証済みで、_commit は同じ audit_services.log / audit_extra_kwargs を呼ぶだけのため
+        重複が大きい。
 
 ================================================================================
-■ core アプリ
+■ (2) 保存期間による除外（retention cutoff）
 ================================================================================
+[済] audit/services.py filter_audit_log_queryset の下限適用
+     AuditLogRetentionTests.test_list_view_excludes_records_older_than_retention、
+     AuditLogCsvExportViewTests.test_csv_export_excludes_records_older_than_retention、
+     設定変更での可変（test_retention_cutoff_is_configurable、@override_settings で 3→6→3）。
+[済] date_start/date_end との合成
+     AuditLogListViewTests.test_filter_by_date_range（下限より新しい範囲で範囲検索が効くこと）。
 
---- core/models.py ---
-[済] NormalizedTextFieldsMixin.save（title/memo/extracted_textの`_normalized`シャドウカラム
-     同期、update_fields指定時の追加同期）は、documents.tests.DocumentSaveNormalizationTests・
-     contracts.tests.ContractSaveNormalizationTestsで両アプリからほぼ同一内容の直接テストが
-     存在し手厚い。
-[部分] UuidPrefixedFilenameMixin.display_name
-     contracts.RelatedFile側はcontracts.tests.DetailAPIViewTests.
-     test_related_files_returns_display_name_not_full_pathで直接値を検証済み。
-     [無] Document.display_name/Contract.display_name本体（ダウンロード時のfilenameとして
-          BaseFileServeView内部で使われる）は、DownloadViewTestsがレスポンスの成否のみを見ており
-          `display_name`の値自体（UUIDプレフィックス除去後の元ファイル名）をアサートしていない。
+No.4  対象: audit/services.py retention_cutoff_date → core.notice_services.add_months の
+            負符号＋年跨ぎ分岐（例: 1月起点で -3 ヶ月 → 前年10月）
+      優先度: 中
+      理由: retention_cutoff_date() は `add_months(today, -AUDIT_LOG_RETENTION_MONTHS)`、
+            purge_expired_deleted_records も `add_months(today, -NOTICE_DELETED_THRESHOLD_MONTHS)`
+            と、いずれも負の months で add_months を呼ぶ。AddMonthsClampTests は正の
+            months（+1/+2）しか通しておらず、`month_index` が負になったときの
+            `year + month_index // 12`（フロア除算）・`month_index % 12 + 1` の年跨ぎが
+            直接検証されていない。保持期間・自動物理削除の起点日という重要な値の計算式のため。
+      → 追加済み（core.tests.AddMonthsClampTests.test_negative_months_cross_year_boundary。
+        -3ヶ月の年跨ぎ・-1ヶ月で前年12月になる境界・-14ヶ月＋月末日クランプの3ケース）。
 
---- core/views.py ---
-[済] MenuView（お知らせ2列表示、メニューボタン常時表示、Rev1.2契約書ボタンのcan_edit_contract
-     連動）、SettingsMenuView（ロール別ボタン出し分け）、HealthCheckView（DB正常/異常での
-     200/503）はいずれも直接テストで厚い。
-[済] OtherSettingsView（管理者/一般の振り分け、パスワード変更の一致チェック・強度チェック・
-     現パスワードとの同一拒否、監査ログ記録、管理者による誤アクセス時のPermissionDenied）
-[済] OtherMainEditView（No.欄が一覧と同じ並び順で計算されること、監査ログ記録）
-[済] OtherLogoutEditView（監査ログ記録、tab引き継ぎリダイレクト）
-[無] OtherSettingsView.post/OtherMainEditView.post/OtherLogoutEditView.postいずれも
-     `consume_token`がFalseを返す（二重送信）分岐が未テスト。organizations/masters/
-     permissions/accountsの同種分岐は各アプリのtests.pyで検証済み（2026-08-25以降の対応記録）
-     だが、この3画面はcore/views.py自身が唯一の実装元であり、他アプリの間接カバーが
-     一切成立しないため、現状ちょうどこの3分岐だけが未検証のまま取り残されている。
-[無] OtherSettingsView.post/OtherMainEditView.postのDB書き込み失敗（IntegrityError/DatabaseError）
-     分岐も未テスト（正常系・バリデーションエラー系は厚いが、DB境界の異常系はここでも手薄）。
+No.5  対象: 保持下限「当日ちょうど」のログの帰属
+      優先度: 低
+      理由: 一覧/CSV フィルタは `timestamp__date__gte=cutoff`、purge は
+            `timestamp__date__lt=cutoff` で、cutoff 当日のログは両方が残す設計。既存テストは
+            10日前 / 200日前など境界から離れた値のみで、cutoff 当日のレコードが
+            「一覧に出る・purge されない」ことを固定したテストが無い。off-by-one 回帰の
+            検知が効かない。
+      → 見送り／理由: 優先度「低」。retention_cutoff_date は add_months で算出し、その境界計算は
+        No.4（負符号＋年跨ぎ）で固定済み。gte / lt の突き合わせは実装が単純で回帰リスクが低い。
 
---- core/api.py ---
-[済] BaseOptionListAPIView（type=dept/group/category/year全4種、invalid typeでの400、
-     未ログイン302、type=deptの管理者/非管理者/PermissionProfile未作成、type=groupの
-     visible_groups有無、type=categoryのdoc_kbn絞り込み）は、core/tests.py自体には
-     直接テストが1件も無いが、documents.tests.OptionsAPIViewTests・
-     contracts.tests.OptionsAPIViewTestsの両方から全分岐がHTTP経由で重複気味に検証されており、
-     実質[済]と判定できる（department_kind="contract"専用の
-     contract_searchable_department_ids分岐もcontracts側で個別に検証済み）。
+================================================================================
+■ (3) 日次バッチ purge 系
+================================================================================
+[済] purge_expired_audit_logs
+     AuditLogRetentionTests.test_purge_command_deletes_only_expired_rows /
+     test_purge_command_does_not_write_its_own_audit_log。
+[済] purge_expired_deleted_records（正常系）
+     PurgeExpiredDeletedRecordsCommandTests：文書/契約書の閾値超過での物理削除＋ファイル実体削除、
+     閾値内の生存、is_deleted=False は対象外、ContractRelation の CASCADE 連動、監査ログ生成、
+     ファイル実体削除失敗時に削除前 pk でログすること。
 
---- core/forms.py ---
-[済] search_year_choices（文書無し時の当年のみ、最古年までの範囲、削除済みが範囲を広げない
-     こと）はcore/tests.py SearchYearChoicesTestsで直接カバー。documents/contracts.
-     OptionsAPIViewTests（type=year）で間接的にも二重にカバーされている。
-[済] year_choices_with_existing（対象年が直近ウィンドウ外の場合に選択肢へ追加する分岐）は
-     documents.tests.EditScreenYearFieldTests・同種のcontracts側テストで直接カバー。
-[済] scoped_group_and_category_querysets（visible_groups絞り込み→部署スコープAND適用の
-     優先順位）はdocuments.tests.UploadStep2FormGroupCategoryScopeTests・
-     contracts.tests.UploadStep2FormGroupCategoryScopeTestsで、doc_visible_groups/
-     contract_visible_groups双方から「部署スコープが他部署許可より優先される」ユーザー確定
-     済み仕様として直接検証されている。
-[部分] apply_radio_defaults / SEARCH_RADIO_DEFAULTS
-     documents/contracts.SearchFormのtitle_match/freeword_match等は、既存テストがいずれも
-     `data={"title_match": "or"}`のように値を明示指定して呼んでおり、apply_radio_defaultsが
-     本来解決すべき「未送信時にデフォルト値を補完する」分岐自体を経由していない。
-     [無] 初回アクセス（GETパラメータにtitle_match等のキーが無い状態）でRadioSelectが
-          原本通りchecked状態になることを検証するテストが無い（本関数が集約される前の
-          個別実装時代からの既知の抜け）。
-[無] OtherPassForm.clean_new_password/clean（パスワード強度・確認一致・現パスワード同一拒否）は
-     直接のフォーム単体テストは無いが、core/tests.py OtherSettingsRoutingTestsのView経由で
-     実質カバーされている。
+No.6  対象: core/management/commands/purge_expired_deleted_records.py `_purge` の
+            `except DBError`（1件の delete() 失敗で continue し他対象を巻き込まない）
+      優先度: 高
+      理由: 「バルク delete() にせず1件ずつ delete する」という設計判断そのものの回帰テストが
+            無い。obj.delete() が DBError を投げるようモックし、(a) その1件は failed に計上、
+            (b) 後続の正常な対象は purge され続ける、(c) stdout の「失敗N件」表記、を固定
+            したい。ここが壊れるとゴミ箱の1件の異常で全対象の自動物理削除が止まる
+            （xlsx メイン画面!B50-51 の要件が満たせなくなる）。
+      → 追加済み（core.tests.PurgeExpiredDeletedRecordsCommandTests.
+        test_one_delete_failure_does_not_stop_purge_of_other_records。Document.delete を1件だけ
+        DBError にし、その1件が残り／後続2件は削除／stdout「文書2件（失敗1件）」／失敗分は
+        監査ログ無し、を固定）。
 
---- core/middleware.py ---
-[無] SessionIdleTimeoutMiddleware（`__call__`のアイドル判定・自動ログアウト実行、
-     `_get_timeout_minutes`のSystemSetting優先・DB未接続時のsettings.SESSION_IDLE_TIMEOUT_MINUTES
-     フォールバック）が、audit/core/他アプリのどのtests.pyからも一切呼ばれていない。
-     設定値の保存（core.forms.LogoutTimeForm経由）はOtherMainEditViewTests等でカバーされて
-     いるが、保存された値が実際にリクエスト処理でログアウトを引き起こすかという本体のロジックは
-     完全に無検証。全リクエストに横断適用されるミドルウェアという性質上、他アプリ経由の
-     間接カバーも成立しない。
+No.7  対象: purge_expired_deleted_records の searchable_file 実体削除分岐
+            （`if searchable_file_field: self._delete_file(..., f"{kind}(searchable_file)", ...)`）
+      優先度: 中
+      理由: どのテストも searchable_file を持たない文書しか作っておらず、OCR 透明テキスト
+            埋め込み済み PDF（searchable_file セット済み）を purge したとき副ファイルも
+            消えることが未検証。孤児ファイルが storage に残り続けても検知できない。
+      → 追加済み（core.tests.PurgeExpiredDeletedRecordsCommandTests.
+        test_purge_deletes_searchable_file_side_car。searchable_file をセットした文書を purge し、
+        本体ファイルと searchable_file の両方が storage から消えることを固定）。
 
---- core/widgets.py ---
-[済] PopupSelectWidget.render（改ざんされた非数値pkを無視して例外を出さないこと）は
-     core/tests.py PopupSelectWidgetTamperResistanceTestsで直接カバー。value_from_datadict/
-     format_value自体もdocuments/contracts.SearchQuerysetTests等のPopupSelectWidget経由の
-     検索フォーム送信で間接的に動作確認されている。
-[無] InlineRadioSelect.render（`checked`属性の付与、ラップ要素無しの全角スペース区切り構造）を
-     直接検証するテストが無い。apply_radio_defaultsの未検証分岐と対になっており、
-     「初回アクセス時に原本通りchecked状態で表示される」という原本フィデリティ監査由来の
-     修正（core/forms.py該当コメント参照）が回帰しても検知できない。
+No.8  対象: purge_expired_audit_logs の設定可変性・境界
+      優先度: 低
+      理由: AUDIT_LOG_RETENTION_MONTHS を @override_settings で変えたときコマンドの削除範囲が
+            追随することは（一覧側 test_retention_cutoff_is_configurable はあるが）コマンド
+            自体では未検証。また cutoff 当日のログが `__lt` で残ること（No.5 と対）も未固定。
+      → 見送り／理由: 優先度「低」。コマンドとフィルタは同じ retention_cutoff_date() を共有し、
+        フィルタ側の可変性テスト（test_retention_cutoff_is_configurable）で下限計算はカバー済み。
+        No.5 と同じく境界突き合わせの回帰リスクが低い。
 
---- core/scoping_services.py ---
-[済] scoped_get_object_or_404（部署スコープ外pkの404化、logger.warning記録、
-     entity_nameによるログ文言の出し分け、scope_queryset差し替え）は、
-     documents/contracts.tests.DepartmentScopeAccessControlTests（"文書"/"契約書"）、
-     masters.tests.（"分類"側はentity_name含め直接検証、"カテゴリー"側は404ステータスのみ）
-     から幅広く間接カバーされている。masters側カテゴリーのログ文言差分の抜けは
-     review_test_organizations_masters.txtで既出のため本レポートでは重複記載しない。
+================================================================================
+■ (4) 二重送信対策
+================================================================================
+[済] 間接カバー（厚い）
+     organizations / masters / permissions / accounts 各 tests.py のトークン不正時分岐、
+     core/tests.py OtherViewsDoubleSubmitTokenTests（OtherSettings/OtherMainEdit/OtherLogout の
+     3画面、2026-09-10 に reject_if_resubmitted へ集約後）、
+     documents/contracts UploadStep2 の consume_token 失敗経路。
 
---- core/upload_services.py ---
-[済] save_pending_files（mkdir失敗・書き込み失敗時のロールバック）、open_pending_file
-     （存在しないファイルの例外変換）、clear_pending_files（削除失敗時も処理継続）、
-     save_upload_chunk/combine_upload_chunks（チャンク欠落・サイズ超過・パストラバーサル対策・
-     セッション追記の合流）は、core/tests.py UploadServicesErrorHandlingTests・
-     ChunkUploadServiceTestsで直接・網羅的にカバーされている。documents/contracts.
-     ChunkUploadAPITestsのView経由テストとあわせて二重にカバーされている箇所も多い。
+No.9  対象: core/double_submit.py の3関数の直接単体テスト
+      優先度: 低
+      理由: View 経由の間接カバーは十分だが、関数レベルの独立分岐が未固定：
+            (a) issue_token が同一 form_id を上書きする（旧トークンが無効化される）、
+            (b) consume_token 成功時に即座に del され2回目は False（戻る＋再送信を弾く中核）、
+            (c) reject_if_resubmitted が pk 付き redirect 引数（`redirect_to, pk=pk`）を
+            そのまま透過する。2026-09-10 に (c) が core の3画面の唯一経路になったため、
+            最低限 (c) の引数透過は1件持っておきたい。
+      → 見送り／理由: 優先度「低」。(a)(b)(c) はいずれも organizations/masters/permissions/accounts
+        および core.OtherViewsDoubleSubmitTokenTests の View 経由テストで実挙動が固定済みで、
+        (c) の pk 付き redirect も masters:class_edit 等の編集フローで通っている。
 
---- core/upload_views.py ---
-[済] BaseChunkUploadAPIView（不正キー欠落時400、upload_id形式チェック、正常完了）は
-     documents.tests.ChunkUploadAPITestsで直接検証。
-     [部分] contracts.tests.ChunkUploadAPITestsには不正リクエスト400分岐の対応するテストが
-          無い（review_test_doc_contract.txt指摘9で既出、完全共有コードのため実害は小さいと
-          判断され見送り済み）。
-[済] BaseUploadStep1View（ファイル未選択エラー、チャンク経由登録済み分での続行、
-     PendingFileStorageError時のエラー表示）はdocuments/contracts双方のUploadStep2系テストで
-     間接的にカバーされている。
-[済] BasePendingPreviewView（ダウンロード権限が無い場合のPermissionDenied、index範囲外の404、
-     PendingFileStorageError時の404変換）はdocuments/contracts.ImagePreviewTestsで
-     間接的にカバーされている。
+No.10 対象: core/bulk_edit_views.py BaseBulkEditView.post の consume_token 失敗分岐
+            （bulk_edit_views.py:145-147、reject_if_resubmitted ではないインライン実装）
+      優先度: 中
+      理由: documents/contracts の BulkEditViewTests に、一括編集「更新」POST で
+            トークン不一致 → messages.error ＋ bulk_edit_url へ redirect ＋ ステージ内容が
+            確定されないこと、を検証するテストが無い。UploadStep2 の同種テストはあるが
+            別 View・別 form_id（"<app>_bulk_edit"）で、確定処理を握るこの分岐が空白。
+      → 追加済み（core.tests.BaseBulkEditViewCoreTests.
+        test_update_post_with_invalid_token_aborts_without_committing。documents.views.BulkEditView
+        を HTTP で叩き、トークン不一致の「更新」POST が bulk_edit_url へ redirect＋messages.error＋
+        DB 無変更＋監査ログ無し＋セッション状態保持、を固定）。
 
---- core/record_views.py ---
-[済] BaseFileServeView（ダウンロード/プレビュー権限チェック、OSError時の404変換、
-     成功時の監査ログ記録）はdocuments/contracts.DownloadViewTests/PreviewViewTestsで
-     直接・網羅的にカバー。
-     [無] `audit_extra_kwargs`（documents側のpersonal_info_flag付与）自体の値を監査ログから
-          検証するテストが無い（DownloadViewTests.test_download_creates_audit_logはaction/
-          employee_no/event_messageのみ確認し、personal_info_flagは見ていない）。
-[済] BaseBulkDownloadView（未選択時リダイレクト、権限チェック、不正pks除外、部署スコープ外の
-     静かな除外、ファイル実体欠損時のmissing_count・messages.warning、監査ログ記録）は
-     documents.tests.BulkDownloadViewTestsで網羅的にカバー。
-     [部分] contracts.tests.BulkDownloadViewTestsには未選択時リダイレクトの対応するテストが
-          無い（review_test_doc_contract.txt指摘5で既出、完全共有コードのため見送り済み）。
-[済] BaseDeleteView（AJAX/非AJAX双方の404・権限拒否・削除不可拒否、DBError時のJSON/
-     redirectフォールバック）はdocuments/contracts.DeleteViewAjaxTestsで両アプリとも
-     DBError分岐まで含め直接カバー（review_test_doc_contract.txt指摘1対応で追加済み）。
+================================================================================
+■ (5) お知らせ集計
+================================================================================
+[済] get_notice_counts 文書側
+     NoticeCountsTests：expired / expiring_soon / far-future 非計上 / recently_deleted、
+     一般職員の自部署のみ、DepartmentViewScope 反映（文書）、
+     EXPIRING と DELETED しきい値の独立性。
+[済] get_notice_counts 契約書側
+     契約書の expired / expiring_soon / recently_deleted、一般職員の他部署契約書 非計上。
+[済] is_expiring_soon（期限切れ済み / 閾値内 / 遠い将来）、
+     add_months の月末クランプ・うるう年（AddMonthsClampTests）、
+     メイン画面のしきい値文言表示（MenuViewNoticeThresholdDisplayTests）、2列レイアウト。
 
---- core/master_views.py ---
-（organizations/masters棚卸しで除外された分の裏返しとして今回対象。masters/tests.pyは
-review_test_organizations_masters.txt作成後の2026-08-26に大幅追加されており、以下は
-その最新状態を確認した結果）
-[済] BaseScopedMasterListView（部署スコープ絞り込み、検索フォーム適用、department列複合ソート
-     のis_adminゲート、文書/契約書双方のitem_count集計、default_order_by、group列複合ソートの
-     asc方向）はmasters.tests.の一連のGroupListView/CategoryListViewテスト群で、文書・契約書
-     双方のdoc_kbnを対象に手厚くカバーされている。
-     [無] CategoryListView.apply_special_sort（"group"列複合ソート）のdesc方向のみ未検証
-          （review_test_organizations_masters.txt低優先度No.18として既出、見送り済み）。
-[済] BaseScopedMasterRegistView（部署自動設定/管理者選択必須、監査ログ記録内容、
-     IntegrityError時のフレンドリーメッセージ、二重送信トークン不正時分岐）は
-     Group/Category双方についてmasters.tests.MasterIntegrityErrorViewTests・
-     二重送信対策専用テストクラスで直接カバー。
-[済] BaseScopedMasterEditView（部署スコープ外への404、正常更新・監査ログ内容、
-     IntegrityError時のフレンドリーメッセージ、二重送信トークン不正時分岐）は
-     masters.tests.MasterEditIntegrityErrorViewTests（2026-08-26追加）でGroup/Category/
-     Retention全3画面分がIntegrityErrorまで含め直接カバーされている
-     （review_test_organizations_masters.txt作成時点では未検証だったが、その後の
-     対応記録で解消済み）。
-[部分] BaseScopedMasterDeleteView（blocking_count>0時の拒否、正常削除・監査ログ内容、
-     二重送信トークン不正時分岐）は直接カバーされている。
-     [無] `obj.save(update_fields=[...])`が`DBError`を送出した場合のフォールバック
-          （messages.error＋redirect、2026-08-26付コメントで「品質レビューで発見、
-          2026-08-26修正」と明記された最も新しい例外処理）を検証するテストがGroup/Category
-          いずれの削除確認画面にも無い。同種のBaseScopedMasterEditView側（save_or_none経由の
-          IntegrityError）は直接テストされているのに対し、削除確認画面のDBError分岐だけが
-          追加直後で回帰テストが伴っていない状態。
+No.11 対象: get_notice_counts 契約書側の DepartmentViewScope / 契約書-部門間閲覧設定による
+            「閲覧範囲内の他部署契約書は計上される」正の分岐
+      優先度: 中
+      理由: 文書側には test_other_department_document_counted_when_in_view_scope（正）が
+            あるが、契約書側は test_other_department_contract_not_counted_for_staff（負）
+            のみ。contract_searchable_department_ids が None 以外を返し、かつ他部署 pk を
+            含むケースでバッジ件数が検索画面と一致することが未検証。Rev1.1 の
+            契約書-部門間閲覧設定連動の裏付けが片肺。
+      → 追加済み（core.tests.NoticeCountsTests.
+        test_other_department_contract_counted_when_in_view_scope。DepartmentViewScope で他部署を
+        許可し、その部署の期限切れ契約書が expired_contracts に計上されることを固定）。
 
---- core/search_services.py ---
-[済] apply_sort（no/info/uploaderの複合ソート特殊扱い、その他フィールドの通常ソート）、
-     apply_word_filter（正規化icontains、AND/OR切替）、apply_freeword_filter
-     （title/memo/抽出本文3フィールドのOR結合＋複数語AND/OR）は、documents/contracts.
-     SearchSortTests・SearchQuerysetTestsから両アプリ・全分岐にわたって直接検証されている
-     （review_test_doc_contract.txtでも「[OK] core側共通実装のdocuments/contracts経由での
-     分岐カバレッジ」として言及済み）。
+No.12 対象: _expiry_counts / is_expiring_soon の「境界当日」帰属
+      優先度: 中
+      理由: expiry_date == today ちょうど（expired ではなく expiring_soon 側、Q は
+            `expiry_date__lt=today` と `expiry_date__gte=today`）、expiry_date == soon_limit
+            ちょうど（`__lte` で内側）、deleted_at == deleted_since ちょうど、is_expiring_soon の
+            閾値ちょうど。既存テストはすべて境界から1日以上離れた値で、当日の帰属が
+            未固定。お知らせ件数と検索結果件数の一致という設計目標に直結する off-by-one。
+      → 追加済み（core.tests.NoticeCountsTests.
+        test_expiry_and_deletion_boundary_days_belong_to_inclusive_side ＝ expiry_date==today /
+        ==soon_limit / deleted_at==deleted_since の3境界、
+        ＋ core.tests.IsExpiringSoonTests.test_threshold_boundary_day_is_expiring_soon ＝
+        閾値ちょうど・当日）。
 
---- core/notice_services.py ---
-[部分] get_notice_counts
-     文書側（expired/expiring_soon/recently_deleted、他部署除外、DepartmentViewScope反映、
-     しきい値の独立性）はcore/tests.py NoticeCountsTestsで手厚い。
-     [無] 契約書側のexpiring_soon_contracts/recently_deleted_contracts分岐、および
-          contract_searchable_department_idsによる契約書側の部署スコープ絞り込みは、
-          test_contract_counted_independently_of_documentがexpired_contractsのみを確認して
-          おり、それ以外の契約書側カウント・部署スコープは未検証（`_expiry_counts`自体の
-          ロジックは文書側で共有検証済みのため実害は小さいが、配線自体は未確認）。
-[済] is_expiring_soon（期限切れ済み/閾値内/遠い将来の3分岐）はIsExpiringSoonTestsで直接カバー。
-[部分] add_months / _days_in_month
-     NoticeCountsTests内で日数加減算の副次的な結果として間接的に実行されてはいるが、
-     いずれのテストケースも月末日（1/31等）やうるう年2月を跨ぐ入力を使っていないため、
-     `min(base.day, _days_in_month(...))`によるクランプ処理自体を検証したテストが無い。
+No.13 対象: core/middleware.py SessionIdleTimeoutMiddleware._get_timeout_minutes の
+            DB 例外フォールバック（2026-09-10 1e4f528 で `except Exception` →
+            `except DatabaseError` に限定）
+      優先度: 中
+      理由: SystemSetting.objects.first() のクエリ自体が DatabaseError を投げたとき
+            settings.SESSION_IDLE_TIMEOUT_MINUTES にフォールバックする分岐が未検証。
+            test_no_system_setting_falls_back_to_settings_value は「レコード0件」の別分岐。
+            例外種別を絞った直後で、絞りすぎ（別例外を漏らす）や握りつぶし範囲の回帰を
+            検知できない。※(5) ではないが notice と同じ core/middleware・自動ログアウト
+            機能のため本節に置く。
+      → 追加済み（core.tests.SessionIdleTimeoutMiddlewareTests.
+        test_database_error_on_query_falls_back_to_settings_value。SystemSetting.objects.first を
+        DatabaseError にし、settings 値でのフォールバック＝アイドル超過ログアウトと
+        logger.exception 記録を固定）。
 
---- core/double_submit.py ---
-[部分] issue_token/consume_token/reject_if_resubmitted
-     関数自体を直接呼ぶ単体テストはcore/tests.pyに無いが、organizations/masters/permissions/
-     accountsの各tests.pyが二重送信トークン不正時分岐を個別に検証しており、それらを通じて
-     広く間接カバーされている。ただし前述の通りcore/views.py自身の3画面（OtherSettingsView等）
-     だけはこの間接カバーの対象外のまま残っている。
+No.14 対象: get_notice_counts の管理者（can_select_department=True）分岐
+      優先度: 低
+      理由: 管理者は doc_qs を部署で絞らず全部署を計上する、という分岐を明示的に
+            アサートしたテストが無い（他テストのセットアップで暗黙に通ってはいる）。
+      → 見送り／理由: 優先度「低」。管理者全部署計上は複数テストのセットアップで暗黙に通っており、
+        No.11（他部署が閲覧範囲で計上される正の分岐）追加で非管理者側の絞り込みも明示化済み。
 
---- core/deletion_services.py ---
-[済] can_delete（7日境界の等号側を含む）、deletion_denial_message（is_deleted/期限超過での
-     文言分岐）は、documents/contracts.CanDeleteBoundaryTests・DeleteViewWindowTestsで
-     境界値まで含め両アプリから直接カバーされている（review_test_doc_contract.txtでも
-     「[OK]」として言及済み）。
+================================================================================
+■ (6) popup-select / detail 用 API 基底クラス
+================================================================================
+[済] core/api.py BaseOptionListAPIView
+     documents.tests.OptionsAPIViewTests / contracts.tests.OptionsAPIViewTests（HTTP経由）で、
+     type=dept/group/category/year の4種、invalid type での 400、未ログイン 302、
+     dept の 管理者/非管理者/PermissionProfile 未作成、group の visible_groups 有無、
+     category の doc_kbn 絞り込み、year の当年含む、を両アプリで検証。
+     department_kind="contract" 専用分岐（contract_searchable_department_ids）も
+     contracts 側で STAFF=自部署のみ / ADMIN=全部署 を個別検証。
 
---- core/storage_paths.py ---
-[済] build_hierarchical_upload_path（年・部署・カテゴリー階層化、searchable=Trueでの
-     サブディレクトリ分離、UUIDプレフィックス）は、documents.tests.StoragePathTests・
-     contracts.tests.StoragePathTestsで両アプリから直接カバーされている。
+No.15 対象: _department_items の「スコープ拡張で他部署が選択肢に1件足される」中間ケース
+      優先度: 中
+      理由: 両アプリの OptionsAPIViewTests は「STAFF=自部署のみ」「ADMIN=全部署」の
+            2択しか無い。非管理者に DepartmentViewScope（文書）／契約書-部門間閲覧設定
+            （契約書）で他部署が1件許可されたとき、その部署だけが popup 選択肢に加わる
+            （＝検索画面の絞り込み範囲と一致する）ことが未検証。コメントに明記された
+            「search_services.build_queryset() の絞り込み範囲と一致させる」保証が空白。
+      → 追加済み（core.tests.OptionListAPIScopeExtensionTests.
+        test_document_dept_options_add_one_department_from_view_scope ＝ DepartmentViewScope、
+        test_contract_dept_options_add_one_department_from_contract_view_setting ＝
+        contract_visible_departments。いずれも「自部署＋許可1件」だけが返り無関係部署は出ないこと）。
 
---- core/text_extraction_services.py ---
-[済] is_scanned（空/短文字列/十分な文字数の3分岐）、extract_text_layer/
-     try_immediate_text_layer_extraction（テキスト層抽出成功、スキャン文書での据え置き、
-     解析失敗時の非伝播）は、core/tests.py IsScannedTests・
-     TryImmediateTextLayerExtractionTests・ExtractPendingPdfTextCommandTestsで
-     直接・網羅的にカバーされている。
+No.16 対象: _scope_by_department（department_ids_for_group_scope による group/category の
+            自部署スコープ絞り込み）
+      優先度: 中
+      理由: visible_groups（権限）による絞り込みは test_type_group_filtered_by_visible_groups で
+            見ているが、「他部署の分類・カテゴリーは popup に出さない」部署スコープ層
+            （フォーム queryset 差し替えでは効かず API 本体で再適用している、とコメントで
+            強調されている分岐）を直接狙ったテストが無い。
+      → 追加済み（core.tests.OptionListAPIScopeExtensionTests.
+        test_document_group_options_exclude_other_department_groups /
+        test_document_category_options_exclude_other_department_categories。他部署 department の
+        Group/Category が type=group/category の popup 選択肢に出ないことを固定）。
 
---- core/text_normalization.py ---
-[済] strip_name_spaces/filter_by_full_name（全角/半角スペース除去による氏名検索）は
-     audit.tests.AuditLogListViewTests.test_filter_by_full_name_ignores_fullwidth_space・
-     accounts/permissions側の同種テストから間接的に広くカバーされている。
-[部分] normalize_for_search（NFKC正規化）
-     直接の単体テスト（`normalize_for_search("１２３")`のような入出力確認）は無いが、
-     documents.tests.SearchQuerysetTests（全角/半角混在タイトル検索）・
-     DocumentSaveNormalizationTestsで実質的に動作が検証されている。
+No.17 対象: _year_items / else 分岐の type=None（パラメータ完全欠落）
+      優先度: 低
+      理由: else 分岐 400 は "unknown" 文字列でのみ検証。`type` キー自体が無い場合
+            （None → else）は未検証。実害は小さいが分岐網羅としては欠け。
+      → 見送り／理由: 優先度「低」。None も "unknown" と同じ else 分岐（400＋logger.warning）へ
+        落ちるだけで、"unknown" ケースで実挙動は固定済み。
 
---- core/ocr_layout_services.py ---
-[済] extract_text_and_layout_via_ocr（OCR無効時の例外、5ページ超でもページ数分Vision APIを
-     呼ぶこと、1ページ失敗が他ページを止めないこと）、_get_lines/_get_textlines（座標ベースの
-     行復元）は、core/tests.py OcrLayoutServicesTestsで直接・網羅的にカバーされている。
+参考（指摘ではない）:
+  popup-detail 用の API「基底クラス」は現状 core に存在しない。DetailAPIView は
+  documents/api.py・contracts/api.py に個別実装され共通化されていない（両者の
+  DetailAPIViewTests でカバー、review_test_doc_contract.txt の範囲）。core 側は
+  context_processors.py が全画面共通の #popup-detail DOM（空欄プレースホルダ）を
+  提供するのみ。棚卸し対象としては「core に基底クラス無し」を記録するに留める。
 
---- core/pdf_text_embed_services.py ---
-[済] embed_textdatas_into_pdf（ページ数保持、対応textdatas無しページの素通し、1ページの
-     埋め込み失敗が全体を失敗させないこと）はcore/tests.py PdfTextEmbedServicesTestsで
-     直接カバーされている。
-
---- core/zip_services.py ---
-[済] build_zip_archive（ファイル実体欠損時のmissing_count計上、ZIP内容自体の正しさ）は
-     documents.tests.BulkDownloadViewTests.test_missing_file_entity_is_skipped_with_warning_
-     but_others_succeedで直接カバーされている（review_test_doc_contract.txtでも「[OK]」と
-     して言及済み）。
-
---- core/csv_services.py ---
-[済] sanitize_csv_cell/sanitize_csv_row（数式プレフィックス6種のエスケープ、非文字列値・
-     空文字の非変換）はcore/tests.py SanitizeCsvCellTestsで直接カバーされ、
-     audit/accounts/permissionsの各CSV出力テストからも間接的に二重にカバーされている。
-
---- core/file_type_services.py ---
-[済] is_image_filename（主要ラスター拡張子、SVG除外）はcore/tests.py IsImageFilenameTestsで
-     直接カバー。
-[済] is_pdf_filename/get_preview_kind（画像/PDF/該当無しの3分岐）は
-     documents/contracts.ImagePreviewTestsで間接的にカバーされている。
-
---- core/bulk_edit_services.py ---
-[済] resolve_ordered_pks（不正pks除外、全件無効・削除済みでの空リスト化）、
-     start_bulk_edit/get_bulk_edit_state/set_bulk_edit_index/clear_bulk_edit_state
-     （ウィザードの状態遷移、prevナビゲーションでの現ステップ保存）は、documents/contracts.
-     BulkEditViewTestsで両アプリからほぼ全分岐が直接カバーされている
-     （review_test_doc_contract.txt指摘2対応でcontracts側も追加済み）。
-     [無] resolve_ordered_pks内の「部署スコープ外pkの静かな除外」（`allowed_department_ids`に
-          よるフィルタ）だけを狙って検証するテストが無い（検索・ダウンロード側の部署スコープ
-          テストとは別軸のため、一括編集の選択対象という文脈での直接確認が無い。実装は
-          BaseBulkDownloadViewの同種フィルタと共通の考え方で、そちらは間接的に検証されている
-          ため実害は小さい）。
-
---- core/form_services.py ---
-[済] save_or_none（IntegrityError捕捉、transaction.atomic()によるロールバック後の後続処理
-     継続）は、masters.tests.MasterIntegrityErrorViewTests（Regist側3画面）・
-     MasterEditIntegrityErrorViewTests（Edit側3画面、2026-08-26追加）でGroup/Category/
-     Retentionの計6画面から網羅的にカバーされている。
+================================================================================
+■ 範囲外だが今回発見した新規の空白（core、2026-09-10 の改修由来）
+================================================================================
+No.18 対象: core/bulk_edit_views.py BaseBulkEditView._committable_pks / _commit の
+            「ウィザード開始後に状況変化した pk を確定時に静かに除外」分岐
+            （2026-09-10 bbe79c7 で新設）
+      優先度: 高
+      理由: (a) 開始後に管理者が閲覧部署範囲を縮小 → 他部署レコードへのステージ済み
+            編集/削除が確定される、(b) 別タブ/他ユーザーが対象を論理削除した後に「更新」
+            → ゴミ箱内レコードに編集＋監査ログ、という2シナリオを塞ぐためのセキュリティ
+            修正。開始時除外（resolve_ordered_pks、test_bulk_edit_start_silently_excludes_
+            deleted_pk）のテストはあるが、確定経路（_committable_pks による
+            is_deleted=False ＋ dept_ids_resolver 再適用、dropped の logger.warning）は
+            documents/contracts のどちらの BulkEditViewTests にも対応テストが無い。
+            新設分岐かつ IDOR 的経路の遮断が目的のため優先度が高い。
+      → 追加済み（core.tests.BaseBulkEditViewCoreTests.
+        test_commit_drops_pk_that_left_department_scope_after_wizard_start ＝ シナリオ(a)、
+        test_commit_drops_pk_logically_deleted_after_wizard_start ＝ シナリオ(b)。いずれも確定時に
+        対象が除外され DB 無変更・「更新」監査ログ無し・dropped の logger.warning を固定）。
 
 ================================================================================
 ■ 優先度別まとめ
 ================================================================================
+反映状況（2026-09-10。「高」「中」は通し番号順に1件ずつ追加し、都度
+`manage.py test audit core` で確認。「低」は見送り＝理由を各節に付記）。
+`manage.py test audit core` = 182件 全PASS（追加前 167 → +15）。
+`manage.py test`（全体）= 別途実行し全PASS（下記コミットに同梱）。
 
-[優先度: 高]
-1. core/middleware.py SessionIdleTimeoutMiddlewareが完全に無検証（アイドル判定・自動ログアウト
-   実行・SystemSetting未設定時のフォールバック）。自動ログアウトは全ユーザーに横断適用される
-   セキュリティ機能であり、他アプリ経由の間接カバーが原理的に成立しない箇所のため優先度が高い。
-2. core/views.py OtherSettingsView.post/OtherMainEditView.post/OtherLogoutEditView.postの
-   二重送信トークン不正時分岐が3画面とも未検証。organizations/masters/permissions/accounts側は
-   既に対応済みのパターンだが、core自身が実装元のこの3画面だけが取り残されている。
-3. audit/services.py filter_audit_log_querysetのdate_start/date_end（日付範囲検索）が
-   一度も検証されていない。フォーム定義の先頭2フィールドであり、操作履歴の期間絞り込みという
-   基本機能が無検証のまま。
-4. core/master_views.py BaseScopedMasterDeleteView.postのDBErrorフォールバック
-   （2026-08-26に品質レビューで発見・追加されたばかりの例外処理）に対応する回帰テストが
-   Group/Categoryいずれの削除確認画面にも無い。兄弟のEdit側（save_or_none経由の
-   IntegrityError）は既にテスト済みで、削除側だけが新しく空白になっている。
+[高] すべて追加済み
+  No.6  [追加済] purge_expired_deleted_records の except DBError（1件失敗で他対象を止めない設計）
+  No.18 [追加済] bulk_edit_views _committable_pks（開始後スコープ外/論理削除 pk の確定時除外）
 
-[優先度: 中]
-5. core/notice_services.py get_notice_countsの契約書側（expiring_soon_contracts/
-   recently_deleted_contracts、contract_searchable_department_idsによる部署スコープ）が
-   expired_contracts以外ほぼ未検証。Rev1.2で契約書もお知らせ集計対象になった機能の裏付けが薄い。
-6. core/views.py OtherSettingsView.post/OtherMainEditView.postのDB書き込み失敗
-   （IntegrityError/DatabaseError）分岐が未検証（正常系・バリデーションエラー系は厚いが、
-   DB境界の異常系がここでも手薄）。
-7. core/notice_services.py add_months/_days_in_monthの月末日クランプ（1/31→2/28等）・
-   うるう年を踏む入力での直接検証が無い。
-8. core/forms.py apply_radio_defaults・core/widgets.py InlineRadioSelectの「初回アクセス時に
-   原本通りchecked状態で表示される」分岐が、documents/contracts双方のSearchForm系テストが
-   常にtitle_match等を明示指定しているため一度も経由されていない。
-9. core/record_views.py BaseFileServeView.audit_extra_kwargs（documents側のpersonal_info_flag
-   付与）の値自体を監査ログから検証するテストが無い。
-10. core/models.py UuidPrefixedFilenameMixin.display_nameが、RelatedFile側は直接検証されて
-    いるがDocument/Contract本体側では値自体を確認するテストが無い（ダウンロード成否のみ確認）。
-11. core/master_views.py CategoryListView.apply_special_sortの"group"列desc方向が未検証
-    （review_test_organizations_masters.txt低優先度No.18として既出、見送り済み）。
+[中] すべて追加済み
+  No.2  [追加済] purge_expired_deleted_records 監査ログの personal_info_flag 伝播
+  No.4  [追加済] add_months の負符号＋年跨ぎ（retention_cutoff_date / purge の起点日計算）
+  No.7  [追加済] purge_expired_deleted_records の searchable_file 実体削除分岐
+  No.10 [追加済] BaseBulkEditView.post の consume_token 失敗分岐
+  No.11 [追加済] 契約書お知らせ集計の DepartmentViewScope 正の分岐
+  No.12 [追加済] _expiry_counts / is_expiring_soon の境界当日の帰属
+  No.13 [追加済] SessionIdleTimeoutMiddleware._get_timeout_minutes の DatabaseError フォールバック
+  No.15 [追加済] _department_items のスコープ拡張中間ケース
+  No.16 [追加済] _scope_by_department の部署スコープ層の直接検証
 
-[優先度: 低]
-12. audit/models.py AuditLog.__str__、GinIndex定義自体（DB制約と同様、実害の乏しいインフラ
-    設定として他レポートでも低優先度扱い）。
-13. audit/forms.py AuditLogSearchFormのdate_start/date_end widget自体の単体テスト
-    （上記優先度高3の裏返し、View/services経由での対応が先）。
-14. core/double_submit.py issue_token/consume_token/reject_if_resubmitted自体の直接単体
-    テストが無い（他アプリのView経由で広く間接カバー済みのため、他レポートと同様に低優先度）。
-15. core/text_normalization.py normalize_for_searchの直接単体テスト（NFKC正規化の入出力）が
-    無い（View経由で実質カバー済み）。
-16. core/bulk_edit_services.py resolve_ordered_pksの部署スコープ外pk除外だけを狙った
-    専用テストが無い（BaseBulkDownloadViewの同種フィルタで間接カバー済み）。
-17. core/upload_views.py BaseChunkUploadAPIView・core/record_views.py BaseBulkDownloadViewの
-    一部分岐がcontracts側テストのみ欠けている（review_test_doc_contract.txt指摘5・9として
-    既出、完全共有コードのため見送り済み）。
+[低] すべて見送り（理由は各節の「→ 見送り／理由」参照）
+  No.1  [見送り] log_denied_cross_department_access の直接単体テスト
+  No.3  [見送り] BaseBulkEditView._commit 監査ログの action/フラグ アサート
+  No.5  [見送り] 保持下限「当日ちょうど」のログ帰属（一覧 gte / purge lt の対）
+  No.8  [見送り] purge_expired_audit_logs のコマンド自体の設定可変性・境界
+  No.9  [見送り] core/double_submit.py 3関数の直接単体テスト
+  No.14 [見送り] get_notice_counts 管理者（全部署計上）分岐の明示アサート
+  No.17 [見送り] BaseOptionListAPIView の type=None（キー欠落）分岐
