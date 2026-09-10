@@ -8,8 +8,15 @@ from django.utils import timezone
 from accounts.models import Employee, Position, Rank
 from contracts.models import Contract
 from documents.models import Document
-from masters.models import Category, DocKbn, Group, RetentionPeriod
-from organizations.models import Department
+from masters.models import (
+    Category,
+    DocKbn,
+    Group,
+    RetentionKbn,
+    RetentionPeriod,
+    RetentionPeriodUnit,
+)
+from organizations.models import Department, MenuItemSetting
 from permissions.models import PermissionProfile, PermissionRole
 
 logger = logging.getLogger(__name__)
@@ -37,8 +44,10 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         departments = self._seed_departments()
+        self._seed_menu_item_settings(departments)
         employees = self._seed_employees(departments)
         groups, categories = self._seed_masters()
+        self._seed_retention_periods()
         retention_periods = list(RetentionPeriod.objects.filter(kbn="document").order_by("display_order"))
 
         if Document.objects.filter(title__startswith=TEST_DATA_TITLE_PREFIX).exists():
@@ -79,14 +88,17 @@ class Command(BaseCommand):
 
         specs = [
             # (employee_no, name, department, rank, position, role, is_retired)
+            # 職員番号1（菅 理太郎）は本番では手動作成・パスワード手動運用の管理者だが、フレッシュDBでも
+            # seed_test_data だけで動作確認を完結できるよう get_or_create で用意する（既存があればそのまま
+            # 使い、パスワード等は上書きしない）。原本HTMLのログインユーザー固定表示「総務部｜菅 理太郎」に
+            # 対応する。
+            ("1", "菅 理太郎", honten_somu, Rank.KOSAYAKU, Position.KACHO, PermissionRole.ADMIN, False),
             ("9002", "係長 花子", honten_eigyo, Rank.CHOSAYAKU, Position.KAKARICHO, PermissionRole.MANAGER, False),
             ("9003", "一般 次郎", yame_gyomu, Rank.SHUJI, Position.IPPAN, PermissionRole.STAFF, False),
             ("9004", "退職 三郎", honten_somu, Rank.SENNIN, Position.SENNIN, PermissionRole.STAFF, True),
-            # 職員番号1（菅 理太郎）は手動作成の管理者アカウントでパスワードが手動運用のため、
-            # 管理者権限の画面確認をパスワード変更無しで行えるよう固定パスワードの管理者を追加。
             ("9005", "管理 四郎", honten_somu, Rank.KOSAYAKU, Position.KACHO, PermissionRole.ADMIN, False),
         ]
-        employees = {"9001": Employee.objects.get(employee_no="9001"), "1": Employee.objects.get(employee_no="1")}
+        employees = {}
         for employee_no, name, department, rank, position, role, is_retired in specs:
             employee, created = Employee.objects.get_or_create(
                 employee_no=employee_no,
@@ -105,6 +117,47 @@ class Command(BaseCommand):
                 logger.info("職員を作成しました: %s", employee)
             employees[employee_no] = employee
         return employees
+
+    def _seed_menu_item_settings(self, departments):
+        """メイン画面のボタン表示制御（screen-other-main「メイン画面項目」、通常は設定画面で登録）。
+        未設定の部署は全ボタン非表示（xlsx その他設定!B73）＝seed 直後にメイン画面から何も操作
+        できないため、動作確認用に電子決裁以外を全て表示にしておく（get_or_create で再実行しても
+        既存設定は上書きしない）。"""
+        for dept in departments.values():
+            MenuItemSetting.objects.get_or_create(
+                department=dept,
+                defaults={
+                    "show_search_document": True,
+                    "show_search_contract": True,
+                    "show_search_eapproval": False,
+                    "show_storage_document": True,
+                    "show_storage_contract": True,
+                },
+            )
+
+    def _seed_retention_periods(self):
+        """文書用の保存期間設定（screen-retention-doc、通常は保存期間設定マスタ画面で登録する）。
+        seed_test_data だけでフレッシュDBの動作確認を完結させるため、テスト文書 specs が使う
+        1年/3年/5年/6年/10年/永年 を用意する（get_or_create で再実行しても重複しない）。"""
+        specs = [
+            (1, RetentionPeriodUnit.YEAR, 1),
+            (3, RetentionPeriodUnit.YEAR, 2),
+            (5, RetentionPeriodUnit.YEAR, 3),
+            (6, RetentionPeriodUnit.YEAR, 4),
+            (10, RetentionPeriodUnit.YEAR, 5),
+            (None, RetentionPeriodUnit.PERMANENT, 6),
+        ]
+        for period_value, period_unit, display_order in specs:
+            _, created = RetentionPeriod.objects.get_or_create(
+                kbn=RetentionKbn.DOCUMENT,
+                doc_name="",
+                period_value=period_value,
+                period_unit=period_unit,
+                is_deleted=False,
+                defaults={"display_order": display_order},
+            )
+            if created:
+                logger.info("保存期間設定を作成しました: %s%s", period_value or "", period_unit)
 
     def _seed_masters(self):
         group_specs = [
