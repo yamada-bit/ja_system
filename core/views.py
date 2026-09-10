@@ -14,7 +14,7 @@ from django.views import View
 from django.views.generic import TemplateView
 
 from audit import services as audit_services
-from core.double_submit import consume_token, issue_token
+from core.double_submit import issue_token, reject_if_resubmitted
 from core.forms import LogoutTimeForm, MenuItemSettingForm, OtherPassForm
 from core.notice_services import get_notice_counts
 from masters.models import SystemSetting
@@ -109,10 +109,9 @@ class OtherSettingsView(LoginRequiredMixin, View):
             )
             raise PermissionDenied("この画面では操作できません。")
 
-        submitted_token = request.POST.get("token", "")
-        if not consume_token(request.session, self.form_id, submitted_token):
-            messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
-            return redirect("core:other_settings")
+        resp = reject_if_resubmitted(request, self.form_id, "core:other_settings")
+        if resp is not None:
+            return resp
 
         form = OtherPassForm(request.POST, employee=request.user)
         if not form.is_valid():
@@ -204,10 +203,9 @@ class OtherMainEditView(LoginRequiredMixin, View):
         # xlsx B73「未設定・新規登録された部署のデフォルトは全てチェックボックスOFF状態」通り、
         # 未設定の部署は全項目Falseの新規レコードとして扱う。
         setting, _ = MenuItemSetting.objects.get_or_create(department=department)
-        submitted_token = request.POST.get("token", "")
-        if not consume_token(request.session, self.form_id, submitted_token):
-            messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
-            return redirect("core:other_main_edit", pk=pk)
+        resp = reject_if_resubmitted(request, self.form_id, "core:other_main_edit", pk=pk)
+        if resp is not None:
+            return resp
 
         form = MenuItemSettingForm(request.POST, instance=setting)
         if not form.is_valid():
@@ -251,10 +249,9 @@ class OtherLogoutEditView(LoginRequiredMixin, View):
 
     def post(self, request):
         setting, _ = SystemSetting.objects.get_or_create(pk=1)
-        submitted_token = request.POST.get("token", "")
-        if not consume_token(request.session, self.form_id, submitted_token):
-            messages.error(request, "二重に送信された可能性があるため処理を中断しました。もう一度やり直してください。")
-            return redirect("core:other_logout_edit")
+        resp = reject_if_resubmitted(request, self.form_id, "core:other_logout_edit")
+        if resp is not None:
+            return resp
 
         form = LogoutTimeForm(request.POST, instance=setting)
         if not form.is_valid():

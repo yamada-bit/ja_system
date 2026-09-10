@@ -1,282 +1,301 @@
-audit/core アプリ CLAUDE.md コーディング規約準拠監査
-対象: audit/{models,views,services,forms,urls,admin,apps,tests}.py
-      audit/migrations/*.py（0002まで）
-      core/{models,views,api,forms,widgets,middleware,urls,admin,apps,tests,test_runner}.py
-      core/{double_submit,scoping_services,upload_services,upload_views,record_views,
-      master_views,form_services}.py
-      core/{bulk_edit_services,csv_services,deletion_services,file_type_services,
-      notice_services}.py
-      core/{ocr_layout_services,pdf_text_embed_services,text_extraction_services,
-      text_normalization,search_services,storage_paths,zip_services}.py
-      core/templatetags/search_extras.py（対象一覧に明記は無いが core/*.py 全体把握のため追加確認）
-      core/management/commands/{seed_test_data,cleanup_temp_uploads,extract_pending_pdf_text,
-      purge_expired_deleted_records}.py
-      templates/audit/log_list.html, templates/base.html, templates/403.html
-実施日: 2026-08-26
-方式: CLAUDE.md「コーディング規約」の各項目ごとに全ファイルを読み込み突き合わせ。
-      あわせて `manage.py makemigrations --check --dry-run audit core` と
-      `manage.py test audit core`（115件）を実行し、モデル変更のマイグレーション漏れ・
-      現状のテスト全件PASSを確認済み（venv は ja_system直下、ja_pjの1階層上にあるため
-      `../venv/Scripts/python.exe` で実行した）。本レポートは棚卸しのみで、修正は行っていない。
-
-※ 前提として、core配下の多くのファイル（record_views.py/master_views.py/upload_views.py/
-  scoping_services.py/deletion_services.py/zip_services.py/bulk_edit_services.py/
-  csv_services.py/search_services.py/storage_paths.py/double_submit.py/form_services.py等）は
-  2026-08-25〜26の品質レビューで発見された「documents/contractsアプリ間の重複実装」を
-  coreへ集約する大規模リファクタリングの成果物であり、各docstringに集約前の重複箇所・
-  発見経緯が詳細に記録されている。本監査時点では既にこの集約が完了した状態を確認した。
-
 ================================================================================
-■ 総合評価
-================================================================================
-重大な規約違反は検出せず。CLAUDE.md「コーディング規約」の各項目はいずれも遵守されている。
-指摘は2件（低2）のみで、いずれも「違反」というより「改善余地」レベル。
-
-================================================================================
-■ 規約項目ごとのチェック結果
+CLAUDE.md 規約準拠監査レポート : audit / core アプリ
+実施日: 2026-09-10
+対象: audit/ 全ファイル、core/ 全ファイル（templatetags・management/commands・migrations 含む）
+種別: レポートのみ（修正なし）
 ================================================================================
 
-[OK] ビューはCBVのみ
-  audit/views.py（AuditLogListView/AuditLogCsvExportView）・core/views.py・core/api.py・
-  core/upload_views.py・core/record_views.py・core/master_views.pyとも、全てdjango.views.View/
-  TemplateViewを継承したクラスベースビュー。audit/urls.py・core/urls.pyともURLパターンは
-  `.as_view()`経由のみで、URLに直接紐付く関数ビューは無し（grep `def [a-z_]+\(request\)`で
-  core配下を確認したが該当無し）。
+■ 総評
+--------------------------------------------------------------------------------
+両アプリとも規約遵守度は総じて高い。特に以下は良好:
+  - ビューは全て CBV（audit/views.py、core/views.py、core/*_views.py の基底クラス群）。
+  - モデルの verbose_name / help_text / docstring / エラーメッセージは日本語で統一。
+  - コメントの「なぜ」が非常に手厚い（設計判断・既知の制約・レビュー経緯まで追跡可能）。
+  - 監査イベントは audit アプリに一元化。「成功操作＋他部署 URL 直打ち」は AuditLog、
+    「権限不足の拒否・pk 改ざん検出」は logger.warning 止まり、という規約の区分を厳密に踏襲。
+  - 一覧のページネーションは全て Django Paginator。静的ページャーの残存なし。
+  - 例外処理は bare except なし。広域 catch には理由コメントあり。
+  - 重複ロジックの core 集約（record_views / scoping_services / deletion_services /
+    zip_services / notice_services 等）が徹底されている。
+  - ユニットテストが厚い（core/tests.py 2088 行、audit/tests.py も網羅的）。
 
-[OK] verbose_name/help_text/エラーメッセージ/docstring の日本語統一
-  audit.models.AuditLogの全フィールドでverbose_name/help_textが日本語。core.models
-  （UuidPrefixedFilenameMixin/NormalizedTextFieldsMixin）はabstractモデルでフィールド自体を
-  持たないが、docstringは日本語で「なぜ」まで記述されている。audit/forms.py
-  AuditLogSearchForm・core/forms.py OtherPassForm/MenuItemSettingForm/LogoutTimeFormの
-  labels・エラーメッセージ、views.pyのmessages.error()/success()文言もすべて日本語で統一。
-
-[要確認] 設定のconfig/settings/base.py集約・.env経由読み込み
-  新規設定値自体はconfig/settings/base.pyに集約され、いずれも`env.int()`/`env.bool()`/`env()`
-  経由で読み込めるようになっている点は規約通り（詳細は指摘1参照）。ただし一部の設定値が
-  `.env.example`に記載されておらず、規約「.env.exampleにも追記する」を完全には満たしていない
-  （指摘1）。
-
-[OK] アップロードファイル本体の分離
-  `MEDIA_ROOT = Path(env("MEDIA_ROOT", default=str(BASE_DIR.parent / "storage" / "media")))`
-  （config/settings/base.py:123）でコード（ja_pj）と分離済み。core.upload_services（一時保存・
-  チャンク結合）・core.storage_paths（正式な保存パス）・core.zip_services（一括ダウンロード）は
-  いずれもこのMEDIA_ROOT配下で完結する。core.test_runner.IsolatedMediaTestRunnerがテスト実行中
-  のみMEDIA_ROOTを一時ディレクトリへ差し替える設計も、本番ストレージへのテスト汚染を防ぐ
-  規約に沿う正しい実装。
-
-[OK] パスワードハッシュはArgon2優先
-  config/settings/base.py PASSWORD_HASHERSはArgon2PasswordHasherが先頭
-  （97-101行目、並び順変更なし）。core.forms.OtherPassForm/core.views.OtherSettingsView.postは
-  `set_password()`/`check_password()`経由でのみパスワードを扱い、平文比較・平文保存は無い。
-  画面表示側も「現在のパスワード」を原本のように平文表示せずマスクにしている
-  （core/forms.py OtherPassForm docstring「ハッシュ化必須の規約上実際の値は表示不能」）。
-
-[OK] 監査ログの一元化（auditアプリ経由）
-  audit.services.log()/log_raw()自体が本項目の実装本体であり、設計は規約に沿う：
-  - log()は認証済みEmployeeからのスナップショット取得を一本化し、log_raw()は認証済み
-    Employeeを経由できない場面（ログイン失敗、バッチ実行）向けの下位関数として明確に
-    使い分けられている（docstringに用途が明記）。
-  - 記録失敗時は例外を握りつぶしログにのみ残す設計（「本質的でない処理の失敗で本処理を
-    巻き込まない」）だが、`logger.exception`で完全な無音失敗にはしていない
-    （audit/services.py:70-71）。
-  - core側の呼び出し箇所（core.views.OtherSettingsView/OtherMainEditView/
-    OtherLogoutEditView、core.record_views.BaseFileServeView/BaseBulkDownloadView/
-    BaseDeleteView、core.master_views.BaseScopedMasterRegistView/EditView/DeleteView）は
-    いずれもaudit_services.log()を通しており、DBへ直接書き込むだけで監査ログを素通りする
-    箇所は無い。
-  - core.management.commands.purge_expired_deleted_recordsは唯一の完全削除経路として
-    `audit_services.log_raw()`をBATCH_ACTOR_LABEL="(自動バッチ)"で記録しており、
-    自動化されたバッチ操作も監査対象から漏れていない。
-
-[OK] core相当の共通基底クラス・サービス関数への集約（重複排除）
-  概要冒頭の通り、2026-08-25〜26の集約作業により、documents/contracts間で重複していた
-  以下のロジックがcoreへ一本化されている（各ファイルのdocstringに集約前の重複箇所・
-  発見経緯が明記）：
-  - ダウンロード/プレビュー/一括ダウンロード/削除（core.record_views）
-  - マスタ一覧/登録/編集/削除の部署スコープ付き共通実装（core.master_views、
-    masters.Group/Category向け）
-  - アップロードステップ1/保留プレビュー（core.upload_views）
-  - 二重送信対策の定型パターン（core.double_submit.reject_if_resubmitted）
-  - IntegrityError捕捉付きsave()（core.form_services.save_or_none）
-  - 部署スコープ絞り込み404（core.scoping_services.scoped_get_object_or_404）
-  - ソート/検索フィルタ（core.search_services）、保存先パス生成（core.storage_paths）、
-    ZIP構築（core.zip_services）、削除可否判定（core.deletion_services）、一括編集の
-    セッション状態（core.bulk_edit_services）、CSVインジェクション対策
-    （core.csv_services.sanitize_csv_row、audit.views.AuditLogCsvExportViewでも使用）
-  この重複排除自体が「品質レビューで発見」として各docstringに記録されており、規約
-  「共通処理はcore相当の共通基底クラス・サービス関数に集約し、アプリ間で重複するロジックを
-  増やさない」の実践として機能している。
-
-  1点、軽微な非対称性を発見した（指摘2）：core.notice_services.get_notice_counts()は
-  `from documents.models import Document`をモジュール冒頭でトップレベルimportする一方、
-  `from contracts.models import Contract`は関数内での遅延importにしている。documents.models/
-  contracts.modelsのimport文を確認したが、いずれも`core.models`のみに依存しており
-  循環importの原因になり得る非対称な理由が見当たらない。CLAUDE.mdの「なぜ」重視のコメント
-  文化からすると、この非対称を選んだ理由の説明が無いのは他のcore配下ファイルの丁寧さと
-  比べて浮いている（動作上の問題ではない）。
-
-[OK] コメントは「なぜ」を詳しく書く
-  audit/core全体にわたり、xlsxの該当セル番地・過去のユーザー指示日・重複発見の経緯（2026-08-25
-  品質レビュー等）・他ファイルとの対称性の理由等、非自明な設計判断の「なぜ」が極めて丁寧に
-  記録されている。特にcore.ocr_layout_services/core.pdf_text_embed_servicesは移植元
-  （jafyame_pj）の関数名まで明記し、core.upload_services/core.master_viewsは「1件の失敗で
-  全体を止めない」設計判断のたびに理由を書き分けている。「何をしているか」の説明に留まる
-  コメントはほぼ見当たらない。唯一、指摘2のnotice_services.pyの非対称importのみ「なぜ」の
-  説明が欠けている。
-
-[OK] ログの整備
-  audit/views.py・audit/services.py、core配下24ファイル中ほぼ全てで
-  `logger = logging.getLogger(__name__)`を用意し、権限拒否（OtherSettingsView.post、
-  OtherMainEditView/OtherLogoutEditView.dispatch、core.record_views.BaseFileServeView/
-  BaseBulkDownloadView/BasePendingPreviewView）、想定外のtype値（core.api.
-  BaseOptionListAPIView）、改ざんの兆候（core.widgets.PopupSelectWidget、core.record_views.
-  BaseBulkDownloadView、core.bulk_edit_services.resolve_ordered_pks）、削除できない対象への
-  削除試行（core.record_views.BaseDeleteView、core.master_views.
-  BaseScopedMasterDeleteView）といったセキュリティ上意味のある事象をlogger.warningで
-  記録している。core.text_normalization/core.file_type_services/core.storage_paths/
-  core.deletion_servicesはlogger未定義だが、いずれも純粋関数のみでエラーパス・警告対象の
-  分岐が存在しないモジュールのため妥当（違反ではない。過去のpermissions/accounts監査での
-  models.py判断と同じ扱い）。
-
-[OK] 例外処理の完成度
-  bare `except:`はaudit/core配下に0件（grep確認済み）。以下、代表的な捕捉パターンが規約に
-  沿っている：
-  - core.upload_services.save_pending_files/save_upload_chunk/combine_upload_chunks/
-    open_pending_file/clear_pending_files：`OSError`を具体的に捕捉し`logger.exception`で
-    記録した上で`PendingFileStorageError`/`ChunkUploadError`にラップして送出。ロールバック
-    処理自体の失敗も握りつぶす理由がコメントされている（73行目）。
-  - core.record_views.BaseFileServeView：`OSError`（FileNotFoundError/PermissionError双方の
-    親クラス）を捕捉しHttp404に変換、理由を明記。
-  - core.record_views.BaseDeleteView：`DBError`を捕捉しAJAX/非AJAXで応答形式を出し分け。
-  - core.zip_services.build_zip_archive：`FileNotFoundError`を1件ずつ捕捉し欠損件数を返す
-    設計（「本質的でない処理の失敗で本処理まで巻き込まない」の典型例）。
-  - core.ocr_layout_services/core.pdf_text_embed_services：1ページ単位で広めの`Exception`を
-    意図的に捕捉（「なぜ広く捕捉するか」がコメントに明記）し、他ページの処理を継続。
-  - core.management.commands.extract_pending_pdf_text/purge_expired_deleted_records：
-    「1件の失敗でバッチ全体を止めない」という設計方針自体がdocstringに明記された上で、
-    `OperationalError`/`InterfaceError`/`DBError`等の具体的な例外型を捕捉している。
-  - audit.services.log_raw：`Exception`を捕捉し`logger.exception`で記録した上で握りつぶす
-    設計だが、理由（「監査ログの記録失敗で本処理まで失敗させたくない」）がdocstringに明記
-    されている。
-  いずれも「握りつぶす場合は理由をコメントに明記する」という規約を満たしている。
-
-[OK] 一覧画面のページネーションはDjango Paginator
-  audit.views.AuditLogListView（PAGE_SIZE=100）・core.views.OtherSettingsView._render_main
-  （PAGE_SIZE=100、部署一覧）ともDjango Paginator使用。templates/audit/log_list.htmlの
-  «/＜/＞/»ボタンはpage_obj.has_previous/has_nextに連動したdisabled切替で、「機能しない
-  静的ページャー」には該当しない。audit.tests.AuditLogListViewTests.
-  test_pagination_splits_across_pagesがPaginatorの実際の分割動作（101件→2ページ）を
-  回帰テストとして保持している点も評価できる。
-
-[OK] 未実装機能のdisabled+title、alert()誤魔化しの禁止
-  templates/audit配下・templates/base.html・templates/403.htmlのいずれにも
-  `alert()`によるボタン誤魔化しは無い（grep確認済み）。core.widgets.PopupSelectWidgetは
-  disabled時に「選択」ボタン自体を描画しない設計（97-100行目のdisabled分岐）で、規約が
-  求める「未実装機能ではなく権限起因の非表示」を適切に扱っている。audit/core配下に
-  未実装機能を残しているUI箇所自体が見当たらなかった（電子決裁関連はpermissions/
-  masters側の管轄でありaudit/coreのスコープ外）。
-
-[OK] ファイル役割分担
-  auditアプリはmodels.py/views.py/services.py/forms.py/urls.py/admin.py/apps.py/tests.pyの
-  標準構成（AJAX専用エンドポイントを持たないためapi.pyは無し、規約通り「実装が伴わない
-  ファイルを置かない」判断として妥当）。coreアプリは規約が明示的に許容する「共通基盤なので
-  独自ファイルが多い」パターンに該当し、record_views.py/master_views.py/upload_views.py/
-  scoping_services.py等、documents/contracts双方から呼ばれる基底クラス・共通サービスを
-  機能単位でファイル分割している。views.py（core/views.py）自体にはOtherSettingsView等の
-  薄いビューのみが残り、ファイルI/O・DB操作を伴うロジックはaudit_services/upload_services/
-  form_services等へ委譲されており、ビューへのビジネスロジック直書きは見当たらない。
-
-[OK] Djangoテンプレートの複数行コメント既知の落とし穴
-  templates/audit・templates/base.html・templates/403.htmlに`{# ... #}`形式の複数行コメントは
-  無い（grep確認済み。base.htmlの`{# ... #}`は全て1行で完結している）。base.html 50-55行目は
-  むしろこの既知の落とし穴を意識した実装になっており、複数行にわたる説明コメント
-  （「ユーザー依頼〈2026-08-12〉で追加した実プレビュー...」）を`{% comment %}...
-  {% endcomment %}`で囲った上で、その内側に（Django側では中身を一切パースしないため
-  無害な）`{# #}`表記のメモを残している。複数行コメントの罠を正しく回避した実装例と
-  言える。
+以下は逸脱・不整合の指摘。高:0 / 中:2 / 低:9。
 
 ================================================================================
 ■ 指摘一覧
 ================================================================================
 
 --------------------------------------------------------------------------------
-[低] 一部の.env経由設定値が.env.exampleに記載されていない
+No.1  [中]  二重送信トークン処理の共通ヘルパー未使用
 --------------------------------------------------------------------------------
-対象:
-  - config/settings/base.py:158 `SESSION_IDLE_TIMEOUT_MINUTES = env.int(...)`
-    （core.middleware.SessionIdleTimeoutMiddlewareが使用）
-  - config/settings/base.py:123 `MEDIA_ROOT = Path(env("MEDIA_ROOT", ...))`
-  - config/settings/base.py:204 `LOG_DIR = Path(env("LOG_DIR", ...))`
-  - .env.example（上記3つのキーがいずれも記載無し）
+対象ファイル:
+  core/views.py
+    - OtherSettingsView.post        (112-115行)
+    - OtherMainEditView.post        (207-210行)
+    - OtherLogoutEditView.post      (254-257行)
+
+根拠（規約）:
+  「共通処理は core 相当の共通基底クラス・サービス関数に集約し、アプリ間で重複する
+   ロジックを増やさない。」
 
 内容:
-  CLAUDE.md「新しい設定値は...env(...)経由で.envから読み込めるようにし、.env.exampleにも
-  追記する」の後半（.env.exampleへの追記）が一部満たされていない。他の設定値
-  （MAX_UPLOAD_SIZE_BYTES/CHUNK_UPLOAD_MAX_SIZE_BYTES/STALE_TMP_UPLOAD_THRESHOLD_HOURS/
-  NOTICE_EXPIRING_THRESHOLD_MONTHS/NOTICE_DELETED_THRESHOLD_MONTHS/CONTRACT_RETENTION_YEARS/
-  OCR_ENABLED/GOOGLE_APPLICATION_CREDENTIALS/POPPLER_PATH/OCR_EMBED_TEXT_TO_PDF）は
-  いずれもコメント付きで.env.exampleに記載されているのに対し、SESSION_IDLE_TIMEOUT_MINUTES・
-  MEDIA_ROOT・LOG_DIRの3つだけ抜けている。
+  上記3ビューはいずれも
+      submitted_token = request.POST.get("token", "")
+      if not consume_token(request.session, self.form_id, submitted_token):
+          messages.error(request, "二重に送信された可能性があるため…")
+          return redirect(<自分自身>)
+  という4行パターンを手書きしている。core/double_submit.py の
+  reject_if_resubmitted() は「同一の4行パターンが11箇所重複していたため集約」と
+  docstring に明記されており、core/master_views.py（BaseScopedMasterRegistView/
+  EditView/DeleteView）では実際に使用されている。3つの redirect 先はいずれも
+  クエリ文字列なしの単純な redirect(name) / redirect(name, pk=pk) であり、
+  reject_if_resubmitted の引数でそのまま表現できるため、集約漏れと判断する。
 
-  特にSESSION_IDLE_TIMEOUT_MINUTESはcore.middleware.SessionIdleTimeoutMiddlewareが
-  `masters.SystemSetting`未設定・DB未接続時のフォールバック値として直接参照する設定であり、
-  今回の監査対象（core）に直接関わる。MEDIA_ROOT/LOG_DIRは監査対象の枠を超えたより
-  基盤寄りの設定だが、core.upload_services/core.test_runner/LOGGING設定と密接に関わるため
-  参考として合わせて記載する。
-
-  実害は小さい（いずれもデフォルト値で動作するため未記載でも即座に問題は起きない）が、
-  運用担当者が「変更可能な設定値の一覧」として.env.exampleを参照した際に、これら3項目の
-  存在に気づけない状態になっている。
-
-対応方針（参考、修正はまだしない）:
-  .env.exampleの該当セクションに、他の設定値と同じ形式（コメント＋既定値をコメントアウトで
-  例示）でSESSION_IDLE_TIMEOUT_MINUTES・MEDIA_ROOT・LOG_DIRを追記する。
+対応済み（2026-09-10）:
+  上記3ビューの post 冒頭の4行手書きパターンを core/double_submit.py の
+  reject_if_resubmitted() 呼び出しに置換。redirect 先はそれぞれ
+  "core:other_settings" / ("core:other_main_edit", pk=pk) / "core:other_logout_edit"。
+  未使用になった consume_token の import も除去。python manage.py test audit core
+  （167件 OK）／全体（918件 OK）で確認。
 
 --------------------------------------------------------------------------------
-[低] core.notice_services.pyのimportに理由不明な非対称性がある
+No.2  [中]  DB 境界での広域 except Exception（具体的な例外型で捕捉すべき）
 --------------------------------------------------------------------------------
-対象: core/notice_services.py:9（モジュール冒頭）, 43（get_notice_counts内）
+対象ファイル:
+  core/middleware.py  SessionIdleTimeoutMiddleware._get_timeout_minutes  (44行)
+
+根拠（規約）:
+  「ファイル I/O・外部境界（ストレージ、DB の制約違反等）は try/except で
+   具体的な例外型を捕捉し、logger.exception(...) で原因を記録した上で…」
 
 内容:
-  `get_notice_counts()`は文書（Document）・契約書（Contract）両方の件数を集計する関数だが、
-  `from documents.models import Document`はモジュール冒頭でトップレベルimportしている一方、
-  `from contracts.models import Contract`はget_notice_counts()内での遅延importになっている
-  （organizations.services.visible_department_ids・permissions.services.
-  can_select_department/contract_searchable_department_idsも同様に関数内遅延import）。
+  SystemSetting.objects.first() の失敗を `except Exception` で捕捉している。
+  想定しているのは「マイグレーション未適用・DB 未接続」であり、これは
+  django.db.DatabaseError（OperationalError / ProgrammingError）で表現できる。
+  Exception 全捕捉だと、SystemSetting モデルの属性名変更ミス等の実装バグまで
+  黙って既定値フォールバックに倒れ、不具合の発見が遅れる。理由コメントはあるが
+  規約が要求する「具体的な例外型」には合致していない。
+  （比較: core/views.py の各 post は IntegrityError/DatabaseError を明示捕捉、
+   core/middleware.py だけ粒度が粗い。）
 
-  documents/models.py・contracts/models.pyのimport文を確認したが、いずれも`core.models`
-  （UuidPrefixedFilenameMixin/NormalizedTextFieldsMixin）のみに依存しており、
-  core.notice_servicesを直接・間接に参照する経路は見当たらなかった。そのため、
-  Documentだけをトップレベルimportしてもcontracts側と同じ理由（循環import回避）は
-  成立しないように見え、この非対称の意図が読み取れない。
+対応済み（2026-09-10）:
+  `except Exception` を `except DatabaseError`（django.db、OperationalError /
+  ProgrammingError の基底）に限定。マイグレーション未適用・DB 未接続はこれで捕捉しつつ、
+  属性名変更ミス等の実装バグは伝播させるようコメントも更新。python manage.py test
+  audit core（167件 OK）／全体（918件 OK）で確認。
 
-  CLAUDE.mdコーディング規約が求める「なぜ」重視のコメント文化からすると、core配下の
-  他のファイル（core.forms._oldest_saved_year等、同じく循環import回避のため遅延importする
-  箇所には必ずその旨のコメントがある）と比べて、本件だけ理由の説明が欠けている点が
-  一貫性を欠く。動作上の不具合ではなく、将来この関数を読む・変更する際に「なぜ片方だけ
-  トップレベルなのか」を確認する手間が生じる程度の影響に留まる。
+--------------------------------------------------------------------------------
+No.3  [低]  定義のみで一度も使われていない logger（デッドコード）
+--------------------------------------------------------------------------------
+対象ファイル / 行:
+  core/csv_services.py:3
+  core/forms.py:13
+  core/templatetags/search_extras.py:7
+  audit/models.py:8
+  audit/forms.py:7
 
-対応方針（参考、修正はまだしない）:
-  意図的な理由（例えば将来的な循環import回避の予防線等）があるならコメントで明記する。
-  特に理由が無ければ、Documentも他3つと同じく関数内遅延importに揃えるか、逆に4つとも
-  トップレベルimportに揃えて非対称性自体を解消する。
+根拠（規約）:
+  「新しいモジュールでは logger = logging.getLogger(__name__) を用意し、
+   権限拒否・想定外の分岐・セキュリティ上意味のある事象は logger.warning で記録する。」
+
+内容:
+  上記5ファイルは logger を定義しているが logger.warning/info/exception 等の
+  呼び出しが 0 件。規約の「用意する」には形式的に沿っているが、実質は未使用の
+  行。ログすべき事象がないなら定義自体を削るか、あるべきログ（例: audit/forms.py
+  の clean() での日付逆転はユーザーに ValidationError で返すため不要と割り切る等）
+  の方針を明確化する。
+
+見送り／理由: 優先度「低」のため修正しない。規約の「用意する」には形式的に沿っており、
+  現状ログすべき事象が無い（例: audit/forms.py の日付逆転は ValidationError で
+  ユーザーに返すため logger 不要）。将来ログを足す際の受け皿として定義を残す方が
+  追加コストが小さく、デッドコード除去の実益に乏しい。No.4 と併せた「logger 整備
+  方針の明文化」は CLAUDE.md 側の課題として残す。
+
+--------------------------------------------------------------------------------
+No.4  [低]  logger を用意していないサービス/ヘルパーモジュール
+--------------------------------------------------------------------------------
+対象ファイル:
+  core/file_serving.py
+  core/file_type_services.py
+  core/text_normalization.py
+  core/deletion_services.py
+  core/upload_validation.py
+  core/storage_paths.py
+  core/context_processors.py
+
+根拠（規約）:
+  「新しいモジュールでは logger = logging.getLogger(__name__) を用意し…」（無条件）
+
+内容:
+  いずれも純関数中心で「想定外の分岐」がほぼ無いため実害は小さいが、規約の文面は
+  無条件。No.3 と合わせ「logger 整備の一貫性」の問題として扱うのが妥当。
+  特に core/file_serving.py・core/upload_validation.py はセキュリティレビュー
+  H-3 対応の防御コードであり、将来「拒否した」事実を warning に残したくなる
+  可能性が高い（現状は呼び出し側 view で warning している）。
+
+見送り／理由: 優先度「低」のため修正しない。いずれも純関数中心で「想定外の分岐」が
+  ほぼ無く実害が小さい。防御コード（file_serving / upload_validation）の拒否事実は
+  現状呼び出し側 view で warning しており記録漏れは無い。No.3 と表裏の「logger 整備
+  の一貫性」は方針明文化の課題として扱う。
+
+--------------------------------------------------------------------------------
+No.5  [低]  *_views モジュールにビュー以外のヘルパー関数が同居
+--------------------------------------------------------------------------------
+対象ファイル:
+  core/upload_views.py
+    - file_rows()                        (170行)
+    - remap_step2_initial_after_remove() (180行)
+    - file_field_sets()                  (205行)
+    - build_pending_preview_context()    (223行)
+
+根拠（規約）:
+  ファイル役割分担パターン: 「services.py（ビューから分離したビジネスロジック）」
+
+内容:
+  これらはテンプレートへ渡す行データの組み立て・POST 値の詰め直し等の
+  presentation/ビジネスロジックであり、CBV ではない。役割分担の原則からは
+  core/upload_services.py もしくは新設の services 相当モジュールへ分離するのが
+  望ましい。（同種の関数 core/record_views.py には無く、upload_views.py だけに
+  混在している点でも不整合。）
+
+見送り／理由: 優先度「低」のため修正しない。挙動に影響しない構造的リファクタであり、
+  upload 系は変更頻度が高くリグレッションリスクが分離の実益に見合わない。分離する
+  場合は No.6 の *_views 命名整理と併せて一度に行うのが妥当。
+
+--------------------------------------------------------------------------------
+No.6  [低]  core のビューモジュール分割命名が役割分担パターンから逸脱
+--------------------------------------------------------------------------------
+対象ファイル:
+  core/master_views.py / core/record_views.py / core/bulk_edit_views.py /
+  core/upload_views.py
+
+根拠（規約）:
+  ファイル役割分担パターン: 「views.py（CBV）」
+
+内容:
+  複数アプリ（documents/contracts/masters）が共有する基底クラス群を主題別に
+  分割する運用自体は妥当だが、規約の想定ファイル名は views.py 単一。
+  core/views.py も別に存在するため、「core の基底ビューは *_views.py に置く」
+  という規約化されていないローカルルールになっている。CLAUDE.md 側に一文
+  追記して明文化するか、命名を揃えるかの整理を推奨。
+
+見送り／理由: 優先度「低」のため修正しない。CLAUDE.md への一文追記で解決する運用
+  ルールの整理であり、コード側の対応ではない。命名を揃える案は複数アプリにまたがる
+  import の全書き換えを伴い影響が大きい。
+
+--------------------------------------------------------------------------------
+No.7  [低]  audit/admin.py にスキャフォールドが残存 / 未登録判断が未記録
+--------------------------------------------------------------------------------
+対象ファイル:
+  audit/admin.py
+
+内容:
+  中身は `# Register your models here.` のコメントのみ。AuditLog は専用の
+  操作履歴ログ画面があるため管理サイト未登録は妥当な判断だが、core/admin.py の
+  ReadOnlyModelAdmin が「どのモデルをなぜ読み取り専用で登録するか」を docstring に
+  明記しているのと対照的に、audit 側は判断の記録が無い。スキャフォールドコメントを
+  削り、「AuditLog は専用画面があるため admin 未登録」の一文を残すのが望ましい。
+
+見送り／理由: 優先度「低」のため修正しない。動作に影響しないスキャフォールドコメント
+  の整備で、未登録の判断理由は本レポートに記録済み。
+
+--------------------------------------------------------------------------------
+No.8  [低]  audit/services.py log_raw の except Exception（DB 境界）
+--------------------------------------------------------------------------------
+対象ファイル:
+  audit/services.py  log_raw()  (163行)
+
+根拠（規約）:
+  「DB の制約違反等は具体的な例外型を捕捉」／
+  「失敗を握りつぶして良いが、その場合は必ずコメントで理由を明記する」
+
+内容:
+  AuditLog.objects.create() を `except Exception` で捕捉し logger.exception のみ。
+  「監査ログの記録失敗で本処理を巻き込まない」という握りつぶし判断はコメント済みで
+  規約の例外条項には合致する。ただし DB 境界としては IntegrityError / DatabaseError が
+  精密であり、Exception 全捕捉は create() 呼び出しの引数不備等の実装バグも
+  無音化する。監査基盤の堅牢性を優先するなら現状維持も可だが、留意点として記録。
+
+見送り／理由: 優先度「低」のため修正しない。「監査ログの記録失敗で本処理を巻き込ま
+  ない」握りつぶし判断はコメント済みで規約の例外条項に合致する。監査基盤の堅牢性
+  優先で現状維持が妥当とレポート自身も認めている。
+
+--------------------------------------------------------------------------------
+No.9  [低]  core 直下のユニットテスト不足
+--------------------------------------------------------------------------------
+対象ファイル:
+  core/api.py         BaseOptionListAPIView（特に _department_items の管理者ゲート）
+  core/form_services.py  save_or_none()
+
+根拠（規約）:
+  「新機能追加時は同様の観点でユニットテストを追加する（tests.py）。」
+
+内容:
+  core/tests.py にこの2つを直接検証するテストクラスが無く、documents/contracts/
+  masters 側のテスト経由で間接的にしか実行されていない。特に
+  _department_items() の「非管理者は自部署＋閲覧部署範囲のみ」ゲートは
+  コード内コメントで「監査で発見（以前は権限に関わらず全部署を返していた）」と
+  される回帰リスクのある分岐であり、core 側に直接の回帰テストを置くのが望ましい。
+  save_or_none() も IntegrityError 時 None 返却という契約を持つ共通関数のため
+  単体テスト価値がある。
+
+見送り／理由: 優先度「低」のため今回は修正しない（既存コードの不具合ではなくテスト
+  カバレッジの補強）。両関数とも documents/contracts/masters 側テスト経由で間接的に
+  実行されている。core 直下への直接の回帰テスト追加はテストカバレッジ棚卸しの
+  別タスクで扱う。
+
+--------------------------------------------------------------------------------
+No.10 [低]  core（下位アプリ）から documents/contracts モデルへのトップレベル import
+--------------------------------------------------------------------------------
+対象ファイル:
+  core/notice_services.py:9-10
+    from contracts.models import Contract
+    from documents.models import Document
+
+内容:
+  audit/services.py:27 は「audit は下位アプリのため、documents/contracts モデルを
+  巻き込む notice_services のモジュールロード時結合を避けて関数内 import する」と
+  明記し関数内 import を徹底しているのに対し、notice_services 自身は
+  トップレベルで両モデルを import しており非対称。notice_services は本質的に
+  文書＋契約書の集計モジュールなので設計上の許容範囲ではあるが、他の core 内
+  モジュール（scoping/deletion/text_normalization 等）が下位依存を持たないことを
+  踏まえると、レイヤリングの一貫性としては留意点。core 内で「文書/契約書を知る
+  モジュール」と「知らないモジュール」の境界を意識的に区別しておくとよい。
+
+見送り／理由: 優先度「低」のため修正しない。notice_services は本質的に文書＋契約書の
+  集計モジュールで、下位モデルへのトップレベル import は設計上の許容範囲とレポートも
+  明記。レイヤリング一貫性の留意点に留まる。
+
+--------------------------------------------------------------------------------
+No.11 [低]  関数内 import が不要なケース
+--------------------------------------------------------------------------------
+対象ファイル:
+  core/models.py:50  NormalizedTextFieldsMixin.save()
+    from core.text_normalization import normalize_for_search
+
+内容:
+  core/text_normalization.py は unicodedata と django のみに依存し、core 内の
+  他モジュールを import しないため循環リスクは無い。関数内 import にする必然性が
+  なく、モジュールトップに上げてよい。No.10 と逆に「不要な遅延 import」の例。
+  軽微。
+
+見送り／理由: 優先度「低」（レポートも「軽微」と明記）のため修正しない。循環リスクは
+  無いが動作上の問題も無く、変更の実益が小さい。
 
 ================================================================================
-■ 実行した確認コマンドと結果
+■ 参考: 規約違反ではないと判断した項目（誤検知防止のため記録）
 ================================================================================
-- `../venv/Scripts/python.exe manage.py makemigrations --check --dry-run audit core`
-  （venvはja_system直下、ja_pjの1階層上にあるため相対パスで実行）
-  → "No changes detected in apps 'audit', 'core'"
-  （モデル定義とマイグレーションの間に差分は無い。audit/migrations/0002が
-  AuditLog.employee_name/event_message向けのGinIndex追加を正しく反映済みであることも
-  併せて確認した）
+  - core/*_services.py 群の広域 except Exception（text_extraction_services /
+    ocr_layout_services / pdf_text_embed_services / extract_pending_pdf_text）:
+    いずれも「1件の失敗でバッチ全体・アップロード全体を止めない」設計判断が
+    詳細なコメントで明記されており、規約の例外条項に合致。
+  - audit・core とも migration が単一ファイル（0001_*）: 「本番リリース前は
+    0001 にまとめる」方針に合致。
+  - core/api.py が JsonResponse を直接返す（DRF 不使用）: 規約通り。
+  - audit に api.py が無い: 画面内 AJAX が無いため不要。役割分担違反ではない。
+  - core/models.py の抽象 Mixin に verbose_name が無い: 抽象モデルのため不要。
+  - management コマンドの self.stdout.write 使用: Django 標準作法で print ではない。
 
-- `../venv/Scripts/python.exe manage.py test audit core`
-  → Ran 115 tests in 11.616s — OK（全件PASS）。標準エラー出力に現れる複数のトレースバック
-  （FileNotFoundError「simulated disk error」等）は、core.upload_services/core.record_views
-  等のエラーハンドリング分岐を意図的に発生させる例外系テスト（core/tests.py
-  UploadServicesErrorHandlingTests/ChunkUploadServiceTests等）のmock出力であり、テスト結果
-  自体には影響しない。stdout側に文字化けして見える出力（cleanup_temp_uploads/
-  extract_pending_pdf_text/purge_expired_deleted_recordsコマンドのself.stdout.write()文言）も、
-  bashツールの端末エンコーディング起因の表示上の問題であり、実際のテスト結果（OK・115件PASS）
-  には影響していない。
+================================================================================
+以上
+================================================================================

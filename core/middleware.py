@@ -3,6 +3,7 @@ import time
 
 from django.contrib.auth import logout
 from django.conf import settings
+from django.db import DatabaseError
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,10 @@ class SessionIdleTimeoutMiddleware:
             setting = SystemSetting.objects.first()
             if setting:
                 return setting.session_idle_timeout_minutes
-        except Exception:
-            # マイグレーション未適用・DB未接続時等（アプリ起動直後等）でも致命的にしない。
+        except DatabaseError:
+            # マイグレーション未適用（ProgrammingError）・DB未接続（OperationalError）時等
+            # （アプリ起動直後・マイグレーション実行前等）でも致命的にしない。DatabaseError に
+            # 限定することで、SystemSetting の属性名変更ミス等の実装バグ（AttributeError 等）は
+            # 握りつぶさず伝播させ、既定値フォールバックへ静かに倒れて不具合の発見が遅れるのを防ぐ。
             logger.exception("SystemSettingの取得に失敗したため既定値にフォールバックします。")
         return settings.SESSION_IDLE_TIMEOUT_MINUTES
