@@ -79,6 +79,9 @@ class DepartmentViewScope(models.Model):
     ACTION_CHOICES = [(ACTION_MERGE, "統合"), (ACTION_SPLIT, "分割")]
     action = models.CharField("種別", max_length=10, choices=ACTION_CHOICES)
     created_at = models.DateTimeField("作成日時", auto_now_add=True)
+    # 他の設定テーブルと揃えて更新時刻も残す（監査 B-8。apply_dept_action は update_or_create で
+    # action を更新することがある）。
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
 
     class Meta:
         db_table = "m_department_view_scope"
@@ -87,7 +90,13 @@ class DepartmentViewScope(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["viewer_department", "visible_department"], name="unique_department_view_scope"
-            )
+            ),
+            # 自己参照禁止（apply_dept_action は既に target==department をスキップするが、DB でも担保。
+            # contracts.ContractRelation.no_self_contract_relation と対称。監査 B-VAL-6）。
+            models.CheckConstraint(
+                condition=~models.Q(viewer_department=models.F("visible_department")),
+                name="no_self_department_view_scope",
+            ),
         ]
 
     def __str__(self):
@@ -112,6 +121,10 @@ class MenuItemSetting(models.Model):
     show_search_eapproval = models.BooleanField("検索・閲覧・変更-電子決裁", default=False)
     show_storage_document = models.BooleanField("保管-文書", default=False)
     show_storage_contract = models.BooleanField("保管-契約書", default=False)
+
+    # 他の設定テーブルと揃えてタイムスタンプを持つ（監査 B-8。screen-other-main-edit から更新される）。
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
 
     class Meta:
         db_table = "m_menu_item_setting"

@@ -51,6 +51,52 @@ class EmployeeModelTests(TestCase):
             )
 
 
+    def test_password_and_last_login_verbose_names_are_japanese(self):
+        """監査 C-2：AbstractBaseUser 由来の verbose_name を日本語で上書き。"""
+        self.assertEqual(Employee._meta.get_field("password").verbose_name, "パスワード")
+        self.assertEqual(Employee._meta.get_field("last_login").verbose_name, "最終ログイン")
+
+    def test_is_active_is_derived_from_is_retired(self):
+        """監査 B-12：is_active は is_retired から導出するプロパティ。ModelBackend の
+        user_can_authenticate / get_user が退職者を自動的に弾く。"""
+        from django.contrib.auth.backends import ModelBackend
+
+        emp = Employee.objects.create_user(
+            employee_no="55", name="在職", password="x", department=self.department,
+            rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.assertTrue(emp.is_active)
+        self.assertTrue(ModelBackend().user_can_authenticate(emp))
+
+        emp.is_retired = True
+        emp.save(update_fields=["is_retired"])
+        emp.refresh_from_db()
+        self.assertFalse(emp.is_active)
+        self.assertFalse(ModelBackend().user_can_authenticate(emp))
+
+    def test_full_clean_rejects_fullwidth_and_non_digit_employee_no(self):
+        """監査 B-VAL-1：モデルの full_clean()（admin・将来の ModelForm 経由）で
+        全角数字・数字以外の職員番号を弾く。フォームの clean_employee_no は NFKC 正規化を
+        先に済ませるためこの validator を通る。"""
+        from django.core.exceptions import ValidationError
+
+        for bad in ("１２３", "A1", "12-3"):
+            emp = Employee(
+                employee_no=bad, name="x", department=self.department,
+                rank=Rank.KOSAYAKU, position=Position.KACHO,
+            )
+            with self.assertRaises(ValidationError):
+                emp.full_clean()
+
+    def test_full_clean_accepts_halfwidth_digit_employee_no(self):
+        emp = Employee(
+            employee_no="12345", name="x", department=self.department,
+            rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        emp.set_password("x")
+        emp.full_clean()  # ValidationError が出なければ OK
+
+
 class LoginFormTests(TestCase):
     def setUp(self):
         self.department = Department.objects.create(
@@ -71,6 +117,18 @@ class LoginFormTests(TestCase):
         form = LoginForm(data={"username": "9999", "password": "pass1234"})
         self.assertFalse(form.is_valid())
         self.assertIn("退職済みの職員はログインできません。", str(form.errors))
+
+    def test_retired_employee_wrong_password_gets_generic_error(self):
+        """監査 B-12：退職者でもパスワード不一致では専用メッセージを出さない
+        （アカウントの存在・退職を明かさない）。"""
+        Employee.objects.create_user(
+            employee_no="9998", name="退職 次郎", password="pass1234",
+            department=self.department, rank=Rank.KOSAYAKU, position=Position.KACHO,
+            is_retired=True,
+        )
+        form = LoginForm(data={"username": "9998", "password": "wrong"})
+        self.assertFalse(form.is_valid())
+        self.assertNotIn("退職済みの職員はログインできません。", str(form.errors))
 
     def test_active_employee_can_login(self):
         Employee.objects.create_user(

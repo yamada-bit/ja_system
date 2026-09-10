@@ -5,7 +5,7 @@ from unittest import mock
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import Error as DBError
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import Employee, Position, Rank
@@ -3488,6 +3488,86 @@ class DocumentSaveNormalizationTests(TestCase):
             self.document.deleted_at = timezone.now()
             self.document.save(update_fields=["is_deleted", "deleted_at"])
         normalize.assert_not_called()
+
+
+class DocumentIndexTests(SimpleTestCase):
+    """監査 B-IDX-1：フリーワード全文検索は正規化シャドウ列 extracted_text_normalized にしか
+    icontains しないため、GIN(gin_trgm_ops) は正規化列のみに張る。生 extracted_text の GIN を
+    誤って復活させないためのリグレッションガード。"""
+
+    def _gin_field_sets(self):
+        from django.contrib.postgres.indexes import GinIndex
+
+        from documents.models import Document
+
+        return [
+            tuple(idx.fields) for idx in Document._meta.indexes if isinstance(idx, GinIndex)
+        ]
+
+    def test_no_gin_index_on_raw_extracted_text(self):
+        self.assertNotIn(("extracted_text",), self._gin_field_sets())
+
+    def test_gin_index_on_normalized_extracted_text_kept(self):
+        self.assertIn(("extracted_text_normalized",), self._gin_field_sets())
+
+    def test_gin_index_on_title_and_memo_normalized(self):
+        """監査 B-IDX-2：フリーワード検索が OR で叩く正規化3列に GIN を揃える。"""
+        gin = self._gin_field_sets()
+        self.assertIn(("title_normalized",), gin)
+        self.assertIn(("memo_normalized",), gin)
+
+    def test_db_index_on_expiry_and_save_date(self):
+        """監査 B-IDX-3 / B-IDX-4：お知らせ集計・一覧ソート・期間検索の常用列に btree 索引。"""
+        from documents.models import Document
+
+        self.assertTrue(Document._meta.get_field("expiry_date").db_index)
+        self.assertTrue(Document._meta.get_field("save_date").db_index)
+
+    def test_partial_index_on_deleted_at(self):
+        """監査 B-IDX-5：削除済み行だけの部分索引（ゴミ箱一覧・完全削除バッチ用）。"""
+        from documents.models import Document
+
+        names = {idx.name for idx in Document._meta.indexes}
+        self.assertIn("doc_deleted_at_partial", names)
+
+
+class DocumentYearValidatorTests(SimpleTestCase):
+    """監査 B-VAL-3：year フィールドの西暦健全性バリデータ（1900〜2200）。"""
+
+    def _run(self, value):
+        from documents.models import Document
+
+        Document._meta.get_field("year").run_validators(value)
+
+    def test_rejects_zero_and_overflow_like_values(self):
+        from django.core.exceptions import ValidationError
+
+        for bad in (0, 1899, 2201, 12026):
+            with self.assertRaises(ValidationError):
+                self._run(bad)
+
+    def test_accepts_plausible_year(self):
+        self._run(2026)
+
+
+class DocumentFileValidatorTests(SimpleTestCase):
+    """監査 B-VAL-8：file フィールドの能動コンテンツ拒否バリデータ（拒否リスト方式）。"""
+
+    def _run(self, name):
+        from documents.models import Document
+
+        Document._meta.get_field("file").run_validators(name)
+
+    def test_html_rejected(self):
+        from django.core.exceptions import ValidationError
+
+        for bad in ("evil.html", "x.svg", "a.js"):
+            with self.assertRaises(ValidationError):
+                self._run(bad)
+
+    def test_pdf_and_office_ok(self):
+        for ok in ("doc.pdf", "sheet.xlsx", "photo.png"):
+            self._run(ok)
 
 
 class StoragePathTests(TestCase):

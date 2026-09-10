@@ -5,7 +5,7 @@ from unittest import mock
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import Error as DBError
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import Employee, Position, Rank
@@ -3809,6 +3809,124 @@ class FilterValidRelatedIdsTests(TestCase):
             keep_ids=[self.a.pk, self.b.pk],
         )
         self.assertEqual(result, [self.b.pk])
+
+
+class ContractIndexTests(SimpleTestCase):
+    """監査 B-IDX-1：documents.tests.DocumentIndexTests と対。GIN(gin_trgm_ops) は正規化列
+    extracted_text_normalized のみに張り、生 extracted_text の GIN は持たない。"""
+
+    def _gin_field_sets(self):
+        from django.contrib.postgres.indexes import GinIndex
+
+        from contracts.models import Contract
+
+        return [
+            tuple(idx.fields) for idx in Contract._meta.indexes if isinstance(idx, GinIndex)
+        ]
+
+    def test_no_gin_index_on_raw_extracted_text(self):
+        self.assertNotIn(("extracted_text",), self._gin_field_sets())
+
+    def test_gin_index_on_normalized_extracted_text_kept(self):
+        self.assertIn(("extracted_text_normalized",), self._gin_field_sets())
+
+    def test_gin_index_on_title_and_memo_normalized(self):
+        """監査 B-IDX-2：documents 側と対。"""
+        gin = self._gin_field_sets()
+        self.assertIn(("title_normalized",), gin)
+        self.assertIn(("memo_normalized",), gin)
+
+    def test_db_index_on_expiry_and_save_date(self):
+        """監査 B-IDX-3 / B-IDX-4：documents 側と対。"""
+        from contracts.models import Contract
+
+        self.assertTrue(Contract._meta.get_field("expiry_date").db_index)
+        self.assertTrue(Contract._meta.get_field("save_date").db_index)
+
+    def test_partial_index_on_deleted_at(self):
+        """監査 B-IDX-5：documents 側と対。"""
+        from contracts.models import Contract
+
+        names = {idx.name for idx in Contract._meta.indexes}
+        self.assertIn("contract_deleted_at_partial", names)
+
+
+class ContractYearValidatorTests(SimpleTestCase):
+    """監査 B-VAL-3：documents 側と対（1900〜2200）。"""
+
+    def _run(self, value):
+        from contracts.models import Contract
+
+        Contract._meta.get_field("year").run_validators(value)
+
+    def test_rejects_zero_and_overflow_like_values(self):
+        from django.core.exceptions import ValidationError
+
+        for bad in (0, 1899, 2201, 12026):
+            with self.assertRaises(ValidationError):
+                self._run(bad)
+
+    def test_accepts_plausible_year(self):
+        self._run(2026)
+
+
+class ContractFileValidatorTests(SimpleTestCase):
+    """監査 B-VAL-8：documents 側と対。"""
+
+    def _run(self, name):
+        from contracts.models import Contract
+
+        Contract._meta.get_field("file").run_validators(name)
+
+    def test_html_rejected(self):
+        from django.core.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            self._run("evil.svg")
+
+    def test_pdf_ok(self):
+        self._run("contract.pdf")
+
+
+class ContractPeriodConstraintTests(TestCase):
+    """監査 B-VAL-5：contract_period_start <= contract_period_end の CheckConstraint。
+    フォームの validate_date_range に加えた DB 側の多層防御。"""
+
+    def setUp(self):
+        self.dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.emp = Employee.objects.create_user(
+            employee_no="1", name="担当", password="x", department=self.dept,
+            rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.group = Group.objects.create(code="1", name="分類", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="1", name="カテゴリー", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+
+    def _build(self, start, end):
+        from contracts.models import Contract
+
+        return Contract(
+            title="c", department=self.dept, group=self.group, category=self.category,
+            year=2026, uploader=self.emp, expiry_date=datetime.date(2036, 1, 1),
+            contract_period_start=start, contract_period_end=end,
+            file=ContentFile(b"x", name="c.pdf"),
+        )
+
+    def test_start_after_end_rejected(self):
+        from django.db import IntegrityError, transaction
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._build(datetime.date(2026, 6, 1), datetime.date(2026, 1, 1)).save()
+
+    def test_start_before_end_ok(self):
+        self._build(datetime.date(2026, 1, 1), datetime.date(2026, 6, 1)).save()
+
+    def test_null_ends_ok(self):
+        self._build(datetime.date(2026, 1, 1), None).save()
+        self._build(None, datetime.date(2026, 6, 1)).save()
 
 
 class StoragePathTests(TestCase):

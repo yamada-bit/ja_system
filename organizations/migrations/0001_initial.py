@@ -39,6 +39,8 @@ class Migration(migrations.Migration):
                 ('show_search_eapproval', models.BooleanField(default=False, verbose_name='検索・閲覧・変更-電子決裁')),
                 ('show_storage_document', models.BooleanField(default=False, verbose_name='保管-文書')),
                 ('show_storage_contract', models.BooleanField(default=False, verbose_name='保管-契約書')),
+                ('created_at', models.DateTimeField(auto_now_add=True, verbose_name='作成日時')),
+                ('updated_at', models.DateTimeField(auto_now=True, verbose_name='更新日時')),
                 ('department', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='menu_item_setting', to='organizations.department', verbose_name='部署')),
             ],
             options={
@@ -53,6 +55,7 @@ class Migration(migrations.Migration):
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('action', models.CharField(choices=[('merge', '統合'), ('split', '分割')], max_length=10, verbose_name='種別')),
                 ('created_at', models.DateTimeField(auto_now_add=True, verbose_name='作成日時')),
+                ('updated_at', models.DateTimeField(auto_now=True, verbose_name='更新日時')),
                 ('viewer_department', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='view_scopes_as_viewer', to='organizations.department', verbose_name='閲覧する側の部署')),
                 ('visible_department', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='view_scopes_as_visible', to='organizations.department', verbose_name='閲覧可能になる部署')),
             ],
@@ -60,7 +63,7 @@ class Migration(migrations.Migration):
                 'verbose_name': '閲覧部署範囲',
                 'verbose_name_plural': '閲覧部署範囲',
                 'db_table': 'm_department_view_scope',
-                'constraints': [models.UniqueConstraint(fields=('viewer_department', 'visible_department'), name='unique_department_view_scope')],
+                'constraints': [models.UniqueConstraint(fields=('viewer_department', 'visible_department'), name='unique_department_view_scope'), models.CheckConstraint(condition=models.Q(('viewer_department', models.F('visible_department')), _negated=True), name='no_self_department_view_scope')],
             },
         ),
     ]

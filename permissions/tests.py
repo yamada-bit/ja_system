@@ -48,6 +48,18 @@ class PermissionServicesTests(TestCase):
         self.assertEqual(get_role(anon), PermissionRole.STAFF)
         self.assertFalse(is_admin(anon))
 
+    def test_profile_has_created_and_updated_timestamps(self):
+        """監査 B-7：他マスタと揃えて created_at/updated_at を持つ。"""
+        p = PermissionProfile.objects.create(employee=self.employee)
+        self.assertIsNotNone(p.created_at)
+        self.assertIsNotNone(p.updated_at)
+
+    def test_role_field_defaults_to_staff(self):
+        """監査 D-1：role 未指定で PermissionProfile を作ると STAFF（xlsx 職員マスタ D118）。"""
+        profile = PermissionProfile.objects.create(employee=self.employee)
+        profile.refresh_from_db()
+        self.assertEqual(profile.role, PermissionRole.STAFF)
+
     def test_get_role_reflects_profile(self):
         PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
         self.assertEqual(get_role(self.employee), PermissionRole.ADMIN)

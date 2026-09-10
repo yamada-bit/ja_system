@@ -40,6 +40,11 @@ def apply_sort(qs, sort_key, direction, sort_fields):
 
     `sort_fields`はソートキー→フィールド名の辞書（documents.search_services.SORT_FIELDS/
     contracts.search_services.SORT_FIELDSを渡す。アプリ固有の列はこちらで吸収する）。
+
+    Document/Contract に `Meta.ordering` を持たせない方針（監査 Q-1）のため、検索結果一覧の
+    並び順はこの関数が唯一の入口。documents/contracts.search_services.build_queryset は全ての
+    return 経路でこの関数を通し、sort_key 未指定でも `order_by("-save_date")` で確定した順序を返す
+    （xlsx が明記する各一覧の初期ソート＝保存日 降順）。
     """
     qs = qs.annotate(display_no=Window(expression=RowNumber(), order_by=F("save_date").desc()))
     field = sort_fields.get(sort_key)

@@ -151,7 +151,7 @@ class OtherSettingsView(LoginRequiredMixin, View):
         ):
             setting = getattr(department, "menu_item_setting", None)
             rows.append({"department": department, "setting": setting})
-        logout_setting, _ = SystemSetting.objects.get_or_create(pk=1)
+        logout_setting = SystemSetting.load()  # シングルトン行の取得を集約（監査 B-VAL-7）
         paginator = Paginator(rows, self.PAGE_SIZE)
         page_obj = paginator.get_page(request.GET.get("page"))
         # 「メイン画面項目」/「自動ログアウト時間」のタブ選択は原本はSPAでDOMを破棄しないため
@@ -243,12 +243,12 @@ class OtherLogoutEditView(LoginRequiredMixin, View):
         return super().dispatch(request, *args, **kwargs)
 
     def get(self, request):
-        setting, _ = SystemSetting.objects.get_or_create(pk=1)
+        setting = SystemSetting.load()
         form = LogoutTimeForm(instance=setting)
         return render(request, self.template_name, {"form": form, "token": issue_token(request.session, self.form_id)})
 
     def post(self, request):
-        setting, _ = SystemSetting.objects.get_or_create(pk=1)
+        setting = SystemSetting.load()
         resp = reject_if_resubmitted(request, self.form_id, "core:other_logout_edit")
         if resp is not None:
             return resp

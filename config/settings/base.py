@@ -33,7 +33,8 @@ INSTALLED_APPS = [
     "core",
     "permissions",
     "audit",
-    # documents/contracts.extracted_textのGinIndex(gin_trgm_ops)・将来のTrigramSimilarity検索用。
+    # documents/contracts.extracted_text_normalized 等のGinIndex(gin_trgm_ops)・将来の
+    # TrigramSimilarity検索用（フリーワード全文検索は正規化シャドウ列に対して行う。監査B-IDX-1）。
     # 拡張(pg_trgm)自体の有効化はcore.migrations.0001_enable_pg_trgmで行う。
     "django.contrib.postgres",
 ]

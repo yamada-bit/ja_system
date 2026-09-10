@@ -20,7 +20,7 @@ class Migration(migrations.Migration):
             name='PermissionProfile',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('role', models.CharField(choices=[('admin', '管理者'), ('manager', '所属長'), ('staff', '一般')], max_length=10, verbose_name='システム権限')),
+                ('role', models.CharField(choices=[('admin', '管理者'), ('manager', '所属長'), ('staff', '一般')], default='staff', max_length=10, verbose_name='システム権限')),
                 ('doc_retention_edit', models.BooleanField(default=False, help_text='OFFの場合、保存した文書の保存期間を編集できない（xlsx 権限管理!B172-175、Rev1.1で追加）', verbose_name='文書管理-文書(保存満了日変更)')),
                 ('doc_download', models.BooleanField(default=False, help_text='OFFの場合、検索・閲覧画面で文書のダウンロード／実プレビューができない（xlsx 権限管理!B177-180、要再確認No.20〜22。permissions.services.can_download参照。管理者はフラグ値に関わらず常に可）', verbose_name='文書管理-文書(ダウンロード)')),
                 ('contract_edit', models.BooleanField(default=False, help_text='OFFの場合、対象者は契約書の保存・編集ができない（xlsx 権限管理!B193-198、Rev1.2で新規追加）。保存不可＝メイン画面の保管枠内「契約書」ボタン非表示、編集不可＝契約書詳細画面の「編集」「削除」ボタン非表示、として制御する（permissions.services.can_edit_contract参照）。', verbose_name='契約書-契約書(契約書情報変更)')),
@@ -28,6 +28,7 @@ class Migration(migrations.Migration):
                 ('eapproval_view_setting', models.BooleanField(default=False, help_text='※保留（xlsx 権限管理!B211-215）。電子決裁機能はスコープ外のため値の保持のみ・連動先なし', verbose_name='電子決裁-書類毎の閲覧設定')),
                 ('eapproval_doc_name_manage', models.BooleanField(default=False, help_text='※保留（xlsx 権限管理!B211-215）。電子決裁機能はスコープ外のため値の保持のみ・連動先なし', verbose_name='電子決裁-書類名(作成・変更)')),
                 ('eapproval_retention', models.BooleanField(default=False, help_text='※保留（xlsx 権限管理!B211-215）。電子決裁機能はスコープ外のため値の保持のみ・連動先なし', verbose_name='電子決裁-申請書(保存期間)')),
+                ('created_at', models.DateTimeField(auto_now_add=True, verbose_name='作成日時')),
                 ('updated_at', models.DateTimeField(auto_now=True, verbose_name='更新日時')),
                 ('contract_visible_departments', models.ManyToManyField(blank=True, help_text='この職員が契約書検索画面の「部署」で自部署以外に選択できる部署の一覧（xlsx 権限管理!B182-183・検索・閲覧・変更!B421-423、Rev1.1で真偽値から複数選択に変更）', related_name='+', to='organizations.department', verbose_name='契約書-部門間閲覧設定')),
                 ('contract_visible_groups', models.ManyToManyField(blank=True, related_name='+', to='masters.group', verbose_name='契約書-分類(表示)')),

@@ -19,7 +19,7 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('timestamp', models.DateTimeField(auto_now_add=True, verbose_name='操作日時')),
-                ('employee_no', models.CharField(max_length=20, verbose_name='職員番号')),
+                ('employee_no', models.CharField(db_index=True, max_length=20, verbose_name='職員番号')),
                 ('employee_name', models.CharField(max_length=100, verbose_name='職員名')),
                 ('department_name', models.CharField(max_length=200, verbose_name='部署名')),
                 ('action', models.CharField(help_text='「画面名 ＋ 全角スペース ＋ ボタン名」形式（xlsx 操作履歴ログ!B63）', max_length=100, verbose_name='操作内容')),
@@ -30,7 +30,7 @@ class Migration(migrations.Migration):
                 'verbose_name': '操作履歴ログ',
                 'verbose_name_plural': '操作履歴ログ',
                 'db_table': 't_audit_log',
-                'indexes': [models.Index(fields=['-timestamp'], name='t_audit_log_timesta_894930_idx'), django.contrib.postgres.indexes.GinIndex(django.contrib.postgres.indexes.OpClass(django.db.models.functions.text.Replace(django.db.models.functions.text.Replace(models.F('employee_name'), models.Value('\u3000'), models.Value('')), models.Value(' '), models.Value('')), name='gin_trgm_ops'), name='auditlog_employee_name_trgm'), django.contrib.postgres.indexes.GinIndex(fields=['event_message'], name='auditlog_event_message_trgm', opclasses=['gin_trgm_ops'])],
+                'indexes': [models.Index(fields=['-timestamp'], name='auditlog_timestamp_desc_idx'), django.contrib.postgres.indexes.GinIndex(django.contrib.postgres.indexes.OpClass(django.db.models.functions.text.Replace(django.db.models.functions.text.Replace(models.F('employee_name'), models.Value('\u3000'), models.Value('')), models.Value(' '), models.Value('')), name='gin_trgm_ops'), name='auditlog_employee_name_trgm'), django.contrib.postgres.indexes.GinIndex(fields=['event_message'], name='auditlog_event_message_trgm', opclasses=['gin_trgm_ops'])],
             },
         ),
     ]

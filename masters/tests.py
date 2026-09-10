@@ -17,6 +17,86 @@ from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
 
 
+class CodeValidatorModelTests(TestCase):
+    """監査 B-VAL-1：Group.code / Category.code のモデル層 RegexValidator（半角数字のみ）。
+    admin・将来 clean_code を書き忘れた ModelForm（full_clean() 経由）や CSV 以外の直接コードで
+    全角・非数字コードが入るのを防ぐ多層防御。"""
+
+    def test_group_code_fullwidth_rejected_on_full_clean(self):
+        from django.core.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            Group(code="３", name="分類", doc_kbn=DocKbn.DOCUMENT).full_clean()
+
+    def test_category_code_non_digit_rejected_on_full_clean(self):
+        from django.core.exceptions import ValidationError
+
+        group = Group.objects.create(code="1", name="分類", doc_kbn=DocKbn.DOCUMENT)
+        with self.assertRaises(ValidationError):
+            Category(code="A1", name="カテゴリー", group=group, doc_kbn=DocKbn.DOCUMENT).full_clean()
+
+    def test_halfwidth_digit_code_passes(self):
+        Group(code="20", name="分類", doc_kbn=DocKbn.DOCUMENT).full_clean()
+
+    def test_category_doc_kbn_must_match_group(self):
+        """監査 B-VAL-2：Category.clean() が group.doc_kbn との不一致を弾く。"""
+        from django.core.exceptions import ValidationError
+
+        group = Group.objects.create(code="1", name="分類", doc_kbn=DocKbn.DOCUMENT)
+        mismatched = Category(code="1", name="カテゴリー", group=group, doc_kbn=DocKbn.CONTRACT)
+        with self.assertRaises(ValidationError):
+            mismatched.full_clean()
+        # 一致していれば通る
+        Category(code="2", name="カテゴリー", group=group, doc_kbn=DocKbn.DOCUMENT).full_clean()
+
+
+class MinValueValidatorModelTests(TestCase):
+    """監査 B-VAL-4：RetentionPeriod.period_value / display_order、
+    SystemSetting.session_idle_timeout_minutes の下限1バリデータ。"""
+
+    def test_period_value_zero_rejected(self):
+        from django.core.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            RetentionPeriod._meta.get_field("period_value").run_validators(0)
+
+    def test_display_order_zero_rejected(self):
+        from django.core.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            RetentionPeriod._meta.get_field("display_order").run_validators(0)
+
+    def test_session_idle_timeout_zero_rejected(self):
+        from django.core.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError):
+            SystemSetting._meta.get_field("session_idle_timeout_minutes").run_validators(0)
+
+    def test_one_is_accepted(self):
+        RetentionPeriod._meta.get_field("period_value").run_validators(1)
+        RetentionPeriod._meta.get_field("display_order").run_validators(1)
+        SystemSetting._meta.get_field("session_idle_timeout_minutes").run_validators(1)
+
+
+class SystemSettingLoadTests(TestCase):
+    """監査 B-VAL-7：SystemSetting.load() がシングルトン行（pk=1）取得の唯一の入口。
+    0行でも作成して返し、2回目以降は同じ pk=1 を返す。"""
+
+    def test_default_session_idle_timeout_follows_settings(self):
+        """監査 C-6：新規 SystemSetting の default は settings.SESSION_IDLE_TIMEOUT_MINUTES に追従。"""
+        from django.test import override_settings
+
+        with override_settings(SESSION_IDLE_TIMEOUT_MINUTES=45):
+            self.assertEqual(SystemSetting().session_idle_timeout_minutes, 45)
+
+    def test_load_creates_and_reuses_pk1(self):
+        s1 = SystemSetting.load()
+        self.assertEqual(s1.pk, 1)
+        s2 = SystemSetting.load()
+        self.assertEqual(s2.pk, 1)
+        self.assertEqual(SystemSetting.objects.count(), 1)
+
+
 class GroupFormTests(TestCase):
     def setUp(self):
         self.existing = Group.objects.create(code="1", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
@@ -1126,9 +1206,9 @@ class MasterIntegrityErrorViewTests(TestCase):
 
     def test_group_regist_integrity_error_shows_friendly_message(self):
         # 一意制約が (department, code) になったため、衝突させる既存行も同じ部署で作る
-        # （2026-09-10 No.1）。
+        # （2026-09-10 No.1）。code は半角数字（監査 B-VAL-1 でモデル validator 追加後）。
         Group.objects.create(
-            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+            code="70", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
         )
         response = self.client.get("/masters/class/regist/")
         token = response.context["token"]
@@ -1139,14 +1219,14 @@ class MasterIntegrityErrorViewTests(TestCase):
             response = self.client.post(
                 "/masters/class/regist/",
                 {
-                    "token": token, "code": "A", "name": "重複分類", "doc_kbn": DocKbn.DOCUMENT,
+                    "token": token, "code": "70", "name": "重複分類", "doc_kbn": DocKbn.DOCUMENT,
                     "department": self.department.pk,
                 },
             )
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "この分類コードは既に登録されています。")
         # DBには重複登録されておらず、既存の1件のみが残っていること。
-        self.assertEqual(Group.objects.filter(code="A").count(), 1)
+        self.assertEqual(Group.objects.filter(code="70").count(), 1)
 
     def test_category_regist_integrity_error_shows_friendly_message(self):
         group = Group.objects.create(
@@ -1372,10 +1452,10 @@ class MasterEditIntegrityErrorViewTests(TestCase):
         # 一意制約が (department, code) になったため、衝突させる2件を同じ部署で作る
         # （2026-09-10 No.1）。
         Group.objects.create(
-            code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+            code="70", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT, department=self.department
         )
         target = Group.objects.create(
-            code="B", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=self.department
+            code="71", name="分類Ｂ", doc_kbn=DocKbn.DOCUMENT, department=self.department
         )
         response = self.client.get(f"/masters/class/{target.pk}/edit/")
         token = response.context["token"]
@@ -1386,14 +1466,14 @@ class MasterEditIntegrityErrorViewTests(TestCase):
             response = self.client.post(
                 f"/masters/class/{target.pk}/edit/",
                 {
-                    "token": token, "code": "A", "name": "分類Ｂ改", "doc_kbn": DocKbn.DOCUMENT,
+                    "token": token, "code": "70", "name": "分類Ｂ改", "doc_kbn": DocKbn.DOCUMENT,
                     "department": self.department.pk,
                 },
             )
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "この分類コードは既に登録されています。")
         target.refresh_from_db()
-        self.assertEqual(target.code, "B")
+        self.assertEqual(target.code, "71")
 
     def test_category_edit_integrity_error_shows_friendly_message(self):
         group = Group.objects.create(

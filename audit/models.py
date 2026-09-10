@@ -12,11 +12,19 @@ class AuditLog(models.Model):
     """操作履歴ログ（screen-log-list）。職員番号・部署名・職員名はイベント発生時点のスナップショットを
     そのまま保存する（accounts.Employee/organizations.DepartmentへのFKではなく非正規化テキスト）。
     異動・部署改編・（将来）退職者情報の変更があっても、当時の記録をそのまま保つための設計判断。
+
+    対象レコード（文書/契約書のpk等）への構造化参照（target_type/target_id）は持たず、
+    event_message の自由テキストに `ID:{pk}` 等が混ざるのみ。「特定文書の操作履歴一覧」のような
+    要件は未確定・スコープ外のため、自由テキストのみで仕様確定（2026-09-10、監査 D-3/Q-5）。
     """
 
     timestamp = models.DateTimeField("操作日時", auto_now_add=True)
-    employee_no = models.CharField("職員番号", max_length=20)
+    # 一覧・CSV は「職員番号の完全一致検索」（filter(employee_no=...)）を常用し、ログテーブルは
+    # 無制限に増える（監査 B-IDX-6）。
+    employee_no = models.CharField("職員番号", max_length=20, db_index=True)
     employee_name = models.CharField("職員名", max_length=100)
+    # 記録元は str(employee.department)＝実効的に最大100（Department.section_name/branch_name）。
+    # 200 は将来の部署名長変更・部署改編時の余裕を持たせた値（監査 B-9）。
     department_name = models.CharField("部署名", max_length=200)
     action = models.CharField(
         "操作内容",
@@ -35,7 +43,7 @@ class AuditLog(models.Model):
         verbose_name = "操作履歴ログ"
         verbose_name_plural = "操作履歴ログ"
         indexes = [
-            models.Index(fields=["-timestamp"]),
+            models.Index(fields=["-timestamp"], name="auditlog_timestamp_desc_idx"),
             # documents.Document/contracts.Contractと同じpg_trgm(gin_trgm_ops)方針をicontains検索に
             # 適用する（品質レビューで発見、無制限に増え続けるテーブルに対しキーワード検索のたびに
             # フルスキャンが発生していた、2026-08-26修正）。

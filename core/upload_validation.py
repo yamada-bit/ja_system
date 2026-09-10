@@ -13,6 +13,8 @@
 
 import os
 
+from django.core.exceptions import ValidationError
+
 BLOCKED_UPLOAD_EXTENSIONS = {
     # HTML 系（text/html で開かれ <script> がそのまま実行される）
     ".html", ".htm", ".xhtml", ".xht", ".shtml", ".mht", ".mhtml",
@@ -26,6 +28,19 @@ BLOCKED_UPLOAD_EXTENSIONS = {
 def is_blocked_upload_filename(filename: str) -> bool:
     _, ext = os.path.splitext((filename or "").lower())
     return ext in BLOCKED_UPLOAD_EXTENSIONS
+
+
+def validate_no_active_content(value):
+    """FileField 用バリデータ（監査 B-VAL-8）。`BaseUploadStep1View` の拒否判定
+    （`blocked_upload_message`）と同じ拒否リストをモデル層でも適用する多層防御。
+    `full_clean()` を通る経路（ModelForm・admin）で HTML・SVG・スクリプト等を弾く。
+    アップロードポリシーは拒否リスト方式のため、許可リスト型の FileExtensionValidator は使わない。"""
+    name = getattr(value, "name", value) or ""
+    if is_blocked_upload_filename(name):
+        raise ValidationError(
+            "セキュリティ上の理由により、HTML・SVG・スクリプト等の形式は登録できません。",
+            code="active_content_blocked",
+        )
 
 
 def blocked_upload_message(names) -> str | None:

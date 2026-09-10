@@ -31,18 +31,29 @@ class LoginForm(AuthenticationForm):
         "inactive": "退職済みの職員はログインできません。",
     }
 
-    def confirm_login_allowed(self, user):
+    def clean(self):
         """xlsx ログイン画面!B39-42「退職している職員はログイン不可とする」に対応。
-        HTML確定版（プロトタイプJS）はこの照合ロジック自体を持たない（常にログイン成功する
-        モック）ため、要確認事項として棚卸し表に記録した上でここで実装する。
+
+        退職者は is_active（is_retired から導出、監査 B-12）が False のため、
+        AuthenticationForm 内の authenticate() が None を返し、通常は confirm_login_allowed に
+        到達せず汎用の「職員番号かパスワードが違う」エラーになる。ログイン画面では退職を明確に
+        伝えたい（xlsx 要件）ため、「職員番号が存在し・退職済み・パスワードは正しい」ケースだけ
+        専用メッセージにする（パスワード不一致では従来どおり汎用エラー＝アカウントの存在や退職を
+        明かさない）。
         """
-        if user.is_retired:
-            logger.warning("退職済み職員のログイン試行: employee_no=%s", user.employee_no)
-            raise forms.ValidationError(
-                self.error_messages["inactive"],
-                code="inactive",
-            )
-        super().confirm_login_allowed(user)
+        try:
+            return super().clean()
+        except forms.ValidationError:
+            username = self.cleaned_data.get("username")
+            password = self.cleaned_data.get("password")
+            if username and password:
+                user = Employee.objects.filter(employee_no=username).first()
+                if user and user.is_retired and user.check_password(password):
+                    logger.warning("退職済み職員のログイン試行: employee_no=%s", user.employee_no)
+                    raise forms.ValidationError(
+                        self.error_messages["inactive"], code="inactive"
+                    )
+            raise
 
 
 class StaffCsvImportForm(forms.Form):

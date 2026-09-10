@@ -1264,6 +1264,10 @@ xlsx 保管!B478-484（契約書モード）：関連書類を「関連する(�
 簡易的に検索」「検索範囲はログインユーザーの閲覧権限範囲と同等」「複数選択し、関連確定出来る」に
 転換。原本 html6 は未改訂（file input のまま）だが、ユーザーが差分レポート確認の上で反映を指示。
 
+> **監査 A-2（2026-09-10）**：html6 は依然 `<input type="file">`（index.html:287）で旧 RelatedFile UI の
+> まま＝Rev1.6 未追従。ja_pj の実装は xlsx Rev1.6 B478-484 準拠。「レンダリングされる原本マークアップを
+> 基準にする」というモデル定義妥当性監査の方針に対する**明示的な例外**として確定（ユーザー承認済み）。
+
 **モデル（`AskUserQuestion` で「完全置換」を選択）**：
 - `contracts.models.RelatedFile`（物理ファイル `FileField`、`t_contract_attachment`）を撤去し、
   `ContractRelation`（`contract` / `related_contract` の2FK＋`display_order`、`t_contract_relation`）を新設。
@@ -1378,3 +1382,286 @@ xlsx 検索・閲覧・変更!B677-680（Rev1.6 仕様追加、原本ラベル�
 「既に削除されている関連資料です」。コンソールエラー無し。
 
 これで Rev1.6（R6-1／R6-2／R6-3）の反映は完了。
+
+---
+
+## models定義 妥当性監査 フェーズ2：指摘対応（2026-09-10〜、ユーザー依頼）
+
+`MODEL_AUDIT_FINDINGS.md`（フェーズ1で5監査を統合した一覧）を上から順に対応する。フェーズ1の
+指示テンプレートは `MODEL_AUDIT_INSTRUCTION_TEMPLATE.md`。1件ずつ「提案→ユーザー承認→適用」、
+モデル変更は 0001_initial.py 直書き（本番リリース前 squash 運用）、新規制約・バリデータには
+tests.py にユニットテスト追加、コミットはユーザー指示があるまでしない。
+
+### セクション0：方針確定（Q-1〜Q-7、2026-09-10 ユーザー承認）
+
+| Q | 確定した方針 |
+|---|---|
+| Q-1 | `Meta.ordering` は全モデルには付けない。一覧のソートはビュー側 `core.search_services.apply_sort` 依存を正とする（B-ORD は原則対応せず、素通り経路の有無だけ確認）。 |
+| Q-2 | `models.py` の `logger` 宣言は現状維持（7:1 混在を許容）。CLAUDE.md が「モデル定義のみは不要」「未使用宣言も許容」の両論を明記済みで実害なし（C-7 は観察のまま no-op）。 |
+| Q-3 | `*_normalized`（`editable=False`）シャドウ列に日本語 `verbose_name` は付けない。「検索用内部列のため付けない」をコメントで明示（C-1）。 |
+| Q-4 | モデル層バリデーションは「CSV取込という実在の非フォーム経路がバイパスするもの」だけ追加する。`employee_no`/`Group.code`/`Category.code` に `RegexValidator`（半角数字）、`year`/`period_value`/`display_order`/`session_idle_timeout_minutes` に Min/Max バリデータ。フォームの全角→半角変換 `clean_*` はそのまま残す。 |
+| Q-5 | `AuditLog` は現行「自由テキストのみ」を仕様確定。構造化参照列（target_type/target_id）は追加しない（D-3、方針コメント追記のみ）。 |
+| Q-6 | 論理削除マスタ（Group/Category/RetentionPeriod）の `department IS NULL` 行は、本番移行で `department` を必ず補完する運用で確定（null 残置は許容しない、A-3）。 |
+| Q-7 | `contract_amount max_digits=12/decimal_places=0`（DecimalField 維持）・`title max_length=255`・`branch_code`/`section_code max_length=10`・`session_idle_timeout_minutes` 既定60（ただし C-6 で settings 参照の callable 化）・`Position` "90" 閉じ括弧補正 — いずれも確定値として承認。A-2（html6 の Rev1.6 未追従）は上記 R6-1 節に注記。A-4（`contract_partner` をフリーワード検索対象に）は現状維持。 |
+
+### A軸（A-1〜A-5）：コメント・記録の追記のみ（2026-09-10、コード挙動変更なし）
+
+- **A-1**：`contracts/models.py` `contract_amount` に桁/型確定の理由コメント（原本・xlsx とも指定なし、
+  9,999億円上限・整数格納、DecimalField 維持は CommaNumberInput が Decimal 往復前提のため）。
+- **A-2**：上記 R6-1 節に「html6 は Rev1.6 未追従、ja_pj は xlsx 準拠。原本マークアップ基準の監査方針への
+  明示的な例外」を注記。
+- **A-3**：`masters/models.py` の `unique_group_code`/`unique_category_code` コメントに「本番移行で
+  `department IS NULL` 行の department を必ず補完（null 残置は許容しない）」を追記。
+  `doc/文書管理システム_残項目_本番リリース手順書.xlsx` への反映はユーザー指示があれば別途。
+- **A-4**：`contracts/models.py` `contract_partner` に「フリーワード検索・正規化シャドウの対象外、
+  xlsx 記載なしのため現状維持で確定」のコメント。
+- **A-5**：`accounts/models.py` `Position` "90" に「原本 index.html:2195 は閉じ括弧欠落、タイポ補正のまま
+  確定」のコメント。
+- マイグレーション不要（`makemigrations --check` 不変）、既存データ影響なし、テスト追加なし。
+
+### B-IDX-1（深刻度：中）：未使用の生 `extracted_text` GIN 索引を削除（2026-09-10）
+
+`extracted_text`（生カラム）の `gin_trgm_ops` GIN（`doc_extracted_text_trgm` /
+`contract_extracted_text_trgm`）はどのクエリからも使われていなかった。フリーワード全文検索
+（`core.search_services.apply_freeword_filter`）・タイトル検索（`apply_word_filter`）はいずれも
+正規化シャドウ列（`title_normalized` / `memo_normalized` / `extracted_text_normalized`）にしか
+`icontains` せず、生 `extracted_text` を参照するのは `extract_pending_pdf_text` の
+`filter(extracted_text="")`（OCR未処理レコード抽出）の**等値判定のみ**で、trgm GIN の効くアクセス
+パターンではない。生 GIN は OCR 更新（本文数十KB）ごとの書き込みコストだけ発生していた。
+
+- `documents/models.py` / `contracts/models.py` の `Meta.indexes` から生 `extracted_text` の
+  `GinIndex` を削除（`extracted_text_normalized` の GIN は維持）。理由コメントを両モデルに追記。
+- `documents/migrations/0001_initial.py`（`options["indexes"]`）・`contracts/migrations/0001_initial.py`
+  （`AddIndex`）から当該行を削除（0001 直書き、`makemigrations --check` クリーン）。
+- `config/settings/base.py:36` の `django.contrib.postgres` のコメントを「正規化シャドウ列の
+  GinIndex 用」に修正。
+- テスト：`documents.tests.DocumentIndexTests` / `contracts.tests.ContractIndexTests`（SimpleTestCase）を
+  新設。「生 `extracted_text` の GIN が無い／正規化列の GIN はある」を固定。
+- `manage.py test documents contracts` 416件 PASS。
+- 既存 dev DB は手動 `DROP INDEX doc_extracted_text_trgm; DROP INDEX contract_extracted_text_trgm;`
+  が必要（フレッシュ環境は `migrate` 一発で最終形）。
+
+### B-IDX-2（深刻度：中）：`title_normalized` / `memo_normalized` に GIN 索引を追加（2026-09-10）
+
+フリーワード検索は正規化3列（`title_normalized` / `memo_normalized` / `extracted_text_normalized`）を
+OR で `icontains`、タイトル検索は `title_normalized` を `icontains` するが、GIN があるのは
+`extracted_text_normalized` だけで、3列 OR の検索が結局フルスキャンに落ちていた。
+
+- `documents/models.py` に `doc_title_norm_trgm` / `doc_memo_norm_trgm`、`contracts/models.py` に
+  `contract_title_norm_trgm` / `contract_memo_norm_trgm` の `GinIndex(gin_trgm_ops)` を追加。
+  これで正規化シャドウ列3本すべてに GIN が揃い、B-IDX-1 と合わせて「検索は正規化列、GIN も正規化列」で
+  方針統一。
+- 両 `0001_initial.py` に 0001 直書きで追記（`makemigrations --check` クリーン）。
+- テスト：`DocumentIndexTests` / `ContractIndexTests` に `title_normalized` / `memo_normalized` の
+  GIN 存在 assertion を追加。既存のタイトル検索・フリーワード検索テストが機能回帰を担保。
+- `manage.py test documents contracts` 418件 PASS。
+- 既存 dev DB はフレッシュ `migrate` で反映（squash 運用）。
+
+### B-IDX-3 / B-IDX-4（深刻度：中）：`expiry_date` / `save_date` に `db_index=True`（2026-09-10）
+
+- `expiry_date`：メイン画面お知らせ集計（`expiry_date__lt today` / 範囲）・検索「保存満了日」範囲/
+  ソートで常用。`save_date`：一覧の初期ソート（`order_by("-save_date")`）＋期間検索（`save_date__date`
+  範囲）で常用。いずれも無索引だった。
+- documents / contracts 両モデルの当該フィールドに `db_index=True` を追加。`0001_initial.py` の
+  `CreateModel` フィールド定義にも反映（`db_index=True` は暗黙インデックスで別 operation を生まないため
+  `AddIndex` 行は不要、`makemigrations --check` クリーン）。
+- テスト：`DocumentIndexTests` / `ContractIndexTests` に `db_index` True の assertion 追加。
+- `manage.py test documents contracts` 420件 PASS。
+
+### B-IDX-5 / B-IDX-6（深刻度：低）：削除済みレコードとログ職員番号の索引（2026-09-10）
+
+- **B-IDX-5**：documents / contracts の `Meta.indexes` に `models.Index(fields=["deleted_at"],
+  condition=Q(is_deleted=True), name="doc_/contract_deleted_at_partial")` を追加。削除済み行だけの
+  小さな部分索引で、ゴミ箱一覧（`search_services` の `filter(is_deleted=True)`）と日次バッチ
+  `purge_expired_deleted_records`（`is_deleted=True` かつ `deleted_at` 範囲）が使う。
+  メイン画面お知らせの `recently_deleted` は `aggregate(Count("pk", filter=Q(...)))` の条件付き集約で
+  3件数を1スキャンで出す構造上どの索引も使わないため対象外（コメントに明記）。生 `is_deleted` 単独の
+  btree は低選択性（`False` が大多数）で使われないため張らない。
+- **B-IDX-6**：`audit.AuditLog.employee_no` に `db_index=True`。一覧・CSV の職員番号完全一致検索用。
+  ログテーブルは無制限に増える。
+- 両方 `0001_initial.py` 直書き、`makemigrations --check` クリーン。
+- テスト：部分索引の名前 assertion（documents/contracts）、`AuditLogIndexTests`（audit）。
+- `manage.py test documents contracts audit` 455件 PASS。
+
+### B-VAL-1（深刻度：中）：コード類フィールドに `RegexValidator`（半角数字）（2026-09-10）
+
+`employee_no` / `Group.code` / `Category.code` の「半角数字のみ」検証がフォームの `clean_*`（NFKC
+正規化→`isdigit`）と CSV 取込側にしか無かった。
+
+- `accounts/models.py` に `_HANKAKU_DIGITS_VALIDATOR = RegexValidator(r"^[0-9]+$", "半角数字で入力して
+  ください")` を定義し `employee_no` に付与。`masters/models.py` にも同名の validator を定義し
+  `Group.code` / `Category.code` に付与。両 `0001_initial.py` にも `validators=[...]` を直書き
+  （`import django.core.validators` 追加、`makemigrations --check` クリーン）。
+- **効く経路 / 効かない経路**：`full_clean()` を通る admin・将来の ModelForm では弾く。素の `save()`
+  および CSV 取込（`create_user()`/`save()` 直呼び）は `full_clean()` を通らないため、CSV 取込側の
+  明示的な正規化＋チェック（`accounts.csv_import_services`）は撤去せず維持。フォームの `clean_*` も
+  NFKC 変換を担うため残す（多層防御）。
+- テスト：`masters.tests.CodeValidatorModelTests`、`accounts.tests.EmployeeModelTests` に
+  `full_clean()` の全角・非数字拒否テストを追加。既存の TOCTOU IntegrityError テスト2件
+  （`test_group_regist/edit_integrity_error_shows_friendly_message`）が非数字コード `"A"` を
+  フォーム POST していたため、数字コード `"70"/"71"` に修正（テストの意図＝(department, code)
+  一意制約の競合再現は不変）。
+- `manage.py test` 全件 PASS。
+
+### B-VAL-3 / B-VAL-4（深刻度：低）：数値フィールドの下限（・上限）バリデータ（2026-09-10）
+
+- **B-VAL-3**：`documents.Document.year` / `contracts.Contract.year` に
+  `[MinValueValidator(1900), MaxValueValidator(2200)]`。定数 `_YEAR_VALIDATORS` は両モデルに併記
+  （2行の定数のためクロスアプリ import を避けた）。フォームは choices で絞るため実挙動は不変、
+  admin・一括・将来コードの直接 save で 0・5桁の異常年を防ぐ多層防御。
+- **B-VAL-4**：`RetentionPeriod.period_value`（0ヵ月/0年保存は無意味、null＝永年は検証スキップ）／
+  `RetentionPeriod.display_order`（表示順は1始まり）／`SystemSetting.session_idle_timeout_minutes`
+  （0分＝即時ログアウトで破綻）に `MinValueValidator(1)`。`contracts.ContractRelation.display_order`
+  （`default=0` の内部リンク順）は対象外（コメントに明記）。
+- 3アプリ（documents/contracts/masters）の `0001_initial.py` 直書き。`import django.core.validators`
+  追加、`makemigrations --check` クリーン。
+- テスト：`DocumentYearValidatorTests` / `ContractYearValidatorTests` / `MinValueValidatorModelTests`
+  （いずれも field の `run_validators()` を直接叩く SimpleTestCase）。
+- `manage.py test documents contracts masters core` 709件 PASS。
+
+### D-1（深刻度：中）：`PermissionProfile.role` に `default=PermissionRole.STAFF`（2026-09-10）
+
+xlsx 職員マスタ D118「新規登録時に『権限管理』は初期値をセットしておく」。初期値 STAFF が
+CSV取込の即時 `create(role=STAFF)`・手動登録後の遅延 `get_or_create(defaults={"role": STAFF})`・
+`services.get_role` の欠損フォールバックに散在していた。
+
+- `permissions/models.py` の `role` に `default=PermissionRole.STAFF`、`0001_initial.py` に
+  `default='staff'` を直書き（`makemigrations --check` クリーン）。
+- **ユーザー指示で「default のみ」**：`csv_import_services` の明示 `role=STAFF` 指定は残す（冗長だが
+  意図が読める）。職員登録時に `PermissionProfile` を必ず同時生成するフロー統一（遅延生成3経路の
+  リファクタ）は別スコープとして見送り。
+- テスト：`PermissionServicesTests.test_role_field_defaults_to_staff`。
+- `manage.py test permissions accounts` 183件 PASS。
+
+### B-12（深刻度：低〜中）：`is_active` を `is_retired` から導出（退職者ログインの多層防御）（2026-09-10）
+
+`is_retired=True` でも `is_active` は `True` のまま（`is_active` はアプリコードのどこからも
+読み書きされず、定義のみ）。退職者ログイン拒否は `LoginForm.confirm_login_allowed` 1箇所頼みで、
+Django の `ModelBackend.user_can_authenticate` / `get_user`（セッション復元）は素通りだった。
+
+- `accounts/models.py`：`is_active` BooleanField を削除し `@property def is_active(self): return
+  not self.is_retired` に。`0001_initial.py` から `is_active` カラム定義を削除（`--check` クリーン、
+  `m_staff.is_active` カラムはフレッシュ migrate で消える）。
+- これで `ModelBackend` も退職者を弾く。ただし副作用として `AuthenticationForm.authenticate()` が
+  退職者に None を返し、ログイン画面のエラーが専用メッセージ→汎用メッセージに変わる。
+  **ユーザー選択で専用メッセージを維持**：`LoginForm.clean` を上書きし、`super().clean()` が
+  ValidationError を投げたケースのうち「職員番号が存在・退職済み・パスワード一致」の時だけ
+  「退職済みの職員はログインできません。」を出す（パスワード不一致では汎用エラー＝アカウントの
+  存在・退職を明かさない。従来挙動と等価）。`confirm_login_allowed` の override は廃止。
+- テスト：`test_is_active_is_derived_from_is_retired`（`ModelBackend.user_can_authenticate`）、
+  `test_retired_employee_wrong_password_gets_generic_error` を追加。既存の
+  `test_retired_employee_cannot_login` は不変で PASS。
+- `manage.py test` 全984件 PASS。
+
+### B-VAL-5 / B-VAL-6 / B-VAL-7（深刻度：低）：CheckConstraint とシングルトンアクセサ（2026-09-10）
+
+- **B-VAL-5**：`contracts.Contract` に `contract_period_start_before_end` CheckConstraint
+  （`period_start <= period_end`、両端 null 可）。フォームの `validate_date_range` に加えた DB 側の
+  多層防御。`ContractRelation.no_self_contract_relation` と rigor を揃える。
+- **B-VAL-6**：`organizations.DepartmentViewScope` に `no_self_department_view_scope` CheckConstraint
+  （`viewer != visible`）。`apply_dept_action` は既に `target == department` をスキップするが DB でも
+  担保。`ContractRelation` と対称。
+- **B-VAL-7**：`CheckConstraint(pk=1)` は **不採用**（Postgres のシーケンスがロールバックで戻らない
+  ため、`objects.create()`（自動pk）主体のテスト・admin で pk が 1 以外になり制約違反が頻発する）。
+  代わりに `SystemSetting.load()` classmethod（`get_or_create(pk=1)[0]`）を新設し、読み口を集約：
+  - `core/views.py` の3箇所（`OtherMainView`、`LogoutTimeEditView.get/post`）の `get_or_create(pk=1)`
+    を `SystemSetting.load()` に置換（挙動同値の純リファクタ）。
+  - `core/middleware.py._get_timeout_minutes` は **`.first()` + None フォールバックを維持**（理由コメント
+    追記）。全リクエスト経路のミドルウェアで、行が未作成の状態〈デプロイ直後・マイグレーション直後〉
+    でも DB へ書き込まず `settings.SESSION_IDLE_TIMEOUT_MINUTES` へ静かに倒れる方が安全なため。
+- 3アプリ（contracts/organizations）の `0001_initial.py` に `AddConstraint` / options.constraints を
+  直書き。masters はモデル変更のみ（constraint 追加なし）。`makemigrations --check` クリーン。
+- テスト：`ContractPeriodConstraintTests` / `DepartmentViewScopeConstraintTests`（IntegrityError）、
+  `SystemSettingLoadTests`。
+- `manage.py test contracts organizations masters core` 564件 PASS。
+
+### B-VAL-2 / B-VAL-8（深刻度：低）：モデル層のデータ整合バリデーション（2026-09-10）
+
+- **B-VAL-2**：`masters.Category.clean()` に「`group.doc_kbn` と自身の `doc_kbn` が一致しないと
+  ValidationError」を追加。`CategoryForm.clean` の既存チェックは残す（Category は CSV 取込経路が無く
+  full_clean() で十分＝admin・将来 ModelForm の多層防御）。マイグレーション不要。
+- **B-VAL-8**：`core/upload_validation.py` に `validate_no_active_content(value)` を新設
+  （`is_blocked_upload_filename` を使い HTML/SVG/JS 等を ValidationError）。`Document.file` /
+  `Contract.file` の `validators` に付与（`0001_initial.py` 直書き、`import core.upload_validation`）。
+  アップロードポリシーは**拒否リスト方式**（セキュリティレビュー H-3、Office/PDF/画像/zip は許可）
+  のため、許可リスト型の `FileExtensionValidator` は使わない。`searchable_file` はシステム生成 PDF の
+  ため対象外。`BaseUploadStep1View` の入口チェックと二重防御。
+- テスト：`CodeValidatorModelTests.test_category_doc_kbn_must_match_group`、
+  `DocumentFileValidatorTests` / `ContractFileValidatorTests`。
+- `manage.py test documents contracts masters core` 718件 PASS。
+
+### B-7 / B-8（深刻度：低）：設定系テーブルのタイムスタンプ非対称を解消（2026-09-10）
+
+管理画面から更新される設定テーブルのうち、他マスタ（Group/Category/RetentionPeriod/Department/
+Employee は created_at/updated_at 両方持ち）と非対称だったものを揃えた。
+
+- `permissions.PermissionProfile`：`created_at` 追加（updated_at は既存）。
+- `organizations.MenuItemSetting`：`created_at` / `updated_at` 追加。
+- `masters.SystemSetting`：`created_at` / `updated_at` 追加。
+- `organizations.DepartmentViewScope`：`updated_at` 追加（created_at は既存。`apply_dept_action` は
+  `update_or_create` で action を更新することがある）。
+- 3アプリの `0001_initial.py` は 0001 直書き（`makemigrations` は `auto_now_add` 追加で対話プロンプトに
+  なるため、生成させず手編集）。`makemigrations --check` クリーン。
+- テスト：`PermissionServicesTests.test_profile_has_created_and_updated_timestamps`（B-7）。
+  他は Django 標準の auto_now(_add) 挙動のため専用テストなし。
+- `manage.py test permissions organizations masters` 273件 PASS。
+
+### E-1 / E-2 / E-3（深刻度：低・整容）：マイグレーション整容（2026-09-10、スキーマ変更なし）
+
+- **E-1**：`contracts.ContractRelation` の `CheckConstraint(check=…)` を `condition=…` に
+  （`check=` は Django 5.1 で非推奨・6.0 で削除予定。生成済み migration は既に `condition=`）。
+- **E-2**：`audit.AuditLog` の `models.Index(fields=["-timestamp"])` に `name="auditlog_timestamp_desc_idx"`
+  を明示。`0001_initial.py` の pin 名も自動命名 `t_audit_log_timesta_894930_idx` から同名に更新。
+  同ファイルの GinIndex 2本・documents/contracts の索引と揃う。
+- **E-3**：`contracts/0001_initial.py` の Contract 用 `AddIndex` 4本＋`AddConstraint` 1本
+  （`contract_period_start_before_end`）を `CreateModel(Contract)` の `options["indexes"/"constraints"]`
+  へ移動し、documents 側の記述方式に統一。`ContractRelation` の `AddConstraint` 2本は別モデルのため
+  据え置き。
+- 3ファイルとも `makemigrations --check` クリーン。テスト：`AuditLogIndexTests` に timestamp 索引名の
+  assertion 追加。`manage.py test audit contracts documents` 467件 PASS。
+
+### C-2 / C-6（深刻度：低）：AbstractBaseUser 継承フィールドの日本語化・既定値のハードコード解消（2026-09-10）
+
+- **C-2**：`Employee` に `password`（"パスワード"）/ `last_login`（"最終ログイン"）を `AbstractBaseUser`
+  と同一定義で再宣言し `verbose_name` を日本語化（`is_staff`/`is_superuser` と揃える）。`0001_initial.py`
+  の該当行も更新。
+- **C-6**：`masters/models.py` に `_default_session_idle_timeout()`（`return settings.SESSION_IDLE_TIMEOUT_MINUTES`）
+  を定義し `SystemSetting.session_idle_timeout_minutes` の `default=60` を callable 参照に。ハードコード
+  `60` と settings フォールバック値の重複を解消。migration は `masters.models._default_session_idle_timeout`
+  としてシリアライズ（`import masters.models` 追加）。
+- テスト：`accounts.tests` に verbose_name assertion、`masters.tests.SystemSettingLoadTests.
+  test_default_session_idle_timeout_follows_settings`（`override_settings`）。
+- `manage.py test accounts masters core` 388件 PASS。
+
+### B-9 / B-10 / B-11 / B-13 / B-ORD / D-3 / C-1 / C-3 / C-4 / C-5 / C-7：コメント・docstring のみ（2026-09-10）
+
+コード挙動変更ゼロ・マイグレーション不要。「なぜ現状で確定か／既知の制約」をコード近傍に残した。
+
+- **B-9**：`audit.AuditLog.department_name` に「実効長は 100（`str(employee.department)`）、200 は将来の
+  部署名長変更・改編時の余裕」コメント。
+- **B-10**：`PermissionProfile` の `doc_visible_groups`/`contract_visible_groups` に「Group 論理削除で
+  中間テーブルに残る行は消費側が `is_deleted=False` で必ず絞るため実害なし。棚卸しが要れば
+  `related_name` を付ける」コメント。
+- **B-11**：`PermissionRole` の docstring と `permissions.services.AUTHORITY_SORT_FIELDS["role"]` に
+  「`admin`/`manager`/`staff` のアルファベット順が xlsx 権限コード 1/2/3 昇順と偶然一致。格納値を
+  変えるなら `Case/When` 化が必要」。
+- **B-13**：`ContractRelation` docstring に「紐付け先（非所有側）の物理削除で所有側の関連行も記録を
+  残さず消える点は認識済み・現状維持」。
+- **B-ORD**：`core.search_services.apply_sort` docstring に「`Meta.ordering` は持たせない方針（Q-1）、
+  この関数が一覧ソートの唯一の入口」。`documents`/`contracts.search_services.build_queryset` は全 return
+  経路で `apply_sort` を通し、未指定でも `order_by("-save_date")` で確定することをコード確認済み。
+- **D-3**：`AuditLog` docstring に「構造化参照列は持たず自由テキストのみで確定（Q-5）」。
+- **C-1**：`documents`/`contracts` の `*_normalized` に「`verbose_name` は付けない（editable=False の
+  検索用内部列、Q-3）」。
+- **C-3**：`EmployeeManager.create_user`/`create_superuser` に1行 docstring。
+- **C-4**：`RetentionPeriod.__str__` に「永年」特別扱いの docstring。
+- **C-5**：`Employee.has_perm`/`has_module_perms` に「admin 用最小実装、認可は permissions アプリ」コメント。
+- **C-7**：Q-2 で「`models.py` の `logger` 宣言は現状維持（7:1 混在を許容）」と確定。コード変更なし。
+
+`manage.py test` 全件 PASS（回帰なし）。
+
+---
+
+以上で `MODEL_AUDIT_FINDINGS.md` フェーズ2の全指摘に対応完了（対応 or 理由付きで現状維持を確定）。
+D-2（電子決裁3フラグ＝現状維持）・D-4（FK方向・循環import・related_name＝問題なし）・E軸の
+`--check` 差分なし、およびセクション6「問題なし」項目は元々対応不要。

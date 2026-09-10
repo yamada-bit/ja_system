@@ -33,6 +33,23 @@ class DepartmentModelTests(TestCase):
         self.assertEqual(str(department), "総務部")
 
 
+class DepartmentViewScopeConstraintTests(TestCase):
+    """監査 B-VAL-6：viewer_department == visible_department を禁じる CheckConstraint
+    （apply_dept_action は既に skip 済みだが DB でも担保）。"""
+
+    def test_self_scope_rejected(self):
+        from django.db import IntegrityError, transaction
+
+        dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            DepartmentViewScope.objects.create(
+                viewer_department=dept, visible_department=dept,
+                action=DepartmentViewScope.ACTION_MERGE,
+            )
+
+
 class DeptRegistFormTests(TestCase):
     def setUp(self):
         Department.objects.create(

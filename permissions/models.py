@@ -6,7 +6,14 @@ logger = logging.getLogger(__name__)
 
 
 class PermissionRole(models.TextChoices):
-    """システム権限。1:管理者/2:所属長/3:一般（xlsx 権限管理!I50,I58-59）。"""
+    """システム権限。1:管理者/2:所属長/3:一般（xlsx 権限管理!I50,I58-59）。
+
+    格納値 "admin"/"manager"/"staff" のアルファベット順が、xlsx が要求する権限コード
+    1→2→3（管理者→所属長→一般）の昇順と**偶然一致**している。一覧のソート
+    （`permissions.services.filter_authority_queryset` の `order_by("permission_profile__role")` /
+    `AUTHORITY_SORT_FIELDS["role"]`）はこの一致に依存している。将来この格納値を変える場合は
+    ソートが崩れるため、`Case/When` による明示マッピングを導入すること（監査 B-11）。
+    """
 
     ADMIN = "admin", "管理者"
     MANAGER = "manager", "所属長"
@@ -75,9 +82,18 @@ class PermissionProfile(models.Model):
         on_delete=models.CASCADE,
         related_name="permission_profile",
     )
-    role = models.CharField("システム権限", max_length=10, choices=PermissionRole.choices)
+    # xlsx 職員マスタ D118「新規登録時に『権限管理』は初期値をセットしておく」。初期値 STAFF が
+    # 生成経路（CSV取込の即時 create／手動登録後の遅延 get_or_create）に散在していたため、
+    # フィールドの default として一元化する（監査 D-1）。※遅延生成フロー自体の統一は別スコープ。
+    role = models.CharField(
+        "システム権限", max_length=10, choices=PermissionRole.choices, default=PermissionRole.STAFF
+    )
 
     # 文書管理
+    # doc_visible_groups / contract_visible_groups とも masters.Group への M2M（related_name="+"）。
+    # Group は論理削除で物理行が残るため、削除済み Group への中間テーブル行も残るが、消費側
+    # （core.forms.scoped_group_and_category_querysets、AuthorityEditForm 等）が必ず is_deleted=False で
+    # 絞るため実害はない。Group 側からの棚卸し経路が必要になったら related_name を付ける（監査 B-10）。
     doc_visible_groups = models.ManyToManyField(
         "masters.Group",
         verbose_name="文書管理-分類(表示)",
@@ -154,6 +170,8 @@ class PermissionProfile(models.Model):
         help_text="※保留（xlsx 権限管理!B211-215）。電子決裁機能はスコープ外のため値の保持のみ・連動先なし",
     )
 
+    # 他マスタ（Group/Category/RetentionPeriod 等）と揃えて作成時刻も残す（監査 B-7）。
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
     updated_at = models.DateTimeField("更新日時", auto_now=True)
 
     class Meta:

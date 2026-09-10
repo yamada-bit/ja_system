@@ -1,9 +1,24 @@
 import logging
 
+from django.conf import settings
+from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models
 from django.db.models import Q
 
 logger = logging.getLogger(__name__)
+
+
+def _default_session_idle_timeout():
+    """SystemSetting.session_idle_timeout_minutes の新規行既定値（監査 C-6）。
+    `60` のハードコード（settings.SESSION_IDLE_TIMEOUT_MINUTES と重複）を避け、
+    デプロイ環境の .env 値に追従させる。callable 参照なので migration でも
+    `masters.models._default_session_idle_timeout` としてシリアライズされる。"""
+    return settings.SESSION_IDLE_TIMEOUT_MINUTES
+
+# 分類コード／カテゴリーコードは半角数字のみ許可（xlsx 分類管理!B116／カテゴリー管理!B113）。
+# フォームの clean_code が NFKC 正規化（全角→半角）を済ませた上でこの validator を通す想定
+# （監査 B-VAL-1、accounts.models._HANKAKU_DIGITS_VALIDATOR と同趣旨）。
+_HANKAKU_DIGITS_VALIDATOR = RegexValidator(r"^[0-9]+$", "半角数字で入力してください")
 
 
 class DocKbn(models.TextChoices):
@@ -28,7 +43,7 @@ class Group(models.Model):
     （on_delete=PROTECTはCategory.groupと同じ方針）。
     """
 
-    code = models.CharField("分類コード", max_length=20)
+    code = models.CharField("分類コード", max_length=20, validators=[_HANKAKU_DIGITS_VALIDATOR])
     name = models.CharField("分類名", max_length=100)
     doc_kbn = models.CharField("書類管理区分", max_length=10, choices=DocKbn.choices)
     department = models.ForeignKey(
@@ -56,6 +71,8 @@ class Group(models.Model):
             # 再利用できる」方針（forms.GroupForm.clean_codeと同じ）もconditionで維持する。
             # departmentがNULL（Rev1.2移行前データ）の行同士はPostgresのNULL非同一仕様でこの制約の
             # 対象外になるが、移行後の新規・編集データは必ずdepartmentを持つため許容する。
+            # 本番移行では旧データ（department IS NULL）の department を必ず補完する運用で確定
+            # （null残置は許容しない、2026-09-10、モデル定義妥当性監査 A-3）。
             models.UniqueConstraint(
                 fields=["department", "code"], condition=Q(is_deleted=False), name="unique_group_code"
             ),
@@ -70,7 +87,7 @@ class Category(models.Model):
     削除は論理削除（xlsx カテゴリー管理!B196、分類と同様）。
     """
 
-    code = models.CharField("カテゴリーコード", max_length=20)
+    code = models.CharField("カテゴリーコード", max_length=20, validators=[_HANKAKU_DIGITS_VALIDATOR])
     name = models.CharField("カテゴリー名", max_length=100)
     group = models.ForeignKey(
         "masters.Group", verbose_name="分類", on_delete=models.PROTECT, related_name="categories"
@@ -90,6 +107,21 @@ class Category(models.Model):
     created_at = models.DateTimeField("作成日時", auto_now_add=True)
     updated_at = models.DateTimeField("更新日時", auto_now=True)
 
+    def clean(self):
+        """カテゴリーの書類管理区分は、紐付ける分類（group）の書類管理区分と一致していなければ
+        ならない（documents/contracts 側は doc_kbn ごとに分類・カテゴリーを絞り込む前提で動く。
+        監査 B-VAL-2）。CategoryForm.clean にも同じチェックがあるが、admin・将来の ModelForm など
+        full_clean() を通る他経路のための多層防御としてモデル層にも持たせる。"""
+        super().clean()
+        if self.group_id and self.doc_kbn and self.group.doc_kbn != self.doc_kbn:
+            from django.core.exceptions import ValidationError
+
+            raise ValidationError(
+                {
+                    "doc_kbn": "書類管理区分が、紐付けた分類の書類管理区分と一致しません。",
+                }
+            )
+
     class Meta:
         db_table = "m_category"
         verbose_name = "カテゴリー"
@@ -97,6 +129,7 @@ class Category(models.Model):
         constraints = [
             # Group同様、is_deleted=Falseの行同士で、かつ同一部署内でのみ一意にする
             # （Group.Meta.constraints unique_group_codeのコメント参照。2026-09-10 No.1）。
+            # department IS NULL 行の本番移行補完も Group と同じ運用で確定（監査 A-3）。
             models.UniqueConstraint(
                 fields=["department", "code"], condition=Q(is_deleted=False), name="unique_category_code"
             ),
@@ -160,9 +193,14 @@ class RetentionPeriod(models.Model):
     doc_name = models.CharField(
         "書類名（電子決裁のみ）", max_length=20, choices=EapprovalDocName.choices, blank=True, default=""
     )
-    period_value = models.PositiveIntegerField("保存期間", null=True, blank=True)
+    # 0ヵ月・0年保存は無意味なため下限1（監査 B-VAL-4）。「永年」時は null で検証スキップ。
+    period_value = models.PositiveIntegerField(
+        "保存期間", null=True, blank=True, validators=[MinValueValidator(1)]
+    )
     period_unit = models.CharField("保存期間単位", max_length=10, choices=RetentionPeriodUnit.choices)
-    display_order = models.PositiveIntegerField("表示順")
+    # 表示順は1始まり（監査 B-VAL-4）。contracts.ContractRelation.display_order（0始まりの内部リンク順）
+    # とは別物。
+    display_order = models.PositiveIntegerField("表示順", validators=[MinValueValidator(1)])
     is_deleted = models.BooleanField("削除済み", default=False)
 
     # Group/Categoryと揃える（両者は最初からcreated_at/updated_atを持つ。RetentionPeriodだけ
@@ -200,6 +238,8 @@ class RetentionPeriod(models.Model):
         ]
 
     def __str__(self):
+        """保存期間の表示名。「永年」は period_value を持たない（null 可）ため固定文字列を返し、
+        それ以外は「5年」「3ヵ月」のように数値＋単位で組み立てる（監査 C-4）。"""
         if self.period_unit == RetentionPeriodUnit.PERMANENT:
             return "永年"
         return f"{self.period_value}{self.get_period_unit_display()}"
@@ -212,7 +252,15 @@ class SystemSetting(models.Model):
     受けた際に容易に変更できること」と指定されている値をまとめて持つ。
     """
 
-    session_idle_timeout_minutes = models.PositiveIntegerField("自動ログアウト時間(分)", default=60)
+    # 0分＝即時ログアウトで機能破綻するため下限1（監査 B-VAL-4）。既定値は settings 参照（C-6）。
+    session_idle_timeout_minutes = models.PositiveIntegerField(
+        "自動ログアウト時間(分)",
+        default=_default_session_idle_timeout,
+        validators=[MinValueValidator(1)],
+    )
+    # 他の設定テーブルと揃えてタイムスタンプを持つ（監査 B-8。screen-other-logout-edit から更新）。
+    created_at = models.DateTimeField("作成日時", auto_now_add=True)
+    updated_at = models.DateTimeField("更新日時", auto_now=True)
     # 「お知らせ」しきい値(notice_threshold_months)・契約書保存期限(contract_retention_years)・
     # 「永年」の実年数(retention_permanent_years)・操作履歴ログ最大保存期間(audit_log_retention_months)
     # は、settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/NOTICE_DELETED_THRESHOLD_MONTHS/
@@ -230,3 +278,13 @@ class SystemSetting(models.Model):
 
     def __str__(self):
         return "システム設定"
+
+    @classmethod
+    def load(cls):
+        """シングルトン行（pk=1）を取得する唯一の入口（監査 B-VAL-7）。以前は読み口が
+        core/views.py の get_or_create(pk=1) と core/middleware.py の .first() で不統一だった
+        （.first() は0行なら None を返し、呼び出し側が実質フォールバック settings 値に頼っていた）。
+        DB の CheckConstraint(pk=1) はPostgresのシーケンスがロールバックで戻らない都合で
+        objects.create() 主体のテスト・admin と相性が悪いため採らず、アクセサをこの1関数へ集約して
+        「常に pk=1 の1行」を保証する。"""
+        return cls.objects.get_or_create(pk=1)[0]

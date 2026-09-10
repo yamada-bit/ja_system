@@ -192,6 +192,8 @@ AUTHORITY_SORT_FIELDS = {
     "department": "department__section_code",  # 特殊扱い（下記filter_authority_queryset参照）、単体では未使用。
     "name": "name",
     "position": "position",
+    # "admin"/"manager"/"staff" のアルファベット順が xlsx 権限コード 1/2/3 昇順と偶然一致している
+    # ことに依存（監査 B-11、PermissionRole の docstring 参照）。格納値を変えるならここも Case/When 化。
     "role": "permission_profile__role",
 }
 

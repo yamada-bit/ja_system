@@ -1,7 +1,7 @@
 import datetime
 from unittest import mock
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from accounts.models import Employee, Position, Rank
@@ -11,6 +11,18 @@ from audit.services import log as audit_log
 from audit.services import log_raw as audit_log_raw
 from organizations.models import Department
 from permissions.models import PermissionProfile, PermissionRole
+
+
+class AuditLogIndexTests(SimpleTestCase):
+    """監査 B-IDX-6：一覧・CSV の職員番号完全一致検索（無制限に増えるテーブル）用の btree 索引。"""
+
+    def test_employee_no_has_db_index(self):
+        self.assertTrue(AuditLog._meta.get_field("employee_no").db_index)
+
+    def test_timestamp_index_has_explicit_name(self):
+        """監査 E-2：-timestamp 索引に明示名（他の索引と揃える）。"""
+        names = {idx.name for idx in AuditLog._meta.indexes}
+        self.assertIn("auditlog_timestamp_desc_idx", names)
 
 
 class AuditLogServiceTests(TestCase):

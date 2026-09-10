@@ -39,6 +39,10 @@ class SessionIdleTimeoutMiddleware:
         try:
             from masters.models import SystemSetting
 
+            # ここだけ SystemSetting.load()（get_or_create）ではなく .first() + None フォールバック
+            # を使う（監査 B-VAL-7）。ミドルウェアは全リクエストで通るため、行が未作成の状態
+            # （デプロイ直後・マイグレーション直後）でも DB へ書き込まず settings 既定値へ静かに
+            # 倒れる方が安全。編集画面（core.views）側は load() に集約済み。
             setting = SystemSetting.objects.first()
             if setting:
                 return setting.session_idle_timeout_minutes
