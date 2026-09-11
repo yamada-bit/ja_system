@@ -416,6 +416,22 @@ class SearchFormDepartmentAutoSetTests(TestCase):
         ).content.decode()
         self.assertEqual(self._dept_display_value(html), "旧総務課")
 
+    def test_notice_link_does_not_prefill_department_for_admin(self):
+        """documents.tests.SearchFormDepartmentAutoSetTests.
+        test_notice_link_does_not_prefill_department_for_adminと同じ理由（core.forms.
+        apply_search_department_default、2026-09-11 発見・ユーザー指摘）。"""
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get("/contracts/search/", {"notice": "expired"}).content.decode()
+        self.assertEqual(self._dept_display_value(html), "")
+
+    def test_notice_link_does_not_prefill_department_for_cross_dept_permission_user(self):
+        """契約書-部門間閲覧設定ありの非管理者も、お知らせ件数集計（contract_searchable_
+        department_ids経由で部門間設定の部署込みで集計）とスコープを合わせるため、お知らせ
+        経由では自部署オートセットをスキップする。"""
+        self.client.login(username="3", password="pass1234")
+        html = self.client.get("/contracts/search/", {"notice": "expired"}).content.decode()
+        self.assertEqual(self._dept_display_value(html), "")
+
 
 class SearchFormNonAdminDepartmentGatingTests(TestCase):
     """[review_test_doc_contract.txt No.26/No.27 追加] contracts.forms.SearchForm.__init__ の
@@ -489,6 +505,64 @@ class SearchFormNonAdminDepartmentGatingTests(TestCase):
         pks = self._queryset_pks(form)
         self.assertEqual(pks, {self.own_dept.pk, self.scope_dept.pk, self.cross_dept.pk})
         self.assertNotIn(self.unrelated_dept.pk, pks)
+
+
+class NoticeLinkDepartmentScopeConsistencyTests(TestCase):
+    """documents.tests.NoticeLinkDepartmentScopeConsistencyTestsと同じ理由（xlsx メイン画面!B40
+    「お知らせの条件に沿った検索結果を自動的に表示する」）。契約書側は権限管理の「契約書-部門間
+    閲覧設定」がある非管理者でも同種の食い違いが起きるため、管理者・部門間閲覧設定ありの
+    非管理者の両方を確認する。"""
+
+    def setUp(self):
+        self.department_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.department_b = Department.objects.create(
+            branch_code="100", branch_name="A支店", section_code="01", section_name="A支店営業課"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="pass1234",
+            department=self.department_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.cross_dept_user = Employee.objects.create_user(
+            employee_no="2", name="部門間", password="pass1234",
+            department=self.department_a, rank=Rank.KOSAYAKU, position=Position.KAKARICHO,
+        )
+        profile = PermissionProfile.objects.create(employee=self.cross_dept_user, role=PermissionRole.STAFF)
+        profile.contract_visible_departments.add(self.department_b)
+        self.group = Group.objects.create(code="A", name="契約分類Ａ", doc_kbn=DocKbn.CONTRACT)
+        self.category = Category.objects.create(
+            code="001", name="契約カテゴリーＡ", group=self.group, doc_kbn=DocKbn.CONTRACT
+        )
+
+    def _create_expired_contract(self, department, uploader):
+        from contracts.models import Contract
+
+        contract = Contract(
+            title="テスト", department=department, group=self.group, category=self.category,
+            year=2026, uploader=uploader, expiry_date=datetime.date.today() - datetime.timedelta(days=1),
+        )
+        contract.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        contract.save()
+        return contract
+
+    def test_admin_notice_search_includes_departments_beyond_own(self):
+        self._create_expired_contract(self.department_a, self.admin)
+        self._create_expired_contract(self.department_b, self.admin)
+        self.client.login(username="1", password="pass1234")
+        response = self.client.get("/contracts/search/", {"notice": "expired"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 2)
+
+    def test_cross_dept_permission_user_notice_search_includes_granted_department(self):
+        """部門間閲覧設定で追加された部署は自動セット対象外（B421-423）だが、お知らせ経由の
+        遷移ではその部署分もバッジ集計（contract_searchable_department_ids）に含まれるため、
+        検索結果にも含める必要がある。"""
+        self._create_expired_contract(self.department_a, self.cross_dept_user)
+        self._create_expired_contract(self.department_b, self.cross_dept_user)
+        self.client.login(username="2", password="pass1234")
+        response = self.client.get("/contracts/search/", {"notice": "expired"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 2)
 
 
 class SearchSortTests(TestCase):

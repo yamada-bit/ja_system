@@ -1754,3 +1754,54 @@ ocr_textdata も保存しない／保存するのは textdatas（Vision 生レ�
 劣化するのは「テキスト層PDFの登録時点の抽出結果を DB に永続保存する」という内部的な冗長性のみ
 （原本ファイル保持＋再抽出でカバー）。`extracted_text` は view/API/テンプレートのどこからも
 参照されておらず、検索スニペット・本文表示の機能は存在しないため表示系は無影響。
+
+## メイン画面お知らせ件数と遷移先検索初期表示の部署スコープ不一致を修正（2026-09-11、ユーザー指摘）
+
+### 経緯
+
+ユーザーから「管理者で複数部署閲覧できる場合に部署A(2)＋部署B(1)で3件と表示、遷移先では管理者が
+所属する部署Aで絞り込み初期表示が2件」という実地の不整合報告を受け調査。xlsx メイン画面!B40
+「・件数をクリックすると『検索・閲覧画面』へ遷移し、**お知らせの条件に沿った**検索結果を
+自動的に表示する。」の「お知らせの条件に沿った」＝バッジが数えた母集団と遷移先の表示件数は
+一致すべき、という原本の意図に対する実装バグと判断し修正した（Rev1.6でのメイン画面シート自体の
+文言変更は無し。ユーザーが引用した「部署による絞り込みがあり全件表示できない場合がある」は
+Rev1.6原文ではなく、この不整合に対するユーザー自身の懸念だった）。
+
+### 原因
+
+`core.notice_services.get_notice_counts()`（バッジ集計）と `documents/contracts.forms.SearchForm`
+（遷移先の検索フォーム）が、部署スコープについて異なるルールを使っていた：
+
+- バッジ集計：管理者は部署フィルタ無し＝全部署集計。契約書は非管理者でも
+  `contract_searchable_department_ids()`（自部署＋閲覧部署範囲＋契約書-部門間閲覧設定）まで含めて集計。
+- 検索フォームの初期表示：`core.forms.apply_search_department_default()` が
+  xlsx 検索・閲覧・変更!B47,B417「ログインユーザーの部署を自動セットする」に従い、管理者も
+  含めて`department`欄に**自部署（visible_department_ids、部門間閲覧設定は含まない）のみ**を
+  既定投入していた。
+
+お知らせリンク（`?notice=expired`等、`department`パラメータ無し）でこの既定が働くと、バッジが
+数えた範囲より遷移先が狭くなる。非管理者（部門間閲覧設定なし）はバッジ側も同じ
+`visible_department_ids`で絞っているため元々一致しており、影響は**管理者、および契約書-部門間
+閲覧設定を持つ非管理者に限定**されていた。
+
+### 対応
+
+`core.forms.apply_search_department_default()` に、data に `notice` があり `department` が無い
+場合はこの既定セット自体をスキップする分岐を追加（呼び出し元の `documents/contracts.forms.
+SearchForm` 側は無改修）。スキップ後は各アプリの `search_services.build_queryset()` が持つ
+「選べる部署の上限」フィルタ（documents: 非管理者のみ `visible_department_ids`／contracts:
+`contract_searchable_department_ids()`、管理者は常にNone＝無制限）だけが効き、これがバッジ集計と
+同じ関数・同じ範囲のため自動的に一致する。`department`が明示指定された場合（`?notice=expired&
+department=1`等）は従来通り優先される。
+
+### テスト
+
+- `documents.tests.SearchFormDepartmentAutoSetTests`：お知らせ経由で部署欄が空になること／
+  明示指定時は従来通り優先されることを追加。
+- `documents.tests.NoticeLinkDepartmentScopeConsistencyTests`（新設）：管理者が自部署以外にも
+  期限切れ文書を持つ場合、お知らせ経由の検索結果件数がバッジ集計と一致すること（結合テスト）。
+- `contracts.tests.SearchFormDepartmentAutoSetTests`：管理者・契約書-部門間閲覧設定ありの非管理者
+  の両方でお知らせ経由の部署欄が空になることを追加。
+- `contracts.tests.NoticeLinkDepartmentScopeConsistencyTests`（新設）：管理者、および部門間閲覧
+  設定ありの非管理者の両方で、お知らせ経由の検索結果件数がバッジ集計と一致することを確認。
+- `manage.py test`（documents/contracts/core、計597件）PASS、既存テストの回帰無し。

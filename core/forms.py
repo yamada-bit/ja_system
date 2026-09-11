@@ -154,8 +154,22 @@ def apply_search_department_default(args, kwargs, department_ids):
     場合（request.GETにdepartmentあり）や「条件クリア」（クエリ無し＝この既定に戻る）は
     従来どおり。`department_ids`が空（退職者・部署未設定等）なら何もしない。
     `apply_radio_defaults`の後に呼び出し、戻り値をそのまま`super().__init__`へ渡す。
+
+    メイン画面「お知らせ」件数クリック（`notice`ありでdepartmentが無いアクセス、xlsx メイン画面
+    !B40「お知らせの条件に沿った検索結果を自動的に表示する」）ではこの既定セット自体をスキップ
+    する。お知らせの件数集計（core.notice_services.get_notice_counts）は管理者について部署
+    フィルタを一切掛けずに全部署を数える（documents側）／契約書側もcontract_searchable_
+    department_ids()で権限管理の部門間閲覧設定分まで含めて数えるため、ここで自部署（に限定した
+    department_ids）を既定投入すると、遷移先がその範囲だけに絞られてバッジ件数と食い違う
+    （2026-09-11ユーザー指摘で発見。管理者はバッジ＝全部署・検索初期表示＝自部署のみで不一致、
+    契約書-部門間閲覧設定を持つ非管理者もバッジ＝設定込み・検索初期表示＝自部署のみで同様に
+    不一致だった）。非管理者（部門間閲覧設定なし）はバッジ側も同じ`department_ids`で絞っており
+    元々一致しているため、このスキップによる影響は無い。
     """
     if not department_ids:
+        return args, kwargs
+    data_preview = args[0] if args and args[0] is not None else kwargs.get("data")
+    if data_preview is not None and data_preview.get("notice") and not data_preview.get("department"):
         return args, kwargs
     joined = ",".join(str(i) for i in department_ids)
     if args and args[0] is not None:

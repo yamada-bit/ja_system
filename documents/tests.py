@@ -463,6 +463,72 @@ class SearchFormDepartmentAutoSetTests(TestCase):
         entry = AuditLog.objects.get(action="文書検索　検索")
         self.assertEqual(entry.event_message, "文書タイトル：規定")
 
+    def test_notice_link_does_not_prefill_department_for_admin(self):
+        """メイン画面お知らせ件数クリック（?notice=...）は自部署オートセットの対象外にする
+        （core.forms.apply_search_department_default、2026-09-11 発見・ユーザー指摘）。
+        管理者はお知らせ件数集計（core.notice_services.get_notice_counts）で部署フィルタを
+        一切掛けず全部署を数えるため、遷移先で自部署だけプリフィルされるとバッジ件数と
+        表示件数が食い違う。department欄が空（＝全部署対象）で開くことを確認する。"""
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get("/documents/search/", {"notice": "expired"}).content.decode()
+        self.assertEqual(self._dept_display_value(html), "")
+
+    def test_explicit_department_with_notice_is_not_overridden(self):
+        """お知らせ経由でも`department`が明示指定されていれば従来通りそれを優先する
+        （apply_search_department_defaultは`department`キーが無い時のみ働く既存仕様）。"""
+        self.client.login(username="1", password="pass1234")
+        html = self.client.get(
+            "/documents/search/", {"notice": "expired", "department": str(self.old_section.pk)}
+        ).content.decode()
+        self.assertEqual(self._dept_display_value(html), "旧総務課")
+
+
+class NoticeLinkDepartmentScopeConsistencyTests(TestCase):
+    """お知らせバッジ件数（core.notice_services.get_notice_counts）と、そのバッジから遷移した
+    検索・閲覧画面の初期表示件数が一致すること（xlsx メイン画面!B40「お知らせの条件に沿った
+    検索結果を自動的に表示する」）。管理者が自部署以外にも対象データを持つ部署を閲覧できる場合、
+    自部署オートセット（apply_search_department_default）が遷移先を自部署だけに絞ってしまい、
+    バッジ件数（全部署集計）と食い違っていた（2026-09-11 発見・ユーザー指摘）。"""
+
+    def setUp(self):
+        self.department_a = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        self.department_b = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="02", section_name="経理部"
+        )
+        self.admin = Employee.objects.create_user(
+            employee_no="1", name="管理者", password="pass1234",
+            department=self.department_a, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        PermissionProfile.objects.create(employee=self.admin, role=PermissionRole.ADMIN)
+        self.group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        self.category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=self.group, doc_kbn=DocKbn.DOCUMENT
+        )
+        self.retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+
+    def _create_expired_document(self, department):
+        from documents.models import Document
+
+        doc = Document(
+            title="テスト", department=department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.admin,
+            expiry_date=datetime.date.today() - datetime.timedelta(days=1),
+        )
+        doc.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+        doc.save()
+        return doc
+
+    def test_admin_notice_search_includes_departments_beyond_own(self):
+        self._create_expired_document(self.department_a)
+        self._create_expired_document(self.department_b)
+        self.client.login(username="1", password="pass1234")
+        response = self.client.get("/documents/search/", {"notice": "expired"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 2)
+
 
 class SearchSortTests(TestCase):
     """screen-search列見出しソート（documents.search_services.apply_sort）の回帰テスト。
