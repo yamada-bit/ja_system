@@ -97,8 +97,8 @@ class Contract(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
             "再抽出させたい場合は運用手順で False に戻す。"
         ),
     )
-    # documents.Document.ocr_textdata と同じ（監査 案3、2026-09-11）。Contract には privacy_flag が
-    # 無いため settings.OCR_STORE_TEXTDATA のみに従って保存する。
+    # documents.Document.ocr_textdata と同じ（監査 案3、2026-09-11）。当初実装は privacy_flag の
+    # 影響なしで、Document/Contract とも settings.OCR_STORE_TEXTDATA のみに従って保存する。
     ocr_textdata = models.JSONField(
         "OCR座標データ",
         null=True,

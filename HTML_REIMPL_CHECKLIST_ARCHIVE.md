@@ -1711,8 +1711,10 @@ ocr_textdata も保存しない／保存するのは textdatas（Vision 生レ�
   `[{"page":n,"w":pw,"h":ph,"lines":[[x1,y1,x2,y2,text], ...]}, ...]` の配列形式でキー重複を圧縮）を
   保存する。1000ページのスキャン文書で埋め込み済みPDF数十〜数百MB → 座標JSON 1〜4MB（圧縮後）。
 - 保存条件：`settings.OCR_STORE_TEXTDATA=True`（旧 `OCR_EMBED_TEXT_TO_PDF` からリネーム、既定
-  False のまま）かつ `_should_store_textdata(obj)`（`documents.Document.privacy_flag=True` を除外、
-  2026-09-11ユーザー指示。Contract は privacy_flag が無く設定のみに従う）。
+  False のまま）。**当初実装は privacy_flag の影響なし**（`_should_store_textdata()` は常に True、
+  Document/Contract とも設定のみに従う。2026-09-11ユーザー方針。当初「privacy_flag=True は除外」で
+  実装したが、その後「まず privacy_flag の影響なしで実装したい」に変更。除外ロジックは
+  `Command._should_store_textdata` にコメントアウトで残置＝コメント行1つ有効化で再度除外できる）。
 - 遅延生成：`core.searchable_pdf_services.build_searchable_pdf(obj)` ＝
   `pdf_text_embed_services.embed_textdatas_into_pdf(原本PDF, textdatas_from_json(obj.ocr_textdata))`。
   `ocr_textdata` が null なら `SearchablePdfUnavailable`。

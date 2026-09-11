@@ -2292,15 +2292,18 @@ class ExtractPendingPdfTextTextdataTests(TestCase):
         self.assertTrue(doc.text_extracted)
         self.assertIsNone(doc.ocr_textdata)
 
-    def test_textdata_not_stored_for_document_with_privacy_flag(self):
-        """個人情報が含まれる文書（privacy_flag=True）は OCR_STORE_TEXTDATA=True でも
-        ocr_textdata を保存しない（本文を DB へ複製しない、2026-09-11ユーザー指示）。"""
+    def test_textdata_stored_for_document_with_privacy_flag(self):
+        """当初実装は privacy_flag の影響なし：個人情報が含まれる文書（privacy_flag=True）でも
+        OCR_STORE_TEXTDATA=True なら ocr_textdata を保存する（2026-09-11ユーザー方針。将来除外
+        したくなった場合の切替点は _should_store_textdata）。"""
         doc = self._make_document("個人情報を含む文書", privacy_flag=True)
         self._run_ocr_batch(store_textdata=True)
         doc.refresh_from_db()
         self.assertEqual(doc.extracted_text_normalized, normalize_for_search("座標付きOCRで抽出した本文"))
         self.assertTrue(doc.text_extracted)
-        self.assertIsNone(doc.ocr_textdata)
+        self.assertEqual(
+            doc.ocr_textdata, ocr_layout_services.textdatas_to_json(self._FAKE_TEXTDATAS)
+        )
 
     def test_textdata_stored_when_enabled_and_not_private(self):
         doc = self._make_document("座標保存対象", privacy_flag=False)
@@ -2330,23 +2333,20 @@ class ExtractPendingPdfTextTextdataTests(TestCase):
 
 
 class ShouldStoreTextdataTests(TestCase):
-    """extract_pending_pdf_textコマンドの_should_store_textdata（OCR座標データ保存の要否判定、
-    documents.Document.privacy_flag連動）の単体テスト（監査 案3、2026-09-11。旧 ShouldEmbedTests）。"""
+    """extract_pending_pdf_textコマンドの_should_store_textdata の単体テスト（監査 案3、2026-09-11。
+    旧 ShouldEmbedTests）。**当初実装は privacy_flag の影響なし＝常に True**（将来 privacy_flag=True
+    を除外したくなったら同メソッドのコメントアウト行を有効化する）。"""
 
     def setUp(self):
         from core.management.commands.extract_pending_pdf_text import Command
 
         self.command = Command()
 
-    def test_stores_when_privacy_flag_false(self):
+    def test_stores_regardless_of_privacy_flag(self):
         self.assertTrue(self.command._should_store_textdata(SimpleNamespace(privacy_flag=False)))
-
-    def test_skips_when_privacy_flag_true(self):
-        self.assertFalse(self.command._should_store_textdata(SimpleNamespace(privacy_flag=True)))
+        self.assertTrue(self.command._should_store_textdata(SimpleNamespace(privacy_flag=True)))
 
     def test_stores_when_model_has_no_privacy_flag_field(self):
-        """contracts.Contract のように個人情報フラグを持たないモデルは個別判定を行わず、
-        settings.OCR_STORE_TEXTDATA のみに従う。"""
         self.assertTrue(self.command._should_store_textdata(SimpleNamespace()))
 
 

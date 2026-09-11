@@ -12,14 +12,13 @@ text_extracted=False のまま次回以降のポーリングに持ち越す（�
 監査 案1）、text_extracted=True にする（結果が空文字列でも「抽出は完了」＝True。旧 ocr_attempted
 ＋extracted_text=""判定を1フラグに統合、監査 案2）。
 
-OCR時、settings.OCR_STORE_TEXTDATA=True かつ _should_store_textdata() が True を返す場合のみ、
-Vision から取得した行レイアウト（textdatas）を ocr_textdata（JSONField）へ保存する。これは
-検索用PDF（OCRテキスト埋め込み版）を core.searchable_pdf_services が必要時に生成するための元データ
-（監査 案3：以前は埋め込み済みPDFを searchable_file へ恒久保存していたが、桁違いに小さい座標
-データの保存＋遅延生成に置き換えた）。_should_store_textdata() は documents.Document.privacy_flag
-（個人情報が含まれる）が True のレコードを除外する（個人情報の本文を DB へ複製しない、
-2026-09-11ユーザー指示。旧 _should_embed と同じ考え方）。privacy_flag を持たない
-contracts.Contract はこの個別判定を行わず settings.OCR_STORE_TEXTDATA のみに従う。
+OCR時、settings.OCR_STORE_TEXTDATA=True の場合に、Vision から取得した行レイアウト（textdatas）を
+ocr_textdata（JSONField）へ保存する。これは検索用PDF（OCRテキスト埋め込み版）を
+core.searchable_pdf_services が必要時に生成するための元データ（監査 案3：以前は埋め込み済みPDFを
+searchable_file へ恒久保存していたが、桁違いに小さい座標データの保存＋遅延生成に置き換えた）。
+当初実装は privacy_flag の影響なし（_should_store_textdata() は常に True）。将来
+documents.Document.privacy_flag=True を除外したくなった場合の切替点は _should_store_textdata()
+（同メソッドの docstring 参照）。
 
 1件の抽出失敗（破損ファイル・OCR呼び出し失敗等）でバッチ全体を止めない設計とする
 （本コマンドは5分間隔で自動的に再実行されるため、失敗したレコードだけ text_extracted=False の
@@ -167,9 +166,12 @@ class Command(BaseCommand):
     def _should_store_textdata(obj):
         """このレコードの OCR 座標データ（ocr_textdata）を DB へ保存してよいかを判定する。
 
-        documents.Document.privacy_flag（個人情報が含まれる）が True のレコードは、本文テキストを
-        DB へ複製することになるため保存対象から除外する（2026-09-11ユーザー指示、旧 _should_embed と
-        同じ考え方）。privacy_flag 自体を持たないモデル（contracts.Contract には個人情報フラグの
-        概念が無い、CLAUDE.md参照）は、この個別判定を行わず settings.OCR_STORE_TEXTDATA のみに従う。
+        **当初実装は privacy_flag の影響なし**（settings.OCR_STORE_TEXTDATA のみに従い、Document /
+        Contract を問わず常に保存する。2026-09-11ユーザー方針）。
+
+        将来「個人情報を含む文書（documents.Document.privacy_flag=True）は本文由来の座標データを
+        DB へ複製しない」に切り替えたくなったら、下記コメントアウトした1行を有効化するだけでよい
+        （contracts.Contract は privacy_flag を持たないため getattr のデフォルト False で常に保存対象）。
         """
-        return not getattr(obj, "privacy_flag", False)
+        # return not getattr(obj, "privacy_flag", False)
+        return True

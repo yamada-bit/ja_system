@@ -117,8 +117,8 @@ class BaseSearchablePdfView(View):
         try:
             pdf_bytes = searchable_pdf_services.build_searchable_pdf(obj)
         except SearchablePdfUnavailable:
-            # テキスト層PDF・privacy_flag=Trueの文書・OCR前・OCR_STORE_TEXTDATA=Falseで
-            # OCRされた文書は座標データを持たないため生成できない。
+            # テキスト層PDF・OCR前・OCR_STORE_TEXTDATA=False でOCRされた文書は座標データを
+            # 持たないため生成できない。
             raise Http404("この文書には検索用PDFがありません。")
         except OSError:
             logger.exception("検索用PDF生成時のファイル実体取得に失敗しました: %s_id=%s", self.kind, pk)

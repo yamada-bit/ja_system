@@ -236,10 +236,10 @@ POPPLER_PATH = env("POPPLER_PATH", default="")
 # 別に DB へ恒久保存する運用の承認は別途必要なため、既定は無効のまま。OCR自体は常に
 # core.ocr_layout_services.extract_text_and_layout_via_ocr（座標付き抽出）を使うため、このフラグを
 # 切り替えても Vision API 呼び出し方法自体は変わらない（Trueの間は取得済みの座標データを
-# ocr_textdata へ保存するだけで、Vision API を二重に呼ぶことはない）。加えて、
-# documents.Document.privacy_flag=True（個人情報を含む）のレコードは、このフラグがTrueでも
-# 保存対象から除外する（core.management.commands.extract_pending_pdf_text.Command.
-# _should_store_textdata参照、2026-09-11ユーザー指示）。
+# ocr_textdata へ保存するだけで、Vision API を二重に呼ぶことはない）。当初実装は privacy_flag の
+# 影響なし（Document/Contract とも設定のみに従う。将来 privacy_flag=True を除外したくなった場合の
+# 切替点は core.management.commands.extract_pending_pdf_text.Command._should_store_textdata、
+# 2026-09-11ユーザー方針）。
 OCR_STORE_TEXTDATA = env.bool("OCR_STORE_TEXTDATA", default=False)
 
 # 保管画面２・編集画面・検索結果詳細ポップアップ・検索/閲覧画面「文書イメージ」欄の

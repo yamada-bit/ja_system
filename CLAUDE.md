@@ -39,11 +39,13 @@ JAふくおか八女向け「クラウド文書管理システム」。**画面�
   poppler（pdf2imageの依存バイナリ）はリポジトリに含まないため、OS PATHが通っていない環境では
   `.env`の`POPPLER_PATH`で指定する。誤OCR等で再抽出させたい場合は `text_extracted` を False に戻す。
 - 検索用PDF（OCRテキスト埋め込み版）：スキャン文書のOCR行レイアウトを `ocr_textdata`（JSONField、
-  `settings.OCR_STORE_TEXTDATA=True` かつ Document の `privacy_flag=False` の場合のみ保存）に持ち、
-  利用者のダウンロード要求時に `core.searchable_pdf_services.build_searchable_pdf` が原本PDF＋座標
-  データから遅延生成する（`documents/contracts:searchable_pdf` エンドポイント。まだどの画面からも
-  リンクしていない）。旧 `searchable_file`（埋め込み済みPDFの恒久保存）を、桁違いに小さい座標データ
-  ＋遅延生成に置き換えたもの＝監査 案3、2026-09-11。
+  `settings.OCR_STORE_TEXTDATA=True` のスキャン文書で保存。当初実装は privacy_flag の影響なし
+  ＝Document/Contract とも設定のみに従う。将来 `privacy_flag=True` を除外する場合の切替点は
+  `extract_pending_pdf_text.Command._should_store_textdata`）に持ち、利用者のダウンロード要求時に
+  `core.searchable_pdf_services.build_searchable_pdf` が原本PDF＋座標データから遅延生成する
+  （`documents/contracts:searchable_pdf` エンドポイント。まだどの画面からもリンクしていない）。
+  旧 `searchable_file`（埋め込み済みPDFの恒久保存）を、桁違いに小さい座標データ＋遅延生成に
+  置き換えたもの＝監査 案3、2026-09-11。
 - 認証はDjangoカスタムユーザー（`accounts.Employee`、`employee_no`でログイン、Argon2ハッシュ）
 - フロントエンドはDjangoテンプレート＋素のJS（`static/js/common.js`、フレームワーク不使用）。
   原本HTMLのJS挙動（`popup-select`/`popup-detail`のドラッグ・リサイズ、各種トグル等）を

@@ -25,8 +25,8 @@ def build_searchable_pdf(obj):
     """obj（Document/Contract）の原本PDFに、保存済み ocr_textdata の透明テキストを重ねた
     新しいPDFのバイト列を返す。
 
-    ocr_textdata が None/空（テキスト層PDF、privacy_flag=True、settings.OCR_STORE_TEXTDATA=False
-    でOCRされたスキャン文書、OCR前）の場合は SearchablePdfUnavailable を送出する。
+    ocr_textdata が None/空（テキスト層PDF、settings.OCR_STORE_TEXTDATA=False でOCRされた
+    スキャン文書、OCR前）の場合は SearchablePdfUnavailable を送出する。
     ファイル実体の取得失敗（OSError）は呼び出し元でハンドリングさせるためそのまま伝播させる。
     """
     if not obj.ocr_textdata:

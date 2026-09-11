@@ -103,10 +103,12 @@ class Document(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
         help_text=(
             "スキャン文書の OCR 行レイアウト（core.ocr_layout_services.textdatas_to_json 形式）。"
             "検索用PDF（OCRテキスト埋め込み版）を core.searchable_pdf_services が必要時に生成するための"
-            "元データ。settings.OCR_STORE_TEXTDATA=True かつ privacy_flag=False（個人情報を含まない）の"
-            "スキャン文書でのみ保存する（個人情報の本文を DB へ複製しないため）。テキスト層PDF・"
-            "privacy_flag=True の文書は null（監査 案3、2026-09-11。旧 searchable_file〈埋め込み済み"
-            "PDFの恒久保存〉を、桁違いに小さい座標データの保存＋遅延生成に置き換えた）。"
+            "元データ。settings.OCR_STORE_TEXTDATA=True のスキャン文書で保存する（当初実装は "
+            "privacy_flag の影響なし。将来 privacy_flag=True を除外したくなった場合の切替点は "
+            "core.management.commands.extract_pending_pdf_text.Command._should_store_textdata）。"
+            "テキスト層PDF・OCR前・OCR_STORE_TEXTDATA=False の文書は null（監査 案3、2026-09-11。"
+            "旧 searchable_file〈埋め込み済みPDFの恒久保存〉を、桁違いに小さい座標データの保存＋"
+            "遅延生成に置き換えた）。"
         ),
     )
 
