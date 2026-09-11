@@ -226,6 +226,33 @@ class DateRangeValidationTests(TestCase):
             SearchForm(data={"save_date_start": "2026-01-01", "save_date_end": "2026-06-01"}).is_valid()
         )
 
+    def test_reversed_date_range_does_not_discard_other_filters(self):
+        """documents.tests.SearchFormDateRangeTests.
+        test_reversed_date_range_does_not_discard_other_filtersと同じ理由（2026-09-11監査で発見）：
+        build_querysetがform全体のis_valid()で門番していたため、期間の前後関係を間違えただけで
+        タイトル等の他条件まで無視され全件表示になっていた。"""
+        from contracts.models import Contract
+
+        def _create(title):
+            contract = Contract(
+                title=title, department=self.department, group=self.group, category=self.category,
+                year=2026, uploader=self.admin, expiry_date=datetime.date(2036, 1, 1),
+            )
+            contract.file.save("c.pdf", ContentFile(b"x"), save=False)
+            contract.save()
+            return contract
+
+        target = _create("apple contract")
+        other = _create("unrelated contract")
+
+        response = self.client.get(
+            "/contracts/search/",
+            {"title": "apple", "save_date_start": "2026-06-01", "save_date_end": "2026-01-01"},
+        )
+        page_obj = response.context["page_obj"]
+        self.assertIn(target, page_obj.object_list)
+        self.assertNotIn(other, page_obj.object_list)
+
     def _upload_data(self, suffix, **overrides):
         data = {
             f"year{suffix}": 2026, "title_0": "契約書A",
@@ -2948,6 +2975,38 @@ class DetailAPIViewTests(TestCase):
             [{"title": "（閲覧権限のない関連資料）", "is_deleted": False,
               "preview_url": None, "out_of_scope": True}],
         )
+
+    def test_edit_screen_related_rows_out_of_scope_title_is_masked(self):
+        """2026-09-11監査で発見：contracts.api.DetailAPIView（S1）はタイトルを伏せ字にする
+        よう対応済みだったが、同じ関連契約書を表示する編集画面(ContractEditView)側の
+        `_related_rows_for_contract`にはこのガードが無く、`filter_valid_related_ids`が
+        スコープ変更後も既存の紐付けを維持する仕様（keep_ids）と組み合わさって、部署スコープ外の
+        契約書タイトル（取引先名等を含みうる）がそのまま編集画面に表示され得た。"""
+        from contracts.models import Contract, ContractRelation
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True,
+        )
+        other_dept = Department.objects.create(
+            branch_code="999", branch_name="他店", section_code="99", section_name="他部署"
+        )
+        outsider = Contract(
+            title="他部署の機微な取引先名", department=other_dept, group=self.group,
+            category=self.category, year=2025, uploader=self.employee,
+            expiry_date=datetime.date(2035, 1, 1),
+        )
+        outsider.file.save("x.pdf", ContentFile(b"R"), save=False)
+        outsider.save()
+        ContractRelation.objects.create(
+            contract=self.contract, related_contract=outsider, display_order=0
+        )
+
+        response = self.client.get(f"/contracts/{self.contract.pk}/edit/")
+        self.assertEqual(
+            response.context["related_rows"],
+            [{"id": outsider.pk, "title": "（閲覧権限のない関連資料）", "is_deleted": False}],
+        )
+        self.assertNotContains(response, "他部署の機微な取引先名")
 
     def test_related_contracts_admin_sees_all_titles(self):
         """管理者は contract_searchable_department_ids=None のため伏せ字にしない。"""

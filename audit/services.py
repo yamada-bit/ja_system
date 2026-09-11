@@ -55,23 +55,31 @@ def filter_audit_log_queryset(form):
     # のdocstring参照）。検索フォームの操作日(開始)がこれより前でも、この下限より過去には遡れない。
     # DATE() キャストを挟まない timestamp__gte で Index(fields=["-timestamp"]) を効かせる（No.5）。
     qs = AuditLog.objects.filter(timestamp__gte=retention_cutoff_datetime()).order_by("-timestamp")
-    if form.is_valid():
-        if form.cleaned_data.get("date_start"):
-            qs = qs.filter(timestamp__date__gte=form.cleaned_data["date_start"])
-        if form.cleaned_data.get("date_end"):
-            qs = qs.filter(timestamp__date__lte=form.cleaned_data["date_end"])
-        if form.cleaned_data.get("employee_no"):
-            # xlsx 操作履歴ログ!B36-37(Rev1.1)「職員番号の完全一致検索とする」。
-            qs = qs.filter(employee_no=form.cleaned_data["employee_no"])
-        if form.cleaned_data.get("employee_name"):
-            qs = filter_by_full_name(qs, form.cleaned_data["employee_name"], field_name="employee_name")
-        if form.cleaned_data.get("event_message"):
-            # xlsx 操作履歴ログ!B42-43(Rev1.1)「イベントメッセージの文字列 部分一致検索とする。
-            # (スペース区切りのAND検索が可能)」。
-            for term in form.cleaned_data["event_message"].split():
-                qs = qs.filter(event_message__icontains=term)
-        if form.cleaned_data.get("personal_info_flag"):
-            qs = qs.filter(personal_info_flag=True)
+    # is_valid()の真偽では門番しない：core.forms.validate_date_range（操作日の前後関係チェック）は
+    # date_endだけをcleaned_dataから除外してエラーにする仕様のため、ここを`if form.is_valid():`の
+    # ブロックにすると、日付を逆に入力しただけで職員番号・氏名・イベントメッセージ・個人情報フラグの
+    # 条件まで全て無視され、保存期間内の全ログが無条件に一覧・CSV出力されてしまう（2026-09-11監査で
+    # 発見。原本互換の「該当条件だけ効かない」に留める）。is_valid()はフォーム未バインドだと
+    # cleaned_data自体が作られないため、呼び出し側の規約（必ずQueryDictをバインド、本docstring
+    # 上部参照）を前提にgetattrで防御する。
+    form.is_valid()
+    cleaned_data = getattr(form, "cleaned_data", {})
+    if cleaned_data.get("date_start"):
+        qs = qs.filter(timestamp__date__gte=cleaned_data["date_start"])
+    if cleaned_data.get("date_end"):
+        qs = qs.filter(timestamp__date__lte=cleaned_data["date_end"])
+    if cleaned_data.get("employee_no"):
+        # xlsx 操作履歴ログ!B36-37(Rev1.1)「職員番号の完全一致検索とする」。
+        qs = qs.filter(employee_no=cleaned_data["employee_no"])
+    if cleaned_data.get("employee_name"):
+        qs = filter_by_full_name(qs, cleaned_data["employee_name"], field_name="employee_name")
+    if cleaned_data.get("event_message"):
+        # xlsx 操作履歴ログ!B42-43(Rev1.1)「イベントメッセージの文字列 部分一致検索とする。
+        # (スペース区切りのAND検索が可能)」。
+        for term in cleaned_data["event_message"].split():
+            qs = qs.filter(event_message__icontains=term)
+    if cleaned_data.get("personal_info_flag"):
+        qs = qs.filter(personal_info_flag=True)
     return qs
 
 

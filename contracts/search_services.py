@@ -77,7 +77,13 @@ def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort
                 )
         return apply_sort(qs.filter(pk__in=valid_pks), sort_key, sort_dir)
 
-    data = form.cleaned_data if form.is_valid() else {}
+    # documents.search_services.build_querysetと同じ理由：is_valid()の真偽で門番せず、
+    # クロスフィールド検証（core.forms.validate_date_range）で無効化されたフィールドだけを
+    # cleaned_dataから欠落させる（該当条件のみ無視）。`else {}`だと期間の前後関係を
+    # 間違えただけで他の絞り込み条件まで全て消え「全件表示」になってしまう
+    # （2026-09-11監査で発見）。
+    form.is_valid()
+    data = getattr(form, "cleaned_data", {})
 
     if data.get("department"):
         qs = qs.filter(department__in=data["department"])

@@ -83,7 +83,14 @@ def build_queryset(form, *, employee, notice=None, pks=None, sort_key=None, sort
                 )
         return apply_sort(qs.filter(pk__in=valid_pks), sort_key, sort_dir)
 
-    data = form.cleaned_data if form.is_valid() else {}
+    # is_valid()の真偽では門番しない：core.forms.validate_date_range等のクロスフィールド検証は
+    # 該当フィールド（例: save_date_end）だけをcleaned_dataから除外してエラーにする仕様のため、
+    # ここで`else {}`にすると期間の前後関係を間違えただけで部署/分類/タイトル等の他条件まで
+    # 全て無視され「絞り込みなしの全件」が表示されてしまう（2026-09-11監査で発見。原本互換の
+    # 「該当条件だけ効かない」に留める）。is_valid()はフォーム未バインドだとcleaned_data自体が
+    # 作られないため、呼び出し側の規約（必ずQueryDictをバインド）を前提にgetattrで防御する。
+    form.is_valid()
+    data = getattr(form, "cleaned_data", {})
 
     # 部署/分類/年/カテゴリーは原本通り複数選択（チェックボックス）ポップアップのため、
     # QuerySet/リストで受け取り__inで絞り込む。

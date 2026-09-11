@@ -214,6 +214,47 @@ class SearchFormDateRangeTests(TestCase):
         self.assertTrue(SearchForm(data={"save_date_start": "2026-01-01"}).is_valid())
         self.assertTrue(SearchForm(data={"save_date_end": "2026-01-01"}).is_valid())
 
+    def test_reversed_date_range_does_not_discard_other_filters(self):
+        """2026-09-11監査で発見：build_querysetは`form.cleaned_data if form.is_valid() else {}`
+        でform全体の真偽を見ていたため、期間の前後関係を間違えただけで部署・分類・タイトル等の
+        他の絞り込み条件まで全て無視され「絞り込みなしの全件」が表示されてしまっていた
+        （原本の想定＝逆転期間は単に0件、から後退した規模の大きい回帰）。他条件は
+        引き続き効くことを確認する。"""
+        from documents.models import Document
+
+        group = Group.objects.create(code="A", name="分類Ａ", doc_kbn=DocKbn.DOCUMENT)
+        category = Category.objects.create(
+            code="001", name="カテゴリーＡ", group=group, doc_kbn=DocKbn.DOCUMENT
+        )
+        retention_period = RetentionPeriod.objects.create(
+            kbn=RetentionKbn.DOCUMENT, period_value=1, period_unit=RetentionPeriodUnit.YEAR, display_order=1
+        )
+
+        def _create(title):
+            doc = Document(
+                title=title, department=self.department, group=group, category=category,
+                year=2026, retention_period=retention_period, uploader=self.employee,
+                expiry_date=datetime.date(2030, 1, 1),
+            )
+            doc.file.save("test.pdf", ContentFile(b"dummy"), save=False)
+            doc.save()
+            return doc
+
+        target = _create("apple report")
+        other = _create("unrelated memo")
+
+        response = self.client.get(
+            "/documents/search/",
+            {
+                "title": "apple",
+                "save_date_start": "2026-06-01",
+                "save_date_end": "2026-01-01",  # 逆転入力
+            },
+        )
+        page_obj = response.context["page_obj"]
+        self.assertIn(target, page_obj.object_list)
+        self.assertNotIn(other, page_obj.object_list)
+
 
 class SearchQuerysetTests(TestCase):
     """screen-search「文書タイトル」「フリーワード」のAND/OR切替（xlsx 検索・閲覧・変更シート）。"""
@@ -1172,6 +1213,22 @@ class SearchablePdfViewTests(TestCase):
 
         Document.objects.filter(pk=self.document.pk).update(ocr_textdata=None)
         response = self.client.get(f"/documents/{self.document.pk}/searchable-pdf/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_404_and_logged_when_stored_pdf_is_corrupted(self):
+        """2026-09-11監査で発見：原本PDF実体が破損している場合、core.pdf_text_embed_servicesの
+        PdfReader呼び出しがpypdf.errors.PyPdfError系例外を送出するが、以前はOSError/
+        SearchablePdfUnavailableしか捕捉しておらず未捕捉のまま500になっていた。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        from pypdf.errors import PdfReadError
+
+        with mock.patch(
+            "core.record_views.searchable_pdf_services.build_searchable_pdf",
+            side_effect=PdfReadError("not a pdf"),
+        ):
+            response = self.client.get(f"/documents/{self.document.pk}/searchable-pdf/")
         self.assertEqual(response.status_code, 404)
 
 

@@ -8,6 +8,7 @@ from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.utils import timezone
 from django.views import View
+from pypdf.errors import PyPdfError
 
 from audit import services as audit_services
 from core import deletion_services, searchable_pdf_services
@@ -123,6 +124,13 @@ class BaseSearchablePdfView(View):
         except OSError:
             logger.exception("検索用PDF生成時のファイル実体取得に失敗しました: %s_id=%s", self.kind, pk)
             raise Http404("ファイルが見つかりません。")
+        except PyPdfError:
+            # 原本PDF実体が破損・切り詰め等でpypdfが解析できない場合（core.pdf_text_embed_services.
+            # embed_textdatas_into_pdfのPdfReader呼び出しが送出）。OSErrorと同様にファイルI/O境界の
+            # 異常として扱い、未捕捉のまま500になるのを防ぐ（2026-09-11監査で発見：案3のPDF埋め込み
+            # 遅延生成〈core.searchable_pdf_services〉導入時、pypdf固有の例外がここに素通しだった）。
+            logger.exception("検索用PDF生成時にPDFの解析に失敗しました: %s_id=%s", self.kind, pk)
+            raise Http404("この文書のPDFを読み込めませんでした。")
         response = FileResponse(
             io.BytesIO(pdf_bytes),
             as_attachment=True,

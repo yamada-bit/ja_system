@@ -137,6 +137,7 @@ class UploadStep2View(RequiresContractEditMixin, View):
                 "file_field_sets": _merge_related_into_field_sets(
                     upload_views.file_field_sets(form, pending, UploadStep2Form.PER_FILE_FIELDS),
                     per_file_related_ids,
+                    request.user,
                 ),
                 "active_doc_index": active_doc_index,
                 "token": token,
@@ -334,6 +335,7 @@ class UploadStep2View(RequiresContractEditMixin, View):
                         list(c.related_links.values_list("related_contract_id", flat=True))
                         for c in created
                     ],
+                    request.user,
                 ),
                 "active_doc_index": 0,
                 "token": token,
@@ -378,7 +380,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                 "contract": self.object,
                 "token": token,
                 "title_field": form["title_0"],
-                "related_rows": _related_rows_for_contract(self.object),
+                "related_rows": _related_rows_for_contract(self.object, request.user),
                 "related_search_url": reverse("contracts:api_related_search"),
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="contract"),
@@ -405,7 +407,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                     "token": token,
                     "title_field": form["title_0"],
                     "related_rows": _resolve_related_rows(
-                        request.POST.getlist("related_contract_ids")
+                        request.POST.getlist("related_contract_ids"), request.user
                     ),
                     "related_search_url": reverse("contracts:api_related_search"),
                     "preview_kind": get_preview_kind(self.object.display_name),
@@ -450,7 +452,7 @@ class ContractEditView(RequiresContractEditMixin, UpdateView):
                 "contract": contract,
                 "token": token,
                 "title_field": form["title_0"],
-                "related_rows": _related_rows_for_contract(contract),
+                "related_rows": _related_rows_for_contract(contract, request.user),
                 "related_search_url": reverse("contracts:api_related_search"),
                 "complete": {"created": [contract], "mode": "update"},
                 "preview_kind": get_preview_kind(self.object.display_name),
@@ -610,24 +612,24 @@ class BulkEditView(RequiresContractEditMixin, bulk_edit_views.BaseBulkEditView):
 
     def render_context_extra(self, request, form, state):
         return {
-            "related_rows": self._related_rows(state),
+            "related_rows": self._related_rows(state, request.user),
             "related_search_url": reverse("contracts:api_related_search"),
         }
 
     def complete_context_extra(self, request, form):
         return {
-            "related_rows": _related_rows_for_contract(self.object),
+            "related_rows": _related_rows_for_contract(self.object, request.user),
             "related_search_url": reverse("contracts:api_related_search"),
         }
 
-    def _related_rows(self, state):
+    def _related_rows(self, state, employee):
         """一括編集画面の[3]関連書類の表示行。そのページで関連書類を編集済み（ステージあり）なら
         ステージ内容を、未編集なら現在の紐付けを表示する（他のフォーム欄と同じ「ステージ優先・
         なければ現状」方式）。"""
         staged_ids = bulk_edit_services.staged_related_ids_for(state, self.object.pk)
         if staged_ids is None:
-            return _related_rows_for_contract(self.object)
-        return _resolve_related_rows(staged_ids)
+            return _related_rows_for_contract(self.object, employee)
+        return _resolve_related_rows(staged_ids, employee)
 
 
 class SearchView(LoginRequiredMixin, View):
@@ -791,20 +793,32 @@ def _strip_ext(filename):
 # の pk 並びをテンプレートの表示行へ解決する。保存時の実在・権限チェックは
 # contracts.services.filter_valid_related_ids が担い、ここは見た目のみ（存在しないpkは黙って落とす）。
 
-def _related_rows_for_contract(contract):
+def _related_row(contract, allowed_department_ids):
+    """関連契約書1件の表示行。閲覧者の部署スコープ外なら、contracts.api.DetailAPIView.get
+    （`_related_contract_payload`、review_security.txt No.1／S1）と同じくタイトルを伏せ字にする。
+    `filter_valid_related_ids`（contracts/services.py）はスコープ変更後も既存の紐付けを
+    `keep_ids`で維持する仕様のため、編集画面等で「今は閲覧できない契約書」への紐付けが
+    普通に存在しうる（2026-09-11監査で発見：api.py側だけ対応済みで、この編集画面・一括編集・
+    保管画面２側の描画には同種のガードが無く、取引先名等を含むタイトルがそのまま漏れていた）。"""
+    out_of_scope = (
+        allowed_department_ids is not None and contract.department_id not in allowed_department_ids
+    )
+    return {
+        "id": contract.pk,
+        "title": "（閲覧権限のない関連資料）" if out_of_scope else contract.title,
+        "is_deleted": contract.is_deleted,
+    }
+
+
+def _related_rows_for_contract(contract, employee):
     """`contract.related_links`（related_contract を prefetch 済み前提）を編集画面の表示行へ。"""
-    return [
-        {
-            "id": link.related_contract_id,
-            "title": link.related_contract.title,
-            "is_deleted": link.related_contract.is_deleted,
-        }
-        for link in contract.related_links.all()
-    ]
+    allowed_department_ids = contract_searchable_department_ids(employee)
+    return [_related_row(link.related_contract, allowed_department_ids) for link in contract.related_links.all()]
 
 
-def _resolve_related_rows(raw_ids):
+def _resolve_related_rows(raw_ids, employee):
     """契約書pk（文字列可・順序保持・重複可）のリストを表示行 `[{id, title, is_deleted}]` に解決する。"""
+    allowed_department_ids = contract_searchable_department_ids(employee)
     int_ids = []
     for tok in raw_ids:
         try:
@@ -818,11 +832,11 @@ def _resolve_related_rows(raw_ids):
         contract = by_pk.get(pk)
         if contract is not None and pk not in seen:
             seen.add(pk)
-            rows.append({"id": contract.pk, "title": contract.title, "is_deleted": contract.is_deleted})
+            rows.append(_related_row(contract, allowed_department_ids))
     return rows
 
 
-def _merge_related_into_field_sets(field_sets, per_file_related_ids):
+def _merge_related_into_field_sets(field_sets, per_file_related_ids, employee):
     """`core.upload_views.file_field_sets` の各要素に、そのファイルの関連書類表示行
     （`related_contracts`）を足し込む。`per_file_related_ids` はファイルごとの契約書pkリストの
     リスト（None＝全ファイル空）。storage2.html はメタデータ欄と同じ添字で [3] 関連書類を描く。"""
@@ -832,7 +846,7 @@ def _merge_related_into_field_sets(field_sets, per_file_related_ids):
             if per_file_related_ids and i < len(per_file_related_ids)
             else []
         )
-        field_set["related_contracts"] = _resolve_related_rows(raw)
+        field_set["related_contracts"] = _resolve_related_rows(raw, employee)
     return field_sets
 
 

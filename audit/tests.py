@@ -216,6 +216,27 @@ class AuditLogListViewTests(TestCase):
         form = AuditLogSearchForm(data={"date_start": "2026-01-01", "date_end": "2026-01-01"})
         self.assertTrue(form.is_valid())
 
+    def test_reversed_date_range_does_not_discard_other_filters(self):
+        """2026-09-11監査で発見：filter_audit_log_queryset（audit/services.py）が
+        `if form.is_valid():`ブロックで全フィルタを門番していたため、操作日の前後関係を
+        間違えただけで職員番号・氏名・イベントメッセージ・個人情報フラグの条件まで全て無視され、
+        保存期間内の全ログが無条件に一覧・CSV出力されてしまっていた。他条件は引き続き
+        効くことを確認する（一覧表示・CSV出力の両方）。"""
+        response = self.client.get(
+            "/audit/",
+            {"employee_name": "山田", "date_start": "2026-06-01", "date_end": "2026-01-01"},
+        )
+        self.assertContains(response, "文書　ダウンロード")
+        self.assertNotContains(response, "ログイン</td>")
+
+        csv_response = self.client.get(
+            "/audit/csv/",
+            {"employee_name": "山田", "date_start": "2026-06-01", "date_end": "2026-01-01"},
+        )
+        content = b"".join(csv_response.streaming_content).decode("utf-8-sig")
+        self.assertIn("文書　ダウンロード", content)
+        self.assertNotIn("テスト太郎", content)
+
     def test_filter_by_employee_name(self):
         response = self.client.get("/audit/", {"employee_name": "山田"})
         self.assertContains(response, "文書　ダウンロード")
