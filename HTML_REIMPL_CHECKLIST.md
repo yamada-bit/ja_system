@@ -23,11 +23,12 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
 - 第一陣（検索・保管画面）／第二陣（設定画面：職員マスタ〜権限管理）／第三陣（設定画面：
   分類マスタ〜その他設定）とも実装・原本フィデリティ監査完了。フェーズ8の全陣横断整合性
   チェックも完了。詳細はアーカイブの「フェーズ0」〜「フェーズ8」節参照。
-- 原本HTML改訂 html1→html2→html3→html4→html5、簡易設計指示書 Rev1.0→…→Rev1.3→Rev1.4まで
-  反映済み（現在の一次情報源はhtml5 + Rev1.4）。詳細はアーカイブの「原本HTML改訂差分の確認」
+- 原本HTML改訂 html1→html2→html3→html4→html5→html6、簡易設計指示書 Rev1.0→…→Rev1.5→Rev1.6まで
+  反映済み（現在の一次情報源はhtml6 + Rev1.6）。詳細はアーカイブの「原本HTML改訂差分の確認」
   「原本HTML/xlsx Rev1.1改訂の反映」「簡易設計指示書 Rev1.2改訂の反映」
   「簡易設計指示書 Rev1.3改訂の反映」「原本HTML改訂差分の確認（html4→html5）・簡易設計指示書
-  Rev1.4改訂の反映」各節参照。
+  Rev1.4改訂の反映」「原本HTML改訂差分の確認（html5→html6）・簡易設計指示書 Rev1.5改訂の反映」
+  「簡易設計指示書 Rev1.6 改訂の反映」各節参照。
 - html4→html5 / Rev1.3→Rev1.4改訂の反映（2026-08-28）：Rev1.4は保管シートの説明文言復活＋説明画像
   2枚のみで新規挙動なし。html5で新規反映したのは (A)権限管理一覧「操作」列の固定列化、(B)保管
   登録フォームの「削除」ボタンを[4]メモ欄ボックス外へ移動、(C)common.js `openPopupPopup`の
@@ -74,11 +75,21 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
 - 全文検索・OCRデータ層の再設計（2026-09-11、ユーザー依頼、**完了**）：容量最適化の相談を受けて、
   生 `extracted_text` カラム廃止（案1、`extracted_text_normalized` のみ保持）／`ocr_attempted`＋
   `extracted_text=""` 判定を `text_extracted` フラグに統合（案2）／`searchable_file`（埋め込み済みPDF
-  恒久保存）を `ocr_textdata`（OCR座標JSON、privacy_flag=True は保存しない）＋ `core.searchable_pdf_
+  恒久保存）を `ocr_textdata`（OCR座標JSON）＋ `core.searchable_pdf_
   services` による遅延生成＋ `documents/contracts:searchable_pdf` エンドポイントに置き換え（案3）。
   `OCR_EMBED_TEXT_TO_PDF`→`OCR_STORE_TEXTDATA` にリネーム。0001 直書き・`--check` クリーン・
   全1002件 PASS。既存機能はすべて維持（設計討議で機能マトリクス確認）。詳細はアーカイブ
   「全文検索・OCRデータ層の再設計（案1+2+3）」節参照。
+- 案3調整（2026-09-11、ユーザー依頼、**完了**）：`ocr_textdata` の保存を `privacy_flag` に依存させない
+  方針に変更（`_should_store_textdata()` は常に True。当初「`privacy_flag=True` は除外」で実装したが
+  「まず影響なしで実装したい」に変更。除外ロジックは同メソッドにコメントアウトで残置）。
+  全590件 PASS。詳細はアーカイブ「全文検索・OCRデータ層の再設計（案1+2+3）」節内の追記参照。
+- メイン画面お知らせ件数と遷移先検索初期表示の部署スコープ不一致を修正（2026-09-11、ユーザー指摘）：
+  管理者の「お知らせ」バッジ件数（部署フィルタ無し全部署集計）と、遷移先検索画面の自部署オートセット
+  （xlsx 検索・閲覧・変更!B47/B417）が食い違っていた問題。`core.forms.apply_search_department_default()`
+  にお知らせリンク経由（department未指定）ではオートセット自体をスキップする分岐を追加。
+  `manage.py test documents contracts core` 597件PASS。詳細はアーカイブ「メイン画面お知らせ件数と
+  遷移先検索初期表示の部署スコープ不一致を修正」節参照。
 - xlsx記載の要再確認（赤字）27箇所は全件解消済み。残る恒久的な未実装・保留事項は
   `CLAUDE.md`「既知の未実装・保留事項」に集約されている（電子決裁機能全般、論理削除
   文書・契約書の復元機能は「不要」と最終確定済み）。

@@ -6,12 +6,12 @@
 
 JAふくおか八女向け「クラウド文書管理システム」。**画面構成・項目・挙動の一次情報源は
 原本HTML（`../../HTML/html6/index.html`＋`style.css`、34画面を1ファイルにまとめた単一HTML）と
-簡易設計指示書（`../../HTML/文書管理システム_簡易設計指示書_Rev1_5.xlsx`）そのもの**。この原本を基に
+簡易設計指示書（`../../HTML/文書管理システム_簡易設計指示書_Rev1_6.xlsx`）そのもの**。この原本を基に
 3陣構成（第一陣：検索・保管画面／第二陣：設定画面〈職員マスタ〜権限管理〉／第三陣：設定画面〈分類
 マスタ〜その他設定〉）で作り直し、実装・原本フィデリティ監査・フェーズ8（全陣完了後の横断整合性
 チェック）まで完了済み。
 
-改訂履歴（原本HTML html1→html6、指示書 Rev1.0→Rev1.5）の各差分と反映経緯は
+改訂履歴（原本HTML html1→html6、指示書 Rev1.0→Rev1.6）の各差分と反映経緯は
 [HTML_REIMPL_CHECKLIST.md](HTML_REIMPL_CHECKLIST.md)「実装状況サマリ」および
 `HTML_REIMPL_CHECKLIST_ARCHIVE.md`（Rev1.4=2026-08-28以降）／`HTML_REIMPL_CHECKLIST_ARCHIVE2.md`
 （Phase 0〜8・Rev1.1〜1.3期）に反映節あり。新しい原本改訂を受け取ったら下記「原本改訂を受け取った
@@ -202,6 +202,10 @@ xlsx側の「要再確認（赤字）」箇所や資料不足、業務要件未�
 3. 差分を画面固有／共通部分（`common.js`等）のどちらかに振り分け、該当箇所のみ確認する。
 4. 詳細な反映経緯は`HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録し、`HTML_REIMPL_CHECKLIST.md`の
    「実装状況サマリ」も1行で更新する。
+
+差分反映からxlsx全行監査・アプリごとの品質チェック・リリース最終ゲートまでの一連の実行順序と
+Claude Codeへの指示テンプレートは[REVISION_TO_RELEASE_WORKFLOW.md](REVISION_TO_RELEASE_WORKFLOW.md)
+に集約している。
 
 ### 同一注記が複数箇所に繰り返し付いている場合
 xlsx/HTML上で同一の注記（「※〜の場合、ボタンを非表示とする」等）が複数のボタン・複数の
