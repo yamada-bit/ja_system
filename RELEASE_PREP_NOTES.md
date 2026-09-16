@@ -404,3 +404,94 @@ IISは`requestFiltering.maxAllowedContentLength`が未設定だと既定で約30
 変えられるが、`web.config`はXMLの静的値であり`.env`を参照できないため、値の変更時は
 両方を手動で揃える必要がある（反映後はIISの対象サイトを再起動 or `web.config`更新による
 自動リサイクルを確認する）。
+
+---
+
+## 10. フェーズ5最終ゲート実行結果（2026-09-16）
+
+RELEASE_QUALITY_WORKFLOW.md ⑦の最終ゲートを実行した結果。HEAD=`a1258ad`（ブランチ`main`）。
+環境: Python 3.13.11 / Django 5.2.9 / venv `C:\Users\yamad\Claude\JA\ja_system\venv`。
+
+**結論：ブロッカーなし。リリース可。**
+
+**対象範囲の補足**：このリポジトリはフェーズ1〜4の修正を`main`へ直接コミットする運用のため、
+テンプレート指示の`main...HEAD`は文字通りには空diffになる。代わりに、P0で取得済みの
+`release_baseline.txt`（コミット`62962ea`、テスト実行時点のHEAD=`3875727`）から今回のHEAD
+`a1258ad`までの差分（`git diff 62962ea..HEAD`＝フェーズ1〜4で積んだ4コミット：xlsx全行監査
+フェーズ2の分類マスタ削除ブロック追加・masters/documents/contractsの品質チェック修正・
+ワークフロー文書更新）を実質的な最終ゲート対象とした。
+
+### 1. 全体テスト × ベースライン照合
+
+`python manage.py test --verbosity=1`を実行：**1018件実行、失敗0・エラー0（OK）**。
+`release_baseline.txt`の1013件から5件増（フェーズ1〜4の品質チェックで追加した回帰テスト分、
+masters/tests.py・contracts/tests.pyの差分と一致）。新規に増えた失敗はゼロ。
+
+### 2. 静的チェック
+
+- `python manage.py makemigrations --check --dry-run` → `No changes detected`（OK）
+- `python manage.py check` → `System check identified no issues (0 silenced)`（OK）
+- `python manage.py check --deploy --settings=config.settings.prod` → WARNING 3件：
+  - **W019**（`X_FRAME_OPTIONS`が`DENY`でない）・**W021**（`SECURE_HSTS_PRELOAD`未設定）：
+    前回ゲート（7節）と同一内容で、意図的な設定として許容済み。
+  - **W008**（`SECURE_SSL_REDIRECT`が`True`でない）：前回ゲート時は出ていなかった新規WARNING
+    だが、コード側の問題ではない。この開発環境のローカル`.env`が`SECURE_SSL_REDIRECT=False`
+    （プロキシを挟まないテスト用の値）になっているのが原因で、`config/settings/prod.py`側は
+    `env.bool("SECURE_SSL_REDIRECT", default=True)`のまま変更されていない（4節の対応通り）。
+    本番`.env`で明示的にFalseにしない限り本番には影響しない。
+
+### 3. 差分全体レビュー
+
+`git diff 62962ea..HEAD`のうちコード差分は6ファイル・約90行（contracts/api.py・
+contracts/services.py・contracts/views.py・core/master_views.py・masters/views.py・
+templates/masters/class_list.html。他はドキュメント・review_*.txt・xlsx_audit_*.txtのみ）と
+小さく、かつ各変更はフェーズ1〜4の個別品質チェック内で`/code-review high`相当のレビュー→
+修正→テスト追加まで完了済み（`review_code_masters.txt`「分類一覧の削除ボタン非活性条件が
+新しいブロック条件に追随していない」＝高、`review_code_doc_contract_phase4.txt`「関連契約書の
+部署スコープ外レダクションでis_deletedが漏れる」＝中、等）。本ゲートでは独立した再読み合わせを
+行い、追加の問題は検出されなかった：
+
+- `contracts/services.py`の新設`related_contract_scope_view`は`contracts/api.py`
+  （`_related_contract_payload`）・`contracts/views.py`（`_related_row`）の両方から呼ばれており、
+  他に個別実装が残っていないことをgrepで確認。
+- `masters/views.py`の`active_category_count`アノテーションは`_group_queryset_with_counts()`に
+  集約されており、`GroupListView.base_queryset`・`GroupDeleteView.get_object`（いずれも
+  `scoped_get_object_or_404(_group_queryset_with_counts(), ...)`経由）の両方に反映されることを
+  確認。テンプレート側の`{% if group.active_category_count == 0 and ... or ... %}`は
+  Djangoテンプレートの`and`が`or`より優先される仕様に沿って意図通りの真偽になることを確認。
+- `masters/views.py`の`_group_queryset_with_counts()`は`Count(..., distinct=True, filter=...)`を
+  3つ（doc_count/contract_count/active_category_count）に増やしているが、既存の2つと同じく
+  `distinct=True`があるため複数to-many関係のJOIN展開による重複カウントは発生しない
+  （`review_code_masters.txt`で個別検証済みの内容を再確認）。
+
+### 4. フィデリティ・スポット再確認
+
+今回の差分は原本HTML/xlsxの新機能ではなく、xlsx全行監査フェーズ2で確定した削除ブロック条件の
+追加（分類管理）と、既存の部署スコープ外レダクション（関連契約書）の漏れ修正。
+`templates/masters/class_list.html`の`disabled`＋`title`属性パターンはCLAUDE.mdの既定パターンに
+沿っており、原本との突き合わせが必要な新規UIは無い。
+
+### 5. 実アプリのスモークテスト
+
+Browser paneで`runserver`（`django-dev`構成）を起動し確認。**コンソールエラー・テンプレート
+構文の生表示・500は一件も発生せず**：
+
+- ログイン（職員番号1・菅理太郎）→ メイン画面表示を確認
+- `/masters/class/`（分類管理一覧、今回の主な変更screen）：4件とも削除ボタンがdisabledで、
+  ツールチップが新しい文言「紐づく書類または配下のカテゴリーがあるため削除できません
+  （いずれも0件のときのみ削除可）」で表示されることを確認（seed_test_dataには
+  active_category_count==0かつdoc/contract_count==0の分類が無いため、削除ボタンが活性化する
+  ケースは今回のブラウザ確認では再現できず、そちらは上記ユニットテスト3件
+  ＜test_class_list_delete_button_disabled_reflects_active_category_block等＞でロジック検証済み）
+- `/contracts/search/`→検索→詳細ポップアップを開き、`related_contract_scope_view`経由に
+  変わった`/contracts/api/1/`が200を返し表示も正常であることを確認
+- `/healthz/` → `200 OK` `{"status": "ok", "database": "ok"}`
+
+### 6. 総合判断
+
+**ブロッカーなし。リリース可。** 本ゲートで新規に検出した問題は無し。
+
+引き続き以下は本ゲートのスコープ外として未解決のまま残っている（本ファイル1〜6と同一）：
+static/js minify・本番初期マスタ投入手段・定期バッチのsettings module未指定・
+`SECURE_PROXY_SSL_HEADER`関連の本番`.env`設定・CSV初期パスワードの初回強制変更・
+監査ログ表記ゆれ。

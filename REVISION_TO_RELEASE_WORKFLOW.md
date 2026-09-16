@@ -210,7 +210,8 @@ RELEASE_QUALITY_WORKFLOW.mdの①〜④テンプレートを対象アプリに�
 詳細テンプレート：RELEASE_QUALITY_WORKFLOW.md ⑦（既存、コピー不要でそのまま使う）。
 release_baseline.txtが無い場合のP0手順（作業ツリーをクリーンにしてから全体テスト・環境情報を
 取得し保存する）は、RELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」を参照する
-（現時点でrelease_baseline.txtは未生成のまま＝次回フェーズ5実行時は必ずP0から始める）。
+（2026-09-16にP0を実行しrelease_baseline.txtを取得・コミット済み＝コミット62962ea。
+その後にコードへ変更が入った場合はP0からの再取得が必要）。
 フェーズ1〜4の修正がすべてコミットされた状態で、別セッション（`/clear`後）で実行する。
 
 ```
