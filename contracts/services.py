@@ -132,6 +132,28 @@ def sync_related_contracts(contract, related_ids):
             row.save(update_fields=["display_order"])
 
 
+def related_contract_scope_view(contract, allowed_department_ids):
+    """関連契約書1件を表示用に「部署スコープ外なら伏せ字化」した結果（`title`/`is_deleted`/
+    `out_of_scope`）にする。`contracts.views._related_row`と`contracts.api.DetailAPIView.
+    _related_contract_payload`が個別に実装していたのを集約（品質チェック指摘、2026-09-16）。
+
+    集約前は両者ともtitleだけ伏せ字にし、is_deletedは実値のまま返していた
+    （`filter_valid_related_ids`のkeep_ids設計上、スコープ外・論理削除済みの関連契約書は
+    普通に存在しうる）。そのため他部署の関連契約書が論理削除されているかどうかという、
+    本来見えないはずの情報が、templates/contracts/edit.htmlの`{% if row.is_deleted %}`分岐
+    （削除済み表示・赤字）を通じてそのまま画面に出てしまっていた。titleと同じ保護レベルに
+    揃えるため、スコープ外の場合はis_deletedも常にFalse固定にする。
+    """
+    out_of_scope = (
+        allowed_department_ids is not None and contract.department_id not in allowed_department_ids
+    )
+    return {
+        "title": "（閲覧権限のない関連資料）" if out_of_scope else contract.title,
+        "is_deleted": False if out_of_scope else contract.is_deleted,
+        "out_of_scope": out_of_scope,
+    }
+
+
 def filter_valid_related_ids(ids, *, employee, exclude_pk=None, keep_ids=None):
     """関連書類として紐付けてよい契約書pkだけに絞る（並び順は維持、重複は除去）。
 

@@ -1,0 +1,87 @@
+レビュー対象: documents/, contracts/（本体のみ。core/は対象外）
+対象範囲: git diff 38b1ac3..HEAD -- documents/ contracts/
+　　　　　（前回のdocuments/contracts全体品質チェック(d7d1219/38b1ac3/39736f0、review_code_doc_contract_full.txt等)
+　　　　　以降の差分。OCR・全文検索基盤の再設計、検索用PDF遅延生成、関連契約書スコープ関連の修正等を含む）
+実施方法: /code-review high 相当（8角度をbackground agentで並行調査→自分で実コード確認して検証）
+実施日: 2026-09-16
+
+## 指摘一覧
+
+### 中: 関連契約書の部署スコープ外レダクションで is_deleted が漏れる
+- ファイル: contracts/views.py:796-810（`_related_row`）、contracts/api.py:85-107（`_related_contract_payload`）
+- 現状: どちらも「部署スコープ外なら`title`を伏せ字にする」（review_security.txt No.1／S1で追加）が、
+  `is_deleted`は`out_of_scope`に関わらず実値をそのまま返す。
+- あるべき姿: `is_deleted`もtitleと同じ保護レベルにする（out_of_scope時はnullにする、またはレスポンス
+  自体から除外する）。
+- 影響: 部署スコープ外の契約書の「存在有無・削除状態」という、本来見えないはずの情報が漏れる。
+  templates/contracts/edit.html:131の`{% if row.is_deleted %}`分岐で実際に赤字「（削除済み）」表示
+  まで確認した（直接観測可能な漏洩）。CLAUDE.md「同一注記が複数箇所に繰り返し付いている場合...
+  1つずつ個別に開いて実装済みか確認する」の典型例（S1のタイトル伏せ字対応をviews.py/api.py双方に
+  横展開した際、is_deletedへの適用が両方とも漏れていた）。
+- 優先度判断: 中（機微情報そのものではないが、越境情報漏洩ではあり、既存の類似対応方針との不整合）
+
+### 低〜中: 上記レダクションロジックがcontracts/api.pyとcontracts/views.pyに二重実装
+- ファイル: contracts/api.py:85-107、contracts/views.py:796-810
+- 現状: `out_of_scope`判定式・伏せ字文言「（閲覧権限のない関連資料）」が2箇所に個別実装されている。
+  views.py側のdocstringはapi.py側の実装を明示的に参照・追随していると書いているが、関数自体は
+  共有していない。
+- あるべき姿: `contracts/services.py`（`filter_valid_related_ids`と同じスコープ判定ロジックの
+  自然な置き場所）に共通関数として切り出し、api.py/views.py両方から呼ぶ。
+- 影響: 上記のis_deleted漏れのように、片方だけ直して他方に横展開し忘れるリスクが実際に顕在化した。
+- 優先度判断: 中（is_deleted漏れの再発防止も兼ねて、修正時に一緒に対応するのが合理的）
+
+### 低: 検索フォームの部分バリデーションガードがdocuments/contracts双方に重複実装
+- ファイル: documents/search_services.py:92-93、contracts/search_services.py:85-86
+- 現状: 「日付範囲エラー等でform.is_valid()がFalseでも、他のフィールドのcleaned_dataは活かす」
+  （`form.is_valid(); data = getattr(form, "cleaned_data", {})`）という修正が、同一コメント付きで
+  両ファイルに個別実装されている。
+- あるべき姿: `core/search_services.py`（`apply_sort`/`apply_word_filter`等、documents/contracts間の
+  同一実装をここに集約済み）に追加し、両アプリから呼ぶ。
+- 影響: 低（現状は正しく動作。将来この挙動を変更する際に片方だけ直す抜け漏れリスク）。
+- 優先度判断: 低
+
+### 低: 一括編集・複数ファイルアップロードで部署スコープ計算がファイル数分重複実行
+- ファイル: contracts/views.py:813-836（`_related_rows_for_contract`/`_resolve_related_rows`）、
+  呼び出し元の`_merge_related_into_field_sets`（storage2複数ファイルアップロードのプレビュー再描画）
+- 現状: `contract_searchable_department_ids(employee)`（内部でvisible_department_ids等、数クエリ）が
+  ファイルごと・関連書類解決ごとに個別に再計算されている。リクエスト内で値は不変。
+- あるべき姿: リクエスト冒頭で1回計算し、呼び出しチェーンへ値として渡す（現状も`employee`は
+  引き回しているため、`allowed_department_ids`に置き換えるだけで済む）。
+- 影響: 低（N件アップロード時にN倍のスコープ計算クエリが走るが、規模上致命的ではない）。
+- 優先度判断: 低
+
+## 確認したが対応不要と判断した点（既に別監査で検討済み・意図的な設計）
+- documents/models.py・contracts/models.py の`_YEAR_VALIDATORS`重複：MODEL_AUDIT_FINDINGS.md
+  B-VAL-3で2026-09-10に「定数は併記（クロスアプリimport回避）」と明記済みの既定方針。
+- `core.upload_validation.validate_no_active_content`がfull_clean経由でのみ効く（通常のアップロード
+  フローでは効かない）点：MODEL_AUDIT_FINDINGS.md B-VAL-8で「多層防御」として明記済みの既定方針。
+- 契約書検索用PDF（SearchablePdfView）がダウンロード毎に毎回埋め込み処理を再実行しキャッシュしない点：
+  CLAUDE.md記載の「案3」（恒久保存ファイルの代わりに座標データからの遅延生成へ意図的に置き換えた
+  設計）そのものであり、new bugではない。
+- `ocr_textdata`の保存がprivacy_flagの影響を受けない点：CLAUDE.md本文に「当初実装は privacy_flag
+  の影響なし＝Document/Contract とも設定のみに従う。将来privacy_flag=Trueを除外する場合の切替点は
+  extract_pending_pdf_text.Command._should_store_textdata」と明記済みの既知・意図的な設計。
+
+## 低優先度として記録のみに留める（watch item）
+- 一括編集（保管画面２）でstage_extra時にfilter_valid_related_idsでスコープ検証した
+  related_contract_idsが、commit_one_update時には再検証されない（ウィザード滞在中に管理者が
+  DepartmentViewScopeを変更した場合の理論上のケース）。ただし既存の`keep_ids`設計自体が
+  「スコープ変更後も既存の紐付けは維持する」という方針を明示的に採用しているため、この延長線上の
+  挙動であり新規のリグレッションではない。次にこの周辺を触る際に留意する程度で良い。
+- `extracted_text_normalized`/`ocr_textdata`は現状すべての編集経路が非deferredなquerysetで
+  オブジェクトを取得しているため安全だが、将来`LIST_DEFERRED_HEAVY_FIELDS`で`.only()`/`.defer()`した
+  querysetから取得したオブジェクトに対して素の`.save()`（`update_fields`指定なし）を呼ぶコードが
+  追加されると、これらのフィールドが空値で上書きされるリスクがある。現状は該当コードなし。
+
+## 対応結果（2026-09-16）
+- 中（is_deleted漏れ）・低〜中（api.py/views.py重複）: まとめて対応済み。
+  `contracts/services.py`に`related_contract_scope_view(contract, allowed_department_ids)`を
+  新設し、title・is_deletedの伏せ字化ロジックを一本化。`contracts/views.py:_related_row`と
+  `contracts/api.py:_related_contract_payload`の両方をこの関数経由に変更し、is_deletedも
+  スコープ外なら常にFalseを返すようにした。
+- テスト: `contracts/tests.py`に
+  `test_related_contracts_out_of_scope_deleted_status_is_masked`（API）・
+  `test_edit_screen_related_rows_out_of_scope_deleted_status_is_masked`（編集画面）を追加。
+  contracts 234件PASS。
+- 低（search_services.pyの重複）・低（部署スコープ計算の重複実行）: 今回は見送り
+  （実害が小さく、次にこのあたりを触る機会にまとめて対応する）。

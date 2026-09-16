@@ -1,0 +1,34 @@
+レビュー対象: documents/, contracts/（本体のみ。core/は対象外）
+対象範囲: git diff 38b1ac3..HEAD -- documents/ contracts/
+実施方法: /security-review 相当（background agentで調査）
+実施日: 2026-09-16
+
+## 結論
+確度80%以上の新規導入された脆弱性は検出されなかった（該当なし）。
+
+## 確認した観点と根拠
+- SQLインジェクション: raw SQL・`.extra()`・文字列組み立てクエリは無し。全てDjango ORM経由。
+- 関連契約書タイトルの越境漏洩（contracts/api.py `_related_contract_payload`、contracts/views.py
+  `_related_row`）: これは今回のdiffで「新たに入った脆弱性」ではなく、逆に既存の漏洩
+  （部署スコープに関わらずtitleが常に返っていた）を塞ぐ修正そのもの。修正は
+  `contract_searchable_department_ids(request.user)`で一貫してスコープ判定しており、新たな
+  バイパス経路は無い（is_deletedの漏れについては①コードレビュー側で指摘・記録済み。機微情報の
+  露出というよりは正しさ/一貫性の問題として扱う）。
+- 新設`SearchablePdfView`（documents/views.py, contracts/views.py）: 既存の`DownloadView`/
+  `PreviewView`と同じ`scoped_get_object_or_404`＋`can_download`の権限チェックを経由しており、
+  部署スコープのバイパス経路は無い。
+- `ocr_textdata`がprivacy_flagの影響を受けなくなった点: ダウンロード自体の権限チェック
+  （`can_download`＋部署スコープ）は元のファイルダウンロードと同一のままで、権限昇格は無い
+  （ユーザーが既にダウンロードできる内容のテキスト表現が増えるだけ）。
+- documents/search_services.py・contracts/search_services.py の`form.is_valid()`変更：
+  部署スコープによる絞り込み（`allowed_department_ids`）はform.cleaned_dataの成否と無関係に
+  常に適用されるため、この変更で越境露出が発生することはない。
+- ファイル保存パス（documents/storage_paths.py, contracts/storage_paths.py）: 削除されたのは
+  不要になった`*_searchable_upload_path`関数のみで、ユーザー制御値がパス生成に新たに混入する
+  変更は無い。
+- contracts/forms.py `CommaNumberInput.format_value`: 不正なDecimal値をraw文字列で返すように
+  なったが、テンプレート出力はDjangoの自動エスケープを経由するため（`|safe`/`mark_safe`なし）
+  XSSには該当しない。
+
+## 未修正
+このファイルは洗い出しのみで、まだ修正していない（今回は該当指摘なし）。

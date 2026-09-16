@@ -2976,6 +2976,36 @@ class DetailAPIViewTests(TestCase):
               "preview_url": None, "out_of_scope": True}],
         )
 
+    def test_related_contracts_out_of_scope_deleted_status_is_masked(self):
+        """品質チェック指摘（2026-09-16）：部署スコープ外の関連契約書はtitleだけでなく
+        is_deletedも伏せ字化する。実際にはis_deleted=Trueの契約書でも、レスポンスは
+        Falseで返す（他部署契約書の削除状態という、本来見えないはずの情報を漏らさないため）。"""
+        from contracts.models import Contract, ContractRelation
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
+        )
+        other_dept = Department.objects.create(
+            branch_code="999", branch_name="他店", section_code="99", section_name="他部署"
+        )
+        outsider = Contract(
+            title="他部署の削除済み契約書", department=other_dept, group=self.group,
+            category=self.category, year=2025, uploader=self.employee,
+            expiry_date=datetime.date(2035, 1, 1), is_deleted=True,
+        )
+        outsider.file.save("x.pdf", ContentFile(b"R"), save=False)
+        outsider.save()
+        ContractRelation.objects.create(
+            contract=self.contract, related_contract=outsider, display_order=0
+        )
+
+        data = self.client.get(f"/contracts/api/{self.contract.pk}/").json()
+        self.assertEqual(
+            data["related_contracts"],
+            [{"title": "（閲覧権限のない関連資料）", "is_deleted": False,
+              "preview_url": None, "out_of_scope": True}],
+        )
+
     def test_edit_screen_related_rows_out_of_scope_title_is_masked(self):
         """2026-09-11監査で発見：contracts.api.DetailAPIView（S1）はタイトルを伏せ字にする
         よう対応済みだったが、同じ関連契約書を表示する編集画面(ContractEditView)側の
@@ -3007,6 +3037,38 @@ class DetailAPIViewTests(TestCase):
             [{"id": outsider.pk, "title": "（閲覧権限のない関連資料）", "is_deleted": False}],
         )
         self.assertNotContains(response, "他部署の機微な取引先名")
+
+    def test_edit_screen_related_rows_out_of_scope_deleted_status_is_masked(self):
+        """品質チェック指摘（2026-09-16）：部署スコープ外の関連契約書が実際には論理削除済み
+        （is_deleted=True）でも、編集画面の表示行はis_deleted=Falseにする。修正前はここが
+        実値のまま返っており、templates/contracts/edit.htmlの`{% if row.is_deleted %}`分岐で
+        「（閲覧権限のない関連資料）（削除済み）」と赤字表示され、他部署契約書の削除状態が
+        画面に直接漏れていた。"""
+        from contracts.models import Contract, ContractRelation
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_edit=True,
+        )
+        other_dept = Department.objects.create(
+            branch_code="999", branch_name="他店", section_code="99", section_name="他部署"
+        )
+        outsider = Contract(
+            title="他部署の削除済み契約書", department=other_dept, group=self.group,
+            category=self.category, year=2025, uploader=self.employee,
+            expiry_date=datetime.date(2035, 1, 1), is_deleted=True,
+        )
+        outsider.file.save("x.pdf", ContentFile(b"R"), save=False)
+        outsider.save()
+        ContractRelation.objects.create(
+            contract=self.contract, related_contract=outsider, display_order=0
+        )
+
+        response = self.client.get(f"/contracts/{self.contract.pk}/edit/")
+        self.assertEqual(
+            response.context["related_rows"],
+            [{"id": outsider.pk, "title": "（閲覧権限のない関連資料）", "is_deleted": False}],
+        )
+        self.assertNotContains(response, "（削除済み）")
 
     def test_related_contracts_admin_sees_all_titles(self):
         """管理者は contract_searchable_department_ids=None のため伏せ字にしない。"""

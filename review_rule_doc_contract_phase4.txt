@@ -1,0 +1,43 @@
+レビュー対象: documents/, contracts/（本体のみ。core/は対象外）
+対象範囲: git diff 38b1ac3..HEAD -- documents/ contracts/
+実施方法: CLAUDE.md「コーディング規約」との突合（background agentで調査→自分で裏取り）
+実施日: 2026-09-16
+
+## 指摘一覧
+
+### 低〜中: 関連契約書スコープ判定ロジックが api.py に直書き（本来 services.py 相当）
+- ファイル: contracts/api.py:85-107（`_related_contract_payload`）
+- 該当規約: 「`api.py`（画面内AJAX用、`JsonResponse`直返し、DRF不使用）／`services.py`
+  （ビューから分離したビジネスロジック）」
+- 現状: 部署スコープに応じてタイトルを伏せ字にするかどうかというビジネスロジックが
+  `DetailAPIView.get()`内のネスト関数として実装されている。
+- あるべき姿: review_code_doc_contract_phase4.txt の「reuse」指摘（api.py/views.py間の重複）と
+  同じ対応で解消する：`contracts/services.py`に切り出し、api.py/views.py両方から呼ぶ。
+- 優先度判断: 低〜中（コードレビュー側の重複指摘と合わせて対応するのが効率的）
+
+## 検討したが違反とは判断しなかった点
+- 関連契約書レダクションの`out_of_scope`分岐（contracts/api.py, contracts/views.py）に
+  logger.warningが無い点：CLAUDE.mdの「権限に関わる操作...他部署リソースへのURL直打ちアクセス
+  試行はAuditLogへ記録する」対象は、DetailAPIView本体の部署越境アクセス（同ファイル62-75行、
+  既にlogger.warning＋audit_services.log_denied_cross_department_accessあり）のような
+  「アクセス試行そのもの」を指す。一方、関連契約書欄のレダクションは、ユーザーが正規にアクセス
+  できる契約書の詳細内に、`keep_ids`設計（スコープ変更後も既存の紐付けを維持する既定方針）上
+  当然発生しうる「たまたま今は見えない関連書類」を表示時に隠しているだけであり、アクセス試行や
+  権限拒否には当たらない。毎回ログに残すとむしろノイズになるため、ログ対象外という現状の扱いは
+  妥当と判断した。
+
+## 確認して問題なしと判断した点
+- bare except: 新規コードに追加なし。
+- logger: documents/views.py・contracts/views.py・contracts/api.py・各search_services.py・
+  各services.pyともモジュールレベルでlogger宣言済み。
+- CBVのみ: 新設のSearchablePdfViewもCBV（core.record_views.BaseSearchablePdfViewを継承）。
+- 日本語統一: 新規メッセージ・コメント・help_textはすべて日本語。
+- `_YEAR_VALIDATORS`のdocuments/contracts間重複、`validate_no_active_content`がfull_clean経由でのみ
+  効く点はいずれもMODEL_AUDIT_FINDINGS.md（B-VAL-3, B-VAL-8）で2026-09-10に既に検討済みの
+  既定方針であり、今回のCLAUDE.md「アプリ間で重複するロジックを増やさない」規約との新規の
+  抵触ではない。
+
+## 対応結果（2026-09-16）
+低〜中（api.py内のビジネスロジック直書き）: 対応済み。review_code_doc_contract_phase4.txtの
+is_deleted漏れ修正と合わせて、`contracts/services.py`の`related_contract_scope_view`に
+スコープ判定ロジックを集約したため、api.pyのネスト関数はpreview_url組み立てのみに縮小した。

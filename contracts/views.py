@@ -21,6 +21,7 @@ from contracts.services import (
     calculate_expiry_date,
     contract_edit_is_dirty,
     filter_valid_related_ids,
+    related_contract_scope_view,
     scoped_get_object_or_404,
     sync_related_contracts,
 )
@@ -795,19 +796,15 @@ def _strip_ext(filename):
 
 def _related_row(contract, allowed_department_ids):
     """関連契約書1件の表示行。閲覧者の部署スコープ外なら、contracts.api.DetailAPIView.get
-    （`_related_contract_payload`、review_security.txt No.1／S1）と同じくタイトルを伏せ字にする。
+    （`_related_contract_payload`、review_security.txt No.1／S1）と同じくタイトル・is_deleted共に
+    伏せ字化する（scopeの判定・伏せ字化ロジック自体は`contracts.services.related_contract_scope_view`
+    に集約、品質チェック指摘、2026-09-16）。
     `filter_valid_related_ids`（contracts/services.py）はスコープ変更後も既存の紐付けを
     `keep_ids`で維持する仕様のため、編集画面等で「今は閲覧できない契約書」への紐付けが
     普通に存在しうる（2026-09-11監査で発見：api.py側だけ対応済みで、この編集画面・一括編集・
     保管画面２側の描画には同種のガードが無く、取引先名等を含むタイトルがそのまま漏れていた）。"""
-    out_of_scope = (
-        allowed_department_ids is not None and contract.department_id not in allowed_department_ids
-    )
-    return {
-        "id": contract.pk,
-        "title": "（閲覧権限のない関連資料）" if out_of_scope else contract.title,
-        "is_deleted": contract.is_deleted,
-    }
+    scope = related_contract_scope_view(contract, allowed_department_ids)
+    return {"id": contract.pk, "title": scope["title"], "is_deleted": scope["is_deleted"]}
 
 
 def _related_rows_for_contract(contract, employee):

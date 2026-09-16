@@ -1,0 +1,52 @@
+レビュー対象: documents/, contracts/（本体のみ。core/は対象外）
+対象範囲: git diff 38b1ac3..HEAD -- documents/ contracts/
+実施方法: coverage.py実測 + tests.py目視棚卸し（RELEASE_QUALITY_WORKFLOW.md ④・⑧）
+実施日: 2026-09-16
+
+## 実行結果
+"/c/Users/yamad/Claude/JA/ja_system/venv/Scripts/python.exe" -m coverage run manage.py test documents contracts
+→ Ran 448 tests, OK（失敗0）
+
+"/c/Users/yamad/Claude/JA/ja_system/venv/Scripts/python.exe" -m coverage report --show-missing --include="*/documents/*,*/contracts/*"
+TOTAL 5633 stmts, 40 missing (99%)。documents/contractsとも96%以上、既存の高いカバレッジ水準を維持。
+
+## 不足観点（未カバー）
+
+### 中: 関連契約書レダクションの「部署スコープ外 かつ 論理削除済み」組み合わせが未検証
+review_code_doc_contract_phase4.txtの「中」指摘（is_deleted漏れ）と表裏の関係。
+既存テスト（contracts/tests.py:2972-2977, 3004-3009）は、部署スコープ外の関連契約書
+（`outsider`）に対して`is_deleted: False`をアサートしているが、setUpの`outsider`は
+論理削除されていない（is_deleted=False）ため、現状の実装でも偶然テストが通ってしまう。
+「部署スコープ外 かつ is_deleted=True」の関連契約書を用意して`is_deleted`欄がどう返る
+べきか（レダクション対象にするなら常にFalse/null等）を明示的に検証するテストが無いため、
+このis_deleted漏れが今回のフェーズ4まで見つからなかった一因になっている。
+- 追加すべきテスト例：スコープ外かつis_deleted=Trueの関連契約書を用意し、
+  contracts/api.py（DetailAPIView）とcontracts/views.py（ContractEditView等）の両方の
+  レスポンスで`is_deleted`欄が実際の削除状態をそのまま漏らしていないことを確認する。
+
+### 低: documents/contracts search_services.pyの個別フィルタ分岐の一部が未到達
+documents/search_services.py（100,102,104,115,117,159行）・contracts/search_services.py
+（91,93,95,104,143行）の一部フィルタ条件（group/year/category等の個別分岐）が組み合わせ
+テストで到達していない。ただし今回の差分で追加された「日付範囲が逆転していても他の条件は
+活かす」という新ロジック自体は`test_reversed_date_range_does_not_discard_other_filters`
+（documents/contracts双方）で既に検証済みであり、この観点自体に不足は無い。未到達の行は
+既存の個別フィルタ分岐（今回の差分以前からの状態）であり、今回のスコープ外として記録のみ。
+
+### 低: contracts/views.py:826-827、826-827周辺の一部分岐が未到達
+`_resolve_related_rows`のpk文字列→int変換の例外分岐（無効なpkトークンが混入した場合の
+`continue`）が未到達。documents側の同種処理（related機能はcontracts固有のため直接の対比は
+無いが）と合わせて、無効pk混入時の挙動を確認するテストがあると良い。優先度は低
+（例外時もsilentlyスキップするだけで実害は無い）。
+
+## 対応不要と判断した項目
+- documents/forms.py・contracts/forms.py 220,225行・213,218行等、models.py 166,226行・155行の
+  未到達行は、今回の差分と無関係な既存の軽微なギャップ（バリデーションの一部分岐や__str__等）で
+  あり、xlsx全行監査や本品質チェックのスコープ外。
+
+## 対応結果（2026-09-16）
+中（is_deleted漏れの未検証組み合わせ）: 対応済み。「部署スコープ外 かつ is_deleted=True」の
+関連契約書を用意し、DetailAPIView・ContractEditView両方でis_deletedが伏せ字化（False固定）
+されることを検証するテストを追加（review_code_doc_contract_phase4.txt参照）。
+
+低（search_services.py個別フィルタ分岐の一部未到達）・低（related_rows不正pk混入時の分岐）:
+今回は見送り。今回の差分の主眼（is_deleted漏れ）とは無関係の既存ギャップのため。

@@ -10,7 +10,7 @@ from django.views import View
 
 from audit import services as audit_services
 from contracts.models import Contract
-from contracts.services import can_delete
+from contracts.services import can_delete, related_contract_scope_view
 from contracts.views import PENDING_SESSION_KEY, RequiresContractEditMixin
 from core import search_services
 from core.api import BaseOptionListAPIView
@@ -77,33 +77,25 @@ class DetailAPIView(LoginRequiredMixin, View):
         is_expired = contract.expiry_date < timezone.localdate()
         can_dl = can_download(request.user, kind="contract")
 
-        # 関連契約書のタイトルは、閲覧ユーザーの部署スコープ外なら伏せ字にする
-        # （review_security.txt No.1／S1）。本体契約書は上の line62-75 で越境を弾いて
-        # いるのに対し、関連契約書欄は download 権限だけで gating しており title 文字列が
-        # スコープに関わらず返っていた（取引先名・案件名が漏れうる）。preview_url 経由の
-        # PDF 実体配信は BaseFileServeView の scoped_lookup で別途保護済み。
+        # 関連契約書のタイトル・is_deletedは、閲覧ユーザーの部署スコープ外なら伏せ字にする
+        # （review_security.txt No.1／S1、及び品質チェックで発見したis_deleted漏れの追加対応、
+        # 2026-09-16）。本体契約書は上の line62-75 で越境を弾いているのに対し、関連契約書欄は
+        # download 権限だけで gating しており title/is_deleted がスコープに関わらず返っていた
+        # （取引先名・案件名、および削除状態が漏れうる）。preview_url 経由のPDF実体配信は
+        # BaseFileServeView の scoped_lookup で別途保護済み。スコープ判定・伏せ字化ロジック自体は
+        # contracts.views._related_row と共通の contracts.services.related_contract_scope_view に集約。
         def _related_contract_payload(link):
             rc = link.related_contract
-            out_of_scope = (
-                allowed_department_ids is not None
-                and rc.department_id not in allowed_department_ids
-            )
-            if out_of_scope:
-                return {
-                    "title": "（閲覧権限のない関連資料）",
-                    "is_deleted": rc.is_deleted,
-                    "preview_url": None,
-                    "out_of_scope": True,
-                }
+            scope = related_contract_scope_view(rc, allowed_department_ids)
             return {
-                "title": rc.title,
-                "is_deleted": rc.is_deleted,
+                "title": scope["title"],
+                "is_deleted": scope["is_deleted"],
                 "preview_url": (
                     reverse("contracts:preview", args=[link.related_contract_id])
-                    if can_dl and not rc.is_deleted
+                    if not scope["out_of_scope"] and can_dl and not rc.is_deleted
                     else None
                 ),
-                "out_of_scope": False,
+                "out_of_scope": scope["out_of_scope"],
             }
 
         can_edit = can_edit_contract(request.user)
