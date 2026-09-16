@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+web.config
 db.sqlite3
 /media/
 /staticfiles/

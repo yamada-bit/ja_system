@@ -22,6 +22,16 @@ SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 
+# RELEASE_PREP_NOTES.md 4.：本番はIIS+httpPlatformHandlerやロードバランサーがTLSを終端し、
+# 内部のWaitressへは平文HTTPで転送する構成を想定している。この構成ではDjangoが全リクエストを
+# 非セキュアと判定し、上のSECURE_SSL_REDIRECT=True（既定）がHTTPS→HTTPSの無限リダイレクトを
+# 起こす。X-Forwarded-Protoヘッダを信頼してよいのは「外部から直接そのヘッダを送れない」
+# ネットワーク構成（プロキシ／LB以外からのアクセスをパケットフィルタ等で遮断済み）が前提のため、
+# 既定Falseとし、その前提が整った本番環境でのみ.envで明示的に有効化する
+# （プロキシを挟まないテスト環境ではFalseのままでSECURE_SSL_REDIRECTが正しく機能する）。
+if env.bool("TRUST_X_FORWARDED_PROTO", default=False):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 # HTTPヘッダー越しのCookie窃取・MIMEスニッフィング対策。原本フィデリティとは無関係の
 # 本番運用上の追加対応（未実装改善候補の棚卸しで発見、2026-08-12）。SECURE_SSL_REDIRECTと
 # 異なりdev環境では意味を持たない（HTTPS前提の設定）ため、base.pyではなくここに置く。

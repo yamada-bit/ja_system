@@ -115,6 +115,16 @@
 `.env` 経由で切替可能にしておく（プロキシを挟まない構成では無効化）。
 `環境構築・実装手順書.xlsx` シート5 手順13（TLS 終端後のセキュリティ設定）に手順を追記する。
 
+### 対応済み（2026-09-15）
+
+`config/settings/prod.py` に `.env` の `TRUST_X_FORWARDED_PROTO`（既定 False）で切替可能な形で
+`SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")` を追加した。`SECURE_SSL_REDIRECT`
+は元の `env.bool(..., default=True)` のまま変更していない（ヘッダを正しく信頼できれば
+`request.is_secure()` が正しく判定されるため、無限リダイレクトは`SECURE_SSL_REDIRECT`を
+Falseにせずとも解消する。Falseにすると、パケットフィルタ設定漏れで直接HTTPアクセスされた際の
+HTTPS強制という保護が失われるため採用しなかった）。`.env.example` にも追記済み。
+`環境構築・実装手順書.xlsx` シート5 手順13への追記は別途要対応（本ファイルはコード側のみ）。
+
 ---
 
 ## 5. CSV 取込で新規登録される職員の初期パスワード（初回強制変更が無い）
@@ -376,3 +386,21 @@ Browser paneで`runserver`（`.claude/launch.json`の`django-dev`構成）を起
   従う。パスワード変更時は`.env`の`EMAIL_HOST_PASSWORD`を追従させ、Webプロセスを再起動する。
   このアカウントは500エラー通知専用（`ADMINS`宛のみ）のため、反映漏れによる影響は通知メールが
   送れなくなる点にとどまり、業務影響は無い。次回定期メンテナンス枠での反映で足りる。
+
+## 9. web.config の maxAllowedContentLength と MAX_UPLOAD_SIZE_BYTES の連動（2026-09-16）
+
+IISは`requestFiltering.maxAllowedContentLength`が未設定だと既定で約30,000,000バイト
+（約28.6MB）を1リクエストボディの上限とする。一方、大容量ファイルのアップロードは
+`config/settings/base.py`の`MAX_UPLOAD_SIZE_BYTES`（`.env`で設定、既定50MB）を閾値に、
+これ以下のファイルは`static/js/chunk_upload.js`が分割せず単発送信する（超える場合のみ
+`CHUNK_UPLOAD_CHUNK_SIZE_BYTES`単位のチャンクに分割）。IIS既定値のままだと、単発送信で
+よいと判定される約28.6MB〜`MAX_UPLOAD_SIZE_BYTES`のファイルがIIS側に拒否される
+（404.13）食い違いがあったため、`web.config`に`maxAllowedContentLength="62914560"`
+（60MB、`MAX_UPLOAD_SIZE_BYTES`既定値52428800にmultipartオーバーヘッド分の余裕を
+持たせた値）を明示追加した。
+
+**運用上の注意**：`.env`の`MAX_UPLOAD_SIZE_BYTES`を60MB超に変更する場合は、`web.config`の
+`maxAllowedContentLength`も連動して引き上げること。`.env`はgit管理外で環境ごとに値を
+変えられるが、`web.config`はXMLの静的値であり`.env`を参照できないため、値の変更時は
+両方を手動で揃える必要がある（反映後はIISの対象サイトを再起動 or `web.config`更新による
+自動リサイクルを確認する）。
