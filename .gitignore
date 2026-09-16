@@ -5,6 +5,9 @@ web.config
 db.sqlite3
 /media/
 /staticfiles/
+# core.management.commands.minify_static_jsの生成物（RELEASE_PREP_NOTES.md「1.」）。
+# collectstatic前に本番リリース時のみ生成する想定でソース(.js)とは別管理。
+/static/js/*.min.js
 .pytest_cache/
 pycache_delete.log
 .coverage

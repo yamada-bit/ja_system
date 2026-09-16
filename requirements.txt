@@ -14,3 +14,6 @@ pdf2image==1.17.0
 # core.searchable_pdf_services が検索用PDFの遅延生成で使う）。
 reportlab==5.0.0
 pypdf==6.14.2
+# rjsmin: static/js/*.js のminify（core.management.commands.minify_static_js、collectstatic前に
+# 本番リリース時のみ実行）。pure-Python・Node不要で「フレームワーク不使用・素のJS」方針に合う。
+rjsmin==1.2.5

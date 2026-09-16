@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load static %}
+{% load js_static %}
 
 {% block title %}契約書 保管画面 - クラウド文書管理システム{% endblock %}
 
@@ -46,7 +46,7 @@
 {% endblock %}
 
 {% block extra_script %}
-<script src="{% static 'js/chunk_upload.js' %}"></script>
+<script src="{% js_static 'js/chunk_upload.js' %}"></script>
 <script>
   const dropZone = document.getElementById('upload-drop-zone');
   const fileInput = document.getElementById('file-input');

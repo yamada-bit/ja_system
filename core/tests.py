@@ -1,5 +1,6 @@
 import datetime
 import os
+import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
@@ -10,8 +11,9 @@ from django.conf import settings
 from django.contrib.sessions.backends.db import SessionStore
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.db import DatabaseError, OperationalError
+from django.template import Context, Template
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from pypdf import PdfReader, PdfWriter
@@ -2500,3 +2502,58 @@ class HealthCheckViewTests(TestCase):
             response = self.client.get("/healthz/")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "error")
+
+
+class JsStaticTagTests(TestCase):
+    """RELEASE_PREP_NOTES.md「1.」static/js minify対応。core.templatetags.js_static.js_staticは
+    DEBUG時はソース(.js)を、本番(DEBUG=False)は.min.jsを参照する。"""
+
+    def _render(self):
+        template = Template("{% load js_static %}{% js_static 'js/common.js' %}")
+        return template.render(Context({}))
+
+    @override_settings(DEBUG=True)
+    def test_debug_uses_source_file(self):
+        self.assertTrue(self._render().endswith("js/common.js"))
+
+    @override_settings(DEBUG=False)
+    def test_non_debug_uses_min_file(self):
+        self.assertTrue(self._render().endswith("js/common.min.js"))
+
+
+class MinifyStaticJsCommandTests(TestCase):
+    """RELEASE_PREP_NOTES.md「1.」static/js minify対応。core.management.commands.minify_static_js。
+    settings.BASE_DIR配下のstatic/js/を対象にするコマンドのため、実ソースツリーを汚さないよう
+    BASE_DIRをテスト用の一時ディレクトリへ差し替えて検証する。"""
+
+    def test_minify_generates_min_js_alongside_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            js_dir = Path(tmp) / "static" / "js"
+            js_dir.mkdir(parents=True)
+            source = js_dir / "sample.js"
+            source.write_text("function f() {\n  return 1;\n}\n", encoding="utf-8")
+
+            with override_settings(BASE_DIR=Path(tmp)):
+                call_command("minify_static_js")
+
+            dest = js_dir / "sample.min.js"
+            self.assertTrue(dest.exists())
+            self.assertLess(len(dest.read_text(encoding="utf-8")), len(source.read_text(encoding="utf-8")))
+
+    def test_existing_min_js_is_not_treated_as_a_source_file(self):
+        """入力に*.min.jsしか無ければ、それを再minifyせず「対象なし」として扱う。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            js_dir = Path(tmp) / "static" / "js"
+            js_dir.mkdir(parents=True)
+            (js_dir / "sample.min.js").write_text("var x=1;", encoding="utf-8")
+
+            with override_settings(BASE_DIR=Path(tmp)):
+                with self.assertRaises(CommandError):
+                    call_command("minify_static_js")
+
+    def test_no_source_files_raises_command_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "static" / "js").mkdir(parents=True)
+            with override_settings(BASE_DIR=Path(tmp)):
+                with self.assertRaises(CommandError):
+                    call_command("minify_static_js")

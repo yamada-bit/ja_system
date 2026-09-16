@@ -57,6 +57,34 @@
 - 3ファイルとも規模が小さいため、優先度は「リリース前に対応すれば十分」（恒常的な
   ビルドパイプライン整備までは不要）。
 
+### 対応済み（2026-09-16）
+
+上記方針通り`rjsmin`を採用し実装した。
+
+- **minifier**：`requirements.txt`に`rjsmin==1.2.5`を追加。
+- **生成コマンド**：`core/management/commands/minify_static_js.py`（`python manage.py
+  minify_static_js`）。`settings.BASE_DIR/static/js/*.js`（`*.min.js`自体は対象外）を走査し、
+  同名の`*.min.js`を生成する。対象0件・I/O失敗は`CommandError`で明示的に落とす
+  （CLAUDE.mdの例外処理規約に沿い、具体的な例外型を捕捉して`logger.exception`後に再送出）。
+- **テンプレート切替**：`core/templatetags/js_static.py`の`{% js_static %}`タグ
+  （`{% static %}`のラッパー）。`settings.DEBUG`を見て、`True`ならソース、`False`なら`.min.js`を
+  参照するURLを返す。`base.html`（`common.js`・`pdf-preview.js`）・
+  `documents/contracts/storage1.html`（`chunk_upload.js`）の3テンプレートを`{% static %}`から
+  `{% js_static %}`へ切替（PDF.js本体`vendor/pdfjs/*.min.js`・CSS3ファイルは対象外、従来通り
+  `{% static %}`のまま）。
+- **`.min.js`のgit扱い**：`.gitignore`に`/static/js/*.min.js`を追加（生成物、コミットしない）。
+- **検証**：`python manage.py minify_static_js`実行→3ファイルとも約50%のサイズ縮小を確認
+  （例：`common.js` 51,305→24,382バイト）。Browser paneで`DEBUG=True`のdev環境を確認し、
+  `js/common.js`・`js/pdf-preview.js`（非minify版）が200で読み込まれ表示・コンソールとも
+  問題ないことを確認。`python manage.py collectstatic --settings=config.settings.prod`も
+  正常終了し、`staticfiles/staticfiles.json`に`js/common.min.js`等がハッシュ付きで登録される
+  ことを確認（`DEBUG=False`側の動作確認）。ユニットテスト
+  （`core.tests.JsStaticTagTests`・`core.tests.MinifyStaticJsCommandTests`）を追加、
+  core 158件PASS。
+- **手順書反映**：`環境構築・実装手順書.xlsx`（`doc/文書管理システム_環境構築・実装手順書.xlsx`）
+  シート5手順8（C10/D10）に「minify_static_js実行→collectstatic」の順序を追記
+  （編集前に`doc/backup_20260916/`へバックアップ済み）。
+
 ---
 
 ## 2. 本番の初期マスタデータ投入手段が未確定（最優先）
@@ -95,6 +123,16 @@
 `環境構築・実装手順書.xlsx` シート10「定期実行バッチ運用」の登録手順にも同様の注記を入れる。
 （Web プロセス側は web.config の `environmentVariables` で prod 指定済み＝シート6。バッチだけ漏れている。）
 
+### 対応済み（2026-09-16）
+
+`ja_system/bat/` の4本（`cleanup_temp_uploads.bat` / `extract_pending_pdf_text.bat` /
+`purge_expired_audit_logs.bat` / `purge_expired_deleted_records.bat`。いずれも`ja_pj`のgit管理外）
+の `pushd %TARGET_DIR%` 直前に `set DJANGO_SETTINGS_MODULE=config.settings.prod` を追加した。
+`cleanup_temp_uploads.bat` を実際に実行し、prod設定下でも正常終了（一時ファイル削除ログが
+想定通り出力される）ことを確認済み。`環境構築・実装手順書.xlsx`
+（`doc/文書管理システム_環境構築・実装手順書.xlsx`）シート10にも「11. 実行時の設定
+（DJANGO_SETTINGS_MODULE）」を追記した（編集前に`doc/backup_20260916/`へバックアップ済み）。
+
 ---
 
 ## 4. リバースプロキシ配下の HTTPS 判定（`SECURE_PROXY_SSL_HEADER` 未設定）
@@ -123,7 +161,18 @@
 `request.is_secure()` が正しく判定されるため、無限リダイレクトは`SECURE_SSL_REDIRECT`を
 Falseにせずとも解消する。Falseにすると、パケットフィルタ設定漏れで直接HTTPアクセスされた際の
 HTTPS強制という保護が失われるため採用しなかった）。`.env.example` にも追記済み。
-`環境構築・実装手順書.xlsx` シート5 手順13への追記は別途要対応（本ファイルはコード側のみ）。
+
+### シート5手順13への追記（2026-09-16）
+
+`環境構築・実装手順書.xlsx`（`doc/文書管理システム_環境構築・実装手順書.xlsx`）を確認したところ、
+シート5「12-4：エンハンスドLB使用時」には既にTRUST_X_FORWARDED_PROTOの案内があったが、**LBを使わず
+証明書をIISへ直接バインドする基本構成（手順12・12-2/12-3、本番の主経路）には同じ注記が無かった**。
+基本構成でもIIS→httpPlatformHandler→Waitressの内部転送は平文HTTPであり、構造上はLB経由と同じ
+「TLS終端後に平文で転送」の状態にあるが、httpPlatformHandlerがX-Forwarded-Protoを自動転送するかは
+IISのバージョン・構成に依存し机上では断定できないため、ユーザー確認の上、**「要現地確認」として**
+手順13（D18）に注記を追加した：本番稼働前に無限リダイレクトが発生しないか実機確認し、発生する場合は
+LBケースと同様にネットワーク構成（Waitress待受ポートへの外部直接アクセス遮断）を確認した上で
+TRUST_X_FORWARDED_PROTO=Trueを設定する、という手順。編集前に`doc/backup_20260916/`へバックアップ済み。
 
 ---
 

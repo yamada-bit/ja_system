@@ -1,4 +1,4 @@
-{% load static %}<!DOCTYPE html>
+{% load static js_static %}<!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
@@ -116,7 +116,7 @@
   </div>
 {% endblock %}
 
-<script src="{% static 'js/common.js' %}"></script>
+<script src="{% js_static 'js/common.js' %}"></script>
 {% if pdf_js_preview_enabled %}
   {# PDF プレビューを PDF.js で自前描画する（config/settings/base.py PDF_JS_PREVIEW_ENABLED）。 #}
   {# pdf-preview.js は最初に render() が呼ばれた時だけ pdf.min.js を遅延ロードするため、 #}
@@ -126,7 +126,7 @@
     window.PDFJS_LIB_URL = "{% static 'vendor/pdfjs/pdf.min.js' %}";
     window.PDFJS_WORKER_URL = "{% static 'vendor/pdfjs/pdf.worker.min.js' %}";
   </script>
-  <script src="{% static 'js/pdf-preview.js' %}"></script>
+  <script src="{% js_static 'js/pdf-preview.js' %}"></script>
 {% endif %}
 {% block extra_script %}{% endblock %}
 </body>
