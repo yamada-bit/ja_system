@@ -1,0 +1,1171 @@
+# xlsx全行監査 Rev1.6（フェーズ2-1: 洗い出しのみ、未実装反映）
+# 対象: 簡易設計指示書_Rev1_6.xlsx 全16シート中、表紙・目次・(ひな形)を除く13シート
+# 実施日: 2026-09-16
+# 方式: シート単位で11本のbackground agentへ並行調査を依頼し、各agentの報告を集約
+
+## サマリ（3群件数）
+
+シート(グループ)          高確度 判断要 低優先
+ログイン/メイン/設定メニュー        0        1        1
+職員マスタ                         0        1        3
+部署管理                            0        2        2
+権限管理                            0        0        2
+分類管理                            0        2        2
+カテゴリー管理                   0        1        2
+保存期間設定                      0        0        3
+操作履歴ログ                      0        1        3
+その他設定                         0        1        3
+検索・閲覧・変更                0        3        0
+保管                                  0        2        2
+合計                                  0       14       23
+
+確度の高い実装漏れ: 全シートで0件。
+
+----------------------------------------------------------------------
+
+
+========================================================================
+xlsx Rev1.6 × 実装 突合監査レポート
+担当シート：ログイン画面／メイン画面／設定メニュー
+監査日：2026-09-16（修正なし、洗い出しのみ）
+
+参照した実装ファイル：
+- templates/accounts/login.html, accounts/forms.py, accounts/views.py（LoginView/LoginForm）
+- templates/core/menu.html, core/views.py（MenuView）, core/notice_services.py
+- templates/core/settings.html, core/views.py（SettingsMenuView/OtherSettingsView/
+  OtherMainEditView/OtherLogoutEditView）, permissions/services.py
+  （SETTINGS_MENU_VISIBLE_ROLES/visible_settings_menu_items/can_access_settings_menu_item）,
+  permissions/mixins.py（SettingsMenuAccessMixin）
+原本参照：C:\Users\yamad\Claude\JA\HTML\html6\index.html（該当screen-login/screen-menu/
+screen-settings一帯）
+
+================================================================
+【確度の高い実装漏れ】 0件
+================================================================
+該当なし。
+
+3画面とも、xlsx記載事項（ログイン画面 B36-42「パスワード目玉アイコン」「ログインボタン」
+「退職職員のログイン不可」／メイン画面 B35-51「お知らせ」文言・Xヵ月設定値・契約書保存期限
+固定10年・削除レコードの自動物理削除バッチ／設定メニュー B30-32・埋め込み画像表
+「メニュー名×メニューの表示（管理者(DX)/所属長/ユーザー）」）を、原本HTML（index.html:85-140,
+1949-1976等）の静的マークアップ・JS挙動と突き合わせた上で実装済みであることを確認した。
+
+- ログイン画面：職員番号placeholder「例：123456」、パスワード目玉アイコン（👁️クリックで
+  type切替）、ログインボタン、退職者ログイン拒否（accounts/forms.py LoginForm.clean）いずれも
+  実装済み・原本と一致。
+- メイン画面：検索・閲覧・変更／保管の2ゾーン、電子決裁disabledボタン、お知らせ6行
+  （文書3件・契約書3件の左右2列、Rev1.2で文書・契約書両対応化済み）、Xヵ月設定値は
+  settings.NOTICE_EXPIRING_THRESHOLD_MONTHS/NOTICE_DELETED_THRESHOLD_MONTHSとして.env化済み、
+  契約書保存期限10年固定はsettings.CONTRACT_RETENTION_YEARS、削除レコードの自動物理削除は
+  core.management.commands.purge_expired_deleted_recordsとして実装済み。
+- 設定メニュー：11ボタンの表示順・文言が原本index.html:1965-1975と完全一致。埋め込み画像表
+  （管理者(DX)/所属長/ユーザーの○/―）をpermissions.services.SETTINGS_MENU_VISIBLE_ROLESと
+  1行ずつ突き合わせた結果、全11項目（職員マスタ・部署管理・権限管理・分類管理・カテゴリー管理・
+  電子決裁管理・通知管理・保存期間設定・項目管理・操作履歴ログ・その他設定）とも一致。
+  「権限管理」「その他設定」のように表側で複数行に分かれる項目は、緩い方の行（職員への権限付与＝
+  管理者/所属長、パスワード＝管理者/所属長/ユーザー）をボタン表示可否として採用する設計判断が
+  services.py内にコメントで明記されており、ユーザー確認済み（2026-08-20）と記載あり。
+  URL直打ち対策（SettingsMenuAccessMixin）も職員マスタ・部署管理・権限管理・分類管理・
+  カテゴリー管理・操作履歴ログ・保存期間設定の全ビューに設定済みで、ボタン非表示とサーバー側
+  拒否のロール判定がSETTINGS_MENU_VISIBLE_ROLES一本で揃っている。その他設定配下の管理者専用
+  編集画面（メイン画面項目編集・自動ログアウト時間編集）もdispatch()でPermissionRole.ADMIN判定
+  済み。
+
+================================================================
+【判断が必要な項目】 1件
+================================================================
+
+1) シート：メイン画面
+   セル番地：（対応するセル記載なし。原本HTML index.html:105 / templates/core/menu.html:36-42）
+   現状：CLAUDE.mdのコーディング規約は「未実装・対象外の機能をUIに残す場合は`disabled`＋
+   `title`属性で理由を明示する」と定めている。ところが templates/core/menu.html の電子決裁
+   ボタンは、
+     {% comment %}...disabled title="電子決裁の検索・閲覧・変更画面はスコープ外です"...{% endcomment %}
+     <button type="button" disabled>電子決裁</button>
+   という構造になっており、規約に沿ったtitle付きの版がコメントアウトされ、実際にレンダリング
+   されるのはtitle無しの`disabled`のみのボタンになっている。
+   あるべき姿の候補：
+     (a) 規約通りtitle属性を復活させる、または
+     (b) 原本index.html:105が`<button disabled>電子決裁</button>`とtitle無しである以上、
+         「原本フィデリティが基本方針」（CLAUDE.md）を優先しこのまま据え置く。
+   分類根拠：HTML_REIMPL_CHECKLIST_ARCHIVE2.md「Rev1.1反映の過剰実装を原本一致に戻す・
+   見落とし修正（2026-08-19）」節に、電子決裁ボタンの案内文言修正・原本通りに戻す判断の経緯が
+   記録されており、現状のtitle無し実装は意図的な原本一致の結果である可能性が高い
+   （実際に原本index.html:105と完全一致）。一方でCLAUDE.mdの一般コーディング規約とは字面上
+   矛盾するため、どちらを優先するかはユーザー判断が必要と考え、実装漏れとしてではなく
+   「判断が必要な項目」に分類した。
+
+================================================================
+【低優先度（軽微・見送り候補）】 1件
+================================================================
+
+1) シート：設定メニュー
+   セル番地：D57付近（4 分類管理の3行目、灰色パッチで覆われたセル）
+   現状（xlsx記載）：分類管理の「作成・変更・削除」行と「一覧」行の間に、灰色矩形で上書きされ
+   読み取れないサブ項目が1行存在する（埋め込み画像のsp矩形パッチにより本文非表示）。
+   あるべき姿：追加の実装対応は不要。同シートのセルAI61に「Rev1.1　分類表示行　削除」という
+   注記があり、この灰色パッチはRev1.1で当該サブ項目自体が削除されたことを示す上書き修正である
+   と判断できる（本文を読み取る必要がある「隠れた仕様」ではなく、削除済み項目の痕跡）。
+   分類根拠：CLAUDE.md「原本改訂を受け取った時の手順」に記載の通り、xlsx改訂履歴（Rev1.1→1.6）
+   の反映経緯として既に把握・記録済みの事象と一致するため、実装漏れとして扱わず低優先度の
+   記録のみとした。念のため触れておくが、対応不要。
+
+================================================================
+まとめ
+================================================================
+確度の高い実装漏れ：0件
+判断が必要な項目　：1件（電子決裁ボタンのdisabled+title規約との整合性）
+低優先度　　　　　：1件（分類管理の削除済みサブ項目の灰色パッチ、対応不要の確認記録のみ）
+
+ログイン画面・メイン画面・設定メニューの3画面は、原本HTML（html6）・xlsx（Rev1.6）双方との
+突合の結果、既に高い精度で実装されていることを確認した。
+
+========================================================================
+職員マスタ シート監査報告
+========================
+監査対象: xlsx 職員マスタシート（Rev1.6セル値・埋め込み画像モック）× accounts アプリ実装
+          （models.py / forms.py / views.py / services.py / csv_import_services.py /
+          templates/accounts/*.html）、および原本HTML html6 index.html 該当箇所
+          （screen-staff-list/detail/regist/edit, L1980-2360付近）との突合。
+
+総括: 職員マスタは過去複数回の原本フィデリティ監査・規約準拠監査を経ており（H-1〜H-4等、
+HTML_REIMPL_CHECKLIST.md参照）、セル文言の各仕様（初期ソート順B51-54、▲▼ソートB56-62、
+ページャーB66、総件数表示B68、退職者赤字表示B70、CSV出力B88-91、CSV取込レイアウト/更新条件
+B93-145、新規登録画面B173-204、編集画面パスワードリセット/退職チェックB236-248等）は実装・
+コメントとも高精度に対応している。埋め込み画像モック（一覧/退職者赤字/CSV取込レイアウト/
+登録画面/編集画面）を実装テンプレートと突き合わせても、項目構成・ボタン配置・パスワード列
+撤去（Rev1.5）・CSVヘッダー列順（職員番号,氏名,支所コード,本支所名正式名称,部課コード,部課名,
+役職コード,役職名,職階コード,職階名,所属長フラグ）まで一致を確認した。今回の監査で新規に
+見つかった「確度の高い実装漏れ」は無し。
+
+
+【確度の高い実装漏れ】
+該当なし。
+
+
+【判断が必要な項目（仕様解釈が割れる／業務ルール未確定）】
+
+1. シート名/セル番地: 職員マスタ!B127-128
+   現状（xlsx記載）:
+     B127「・システム権限の"管理者"が所属長フラグによって"所属長"に変更になった際、システム側で
+     管理者が0人にならないようにチェックを設ける。」
+     B128「　管理者が0人になる場合、メッセージを表示し、CSV取込による更新を中止すること。」
+   あるべき姿（実装に必要な変更）:
+     現行実装（accounts/csv_import_services.py `_apply_manager_flag`）は、この0人ガードに
+     抵触した行だけを `LastAdminError`（ValueErrorサブクラス）でその行のトランザクションのみ
+     ロールバックし、`import_staff_csv`の行単位try/exceptでsummary.errorsに集積して処理を
+     継続する（＝他の行の取込は続行される）実装になっている。一方でセルの文言「CSV取込による
+     更新を中止すること」は素直に読むと「CSV取込処理全体を中止する」（ファイル全体を1件も
+     反映しない、または以降の行の処理を止める）とも解釈できる。現行実装は
+     `_apply_manager_flag`のdocstringで意図的にこの選択をした旨（「1行のミスで取込全体を
+     止めないという本モジュールの方針」）を明記しているが、これはコード側の設計判断であり、
+     xlsxのセル文言そのものを唯一の根拠に断定できる仕様確定ではない。業務上「一部の職員だけ
+     昇格漏れが残ったままCSVが正常終了扱いになる」ことが許容されるか、ユーザー（JAふくおか
+     八女側）に再確認が必要。
+   分類根拠: セル文言の主語（「CSV取込」＝ファイル単位）と実装（行単位の部分中止）に解釈の
+     余地があり、影響範囲（管理者権限の昇格漏れ）もセキュリティ上軽視できないため。
+
+
+【低優先度（軽微・見送り候補）】
+
+1. シート名/セル番地: 職員マスタ!B204（新規登録「登録」ボタンのパスワード初期値仕様）
+   現状（xlsx記載）:
+     B204「・パスワードは登録時に初期値をセットする。パスワードの初期値は jaXXXX とする。
+     (XXXXは職員番号)」
+   あるべき姿（実装に必要な変更）:
+     機能的な差異は無い（`accounts/forms.py StaffRegistForm.save()`は`"ja" + employee.employee_no
+     [-4:]`で正しく実装済み）が、当該行のコメントが「xlsx 職員マスタ!B184『登録時のパスワード
+     初期値はja+職員番号下4桁』」と誤ったセル番地を引用している。B184は実際には「・プルダウンは
+     本支所コードの昇順とする。」であり、B204の誤記と思われる。将来の原本改訂差分反映や別監査で
+     この参照を辿った際に混乱を招く可能性があるため、コメントのセル番地修正を推奨。
+   分類根拠: 挙動に影響しないコメント上の参照ミスであり、実装ロジック自体は原本通り。
+
+2. シート名/セル番地: 職員マスタ!B94-95（CSV取込フォーム埋め込み画像との突合）
+   現状（xlsx記載）:
+     埋め込み画像内テーブルヘッダーはA〜K列で「職員番号,氏名,支所コード,本支所名正式名称,
+     部課コード,部課名,役職コード,役職名,職階コード,職階名,所属長フラグ」の順（画像を
+     `職員マスタ_drawing.png`から切り出して確認、`CSV_HEADER`定数と完全一致）。
+   あるべき姿（実装に必要な変更）:
+     対応なし・変更不要。今回の監査で実際に画像を拡大確認し、列順・列名とも
+     `accounts/csv_import_services.py CSV_HEADER`と一致していることを確認できたため、
+     「低優先度」として記録するのみ（実装漏れではなく、突合結果が一致した旨の記録）。
+   分類根拠: 監査済みで差異なしのため記録のみ。今後の原本改訂時にこの列順が変わっていないか
+     再確認する際の参照用。
+
+3. シート名/セル番地: 職員マスタ!B173-249全般（パスワード目玉アイコン、既知差異）
+   現状: 原本Rev1.5/html6では職員マスタ編集画面のパスワード表示切替アイコン（👁️）がHTML
+     マークアップから削除されているが、JS（`pass-toggle-icon2`のイベントリスナー）は削除されず
+     残存しており、原本自体が「存在しないDOM要素を参照するモック的な壊れ」を含む。
+   あるべき姿: 対応不要。ja_pj側は意図的にアイコンをマークアップに保持する判断を過去に確定済み
+     （CLAUDE.md「原本フィデリティに関する運用方針」H-3、2026-08-19ユーザー指示）であり、本監査
+     の対象外（実装漏れとして再報告しない）。
+   分類根拠: 既知の意図的差異のため参考記載のみ。実装済み・変更不要。
+
+========================================================================
+簡易設計指示書(Rev1.6) vs 実装 突合監査　担当シート：部署管理
+監査対象コード：organizations アプリ（models.py / views.py / forms.py / api.py / services.py）
+              ／templates/organizations/*.html ／原本HTML index.html(html6) 2366-2502行, 3670-3691行
+参照データ：部署管理_cells.txt（A1:FV228）、部署管理_drawing.png（画面モック4点、srcRect/白塗りパッチ合成済み）
+
+======================================================================
+■ 確度の高い実装漏れ
+======================================================================
+該当なし。
+
+一覧（検索・ソート・総件数表示・ページャー無し）／新規登録（重複エラー、B88の暗黙対応）／
+編集（コード読み取り専用・名称のみ編集可）／部署統合・分割（DepartmentViewScopeによる
+閲覧部署範囲更新、Rev1.1のB209-213仕様、Rev1.5のB215-219確認メッセージ、K126/K127の向き）
+について、xlsxの記載事項・原本HTML(index.html 2366-2502行)・organizations/tests.pyの
+既存テスト（DeptEditViewMergeSplitTests等）を突き合わせた範囲では、原本モックおよびxlsx
+本文の要求に対する明確な未実装は見つからなかった。
+
+======================================================================
+■ 判断が必要な項目（仕様の解釈が割れる／業務ルールが未確定）
+======================================================================
+
+1. シート名／セル番地：部署管理／B82, B87-88, 一覧行(A行 100/135/136/139/148「物流センター」等)
+   現状（xlsx記載）：
+   　B82「各コード、名称の初期表示は全て空欄とする」。B87-88は「本支所コード+部課コードが
+   　既存の場合はエラー。ただし本支所コード+本支所名が既存で部課コード+部課名が未登録の場合は
+   　その本支所への部課追加として新規登録する」という重複判定ルールのみを規定しており、
+   　「部課コード・部課名を空欄のまま登録できるか」自体には触れていない。
+   　一方、部署管理_drawing.pngの一覧画面モックおよび原本HTML(index.html 2411-2415行)には
+   　「100 物流センター／135 八女給油所／136 岡山給油所／139 筑後給油所／148 ジャスポート広川」
+   　のように部課コード・部課名が空欄の「本支所のみ」の部署行が複数存在する。
+   あるべき姿（実装に必要な変更）：
+   　organizations/models.py Departmentのsection_code/section_nameはblank=Trueが無いため、
+   　organizations/forms.py DeptRegistForm（ModelForm、fields=[branch_code, branch_name,
+   　section_code, section_name]）では両フィールドがrequired=Trueとなり、Webの「部署管理
+   　新規登録」画面からは部課コード・部課名を空欄のまま本支所単独の部署を新規登録することが
+   　構造的にできない（ブラウザのrequired属性・サーバー側フォームバリデーションの両方で
+   　弾かれる）。一方、既存データにはこのパターンが複数存在するため、
+   　(a) これらは本画面ではなくCSV取込（accounts/csv_import_services._upsert_department、
+   　　get_or_createでsection_code/section_nameをCSVの値のままDepartment化）や初期データ投入
+   　　経由でのみ作成される運用が前提で、Web新規登録画面では常に部課ありの部署のみ追加する
+   　　という仕様なのか、
+   　(b) 本画面でも本支所のみの部署（部課コード・部課名空欄）を新規登録できる必要があるのか、
+   　ユーザーに業務要件を確認する必要がある。(b)であればDeptRegistFormのsection_code/
+   　section_nameをrequired=Falseにし、DeptRegistForm.clean()の重複判定
+   　（`if branch_code and section_code:`）も空欄同士の重複を検出できるよう見直す必要がある。
+   分類根拠：xlsxのB87-88の文言は「既存の部課への追加」ケースのみを規定しており「本支所単独
+   　登録の可否」は明記が無い。原本モックの一覧データという実例はあるが、それが本画面経由での
+   　登録を要求しているか、CSV取込専用データかはxlsx本文だけでは判断できない
+   　（CLAUDE.md「xlsxのセル文言diffは手がかりに過ぎない」「業務要件未確定の場合は未実装のまま」
+   　の方針に従い、修正はせず判断材料として報告）。
+
+2. シート名／セル番地：部署管理／B122-123（Rev1.5 AI123「説明追加」）
+   現状（xlsx記載）：
+   　「「選択」ポップアップ内容は現時点の部署マスタの情報を表示。ただし部署管理一覧から選択した
+   　部署以外を表示すること」。
+   あるべき姿（実装に必要な変更）：
+   　organizations/api.py OptionListAPIView._department_items()は、編集中の部署（?exclude=<pk>）
+   　のみを除外し、部課コード"99"（退職、organizations.models.RETIRED_SECTION_CODE）を含む
+   　全部署を統合・分割の対象候補として返す。検索パネルの部課プルダウン（section_choices/
+   　departments_list(exclude_retired=True)）では"退職"を候補から除外しているのに対し、統合・
+   　分割の対象ポップアップでは除外していない非対称がある。「退職」部署に他部署の閲覧範囲を
+   　統合・分割するのは業務上想定しにくいが、xlsx本文には除外の明記が無いため、勝手に除外仕様を
+   　追加してよいか（CLAUDE.md「xlsx/HTMLに仕様記載の無い危険な業務ロジックは無断で憶測実装
+   　しない」）ユーザー確認が必要。
+   分類根拠：実害は限定的（存在すれば選択でき、誤って選んでも閲覧部署範囲テーブルが増えるだけで
+   　データ破壊は無い）が、他画面との整合性の観点から仕様確認の価値がある。
+
+======================================================================
+■ 低優先度（軽微・見送り候補）
+======================================================================
+
+1. シート名／セル番地：部署管理／E217, E219（Rev1.5 AI215「説明追加」）
+   現状（xlsx記載）：
+   　更新前の確認メッセージ例として「部署A　に　部署Bの権限　が　統合されます。よろしいですか？」
+   　「部署Cの権限　が　部署D、部署E　に　分割されます。よろしいですか？」と、複数対象部署は
+   　全角読点「、」で連結する例が示されている。
+   あるべき姿（実装に必要な変更）：
+   　templates/organizations/dept_edit.html のconfirmDeptUpdate()は、対象部署名を
+   　id_dept_action_target_display（core.widgets.PopupSelectWidget経由でstatic/js/common.js
+   　L540 `activePopupDisplayInput.value = labels.join(", ")` が生成する表示値）からそのまま
+   　読み取って文中に埋め込むため、複数選択時はxlsxの「、」ではなく半角カンマ+スペース「, 」で
+   　連結された文言（例：「部署Aに部署B, 部署Cの権限が統合されます。よろしいですか？」）が
+   　confirm()に表示される。なお、更新実行後の監査ログ・画面メッセージ（organizations/views.py
+   　DeptEditView.post、target_names = "、".join(...)）は正しく「、」連結になっており、
+   　サーバー側とクライアント側（確認ダイアログのみ）で区切り文字の実装方式が異なっている。
+   　common.jsのjoin(", ")はpopup-select（multi=True）全般で共有される表示ロジックのため、
+   　部署管理のためだけに変更すると他画面（検索条件の複数選択等）の表示にも影響する点に注意。
+   分類根拠：ブラウザのconfirm()ダイアログの文言スタイルのみの差異であり、統合・分割の実処理・
+   　監査ログ・成功メッセージは正しく「、」区切りで、業務データへの影響は無いため軽微。
+
+2. シート名／セル番地：部署管理／C56「・部署名」
+   現状（xlsx記載）：
+   　一覧のソート対象列挙で「本支所コード／本支所名／部課コード／部署名」の4列が挙げられている。
+   あるべき姿（実装に必要な変更）：
+   　実装（templates/organizations/dept_list.html・原本HTML 2400行のテーブルヘッダー）は
+   　4列目を一貫して「部課名」と表記しており、「部署名」という列見出しはどこにも存在しない。
+   　models.Department.__str__()がsection_nameを指して"部署"と呼んでいる（部署 = 部課の意）ため、
+   　xlsx側の「部署名」は「部課名」列を指す用語の揺れと考えられ、実装上の対応漏れではない。
+   分類根拠：原本HTML・xlsxの他セル（B45等）を含め列名は一貫して「部課名」であり、実害・
+   　修正の必要性は無い。記録目的のみ。
+
+======================================================================
+（件数）確度の高い実装漏れ：0件／判断が必要：2件／低優先度：2件
+
+========================================================================
+権限管理シート 突合監査レポート
+============================
+
+対象: 簡易設計指示書_Rev1_6.xlsx「権限管理」シート（A1:FV234） × permissions アプリ実装
+参照した実装ファイル:
+  permissions/models.py, views.py, services.py, forms.py, api.py, mixins.py
+  templates/permissions/authority_list.html, authority_edit.html
+  core/templatetags/search_extras.py（can_manage タグ）, core/text_normalization.py（filter_by_full_name）
+  static/css/style.css（.btn-edit-auth 等）
+  原本HTML: C:\Users\yamad\Claude\JA\HTML\html6\index.html 2515-2774行
+    （screen-authority-list / screen-authority-detail(廃止済) / screen-authority-edit）
+  権限管理_drawing.png（crop_list.png / crop_edit.png / crop_popup1.png / crop_popup2.png として拡大確認）
+    → 埋め込み画像は原本HTMLモック（html6）と内容・配色（編集ボタンのピンク #FFCCFF 等）とも
+      完全一致。上書きパッチによる訂正は見当たらず、cells.txt・原本HTMLの記載と矛盾する情報は無い。
+
+総評: このシート担当範囲は、過去の複数回の規約準拠監査・原本フィデリティ監査
+（コード中に "コード監査で発見", "review_code_permissions_accounts", "review_security.txt",
+"B-7〜B-11", "X-1/X-2", "D-1", "S2(a)/U-2" 等の参照が多数残っている）で既に相当作り込まれており、
+今回の突合で新規の確度の高い実装漏れは見つからなかった。
+
+
+■ 確度の高い実装漏れ
+--------------------
+該当なし（0件）。
+
+主要項目は下記の通りすべて実装済みを確認:
+- B35「部署」プルダウンは管理者のみ表示: AuthorityListView.get の is_admin_viewer /
+  authority_list.html {% if is_admin_viewer %}
+- B39 氏名フルネーム検索（スペース区切り無視）: core.text_normalization.filter_by_full_name
+- B44-59 一覧表示・初期ソート順（部課コード→役職コード→権限コード、バック値ソート）・
+  ▲▼ソート: permissions.services.filter_authority_queryset / AUTHORITY_SORT_FIELDS
+- B61 明細部スクロール、B63 ページャー100件、B65 総件数表示:
+  AuthorityListView.PAGE_SIZE=100、authority_list.html
+- B67-70 権限毎の参照データ範囲（管理者=全部署全職員、所属長=自部署のみ）:
+  permissions.services.visible_employees
+- B71-75 編集ボタン非表示（所属長は自分自身を編集不可、管理者は自分を含め全職員編集可）:
+  permissions.services.can_manage_target + {% can_manage %} タグ
+- B112-117 システム権限プルダウン（管理者=3択／所属長=職員のみ）:
+  AuthorityEditView._editable_roles、AuthorityEditForm.__init__
+- B114（Rev1.5）現在設定以外を選択したタイミングで全項目リセット:
+  authority_edit.html の initRoleChangeReset()（clearAllAuthoritySettingsを共有）
+- B119-125 一括許可/一括無許可ボタン、無許可時に「選択」3項目もクリア:
+  authority_edit.html toggleAllCheckboxesForAuth() / clearAllAuthoritySettings()
+- B127-146 分類／部門間閲覧設定ポップアップ、全て選択/全て解除、確定でカンマ区切りセット:
+  core.widgets.PopupSelectWidget（共通部品）、permissions.api.OptionListAPIView
+- B168-171 文書管理-分類-表示: doc_visible_groups + permissions.services.visible_groups
+- B173-176 文書管理-文書-保存満了日変更: doc_retention_edit + can_edit_retention
+  （documents/forms.py EditForm で編集不可制御）
+- B178-181 文書管理-文書-ダウンロード: doc_download + can_download
+- B183-187 契約書-部門間閲覧設定（Rev1.2で管理者のみ表示に変更）:
+  contract_visible_departments、AuthorityEditView._is_admin_editor / AuthorityEditForm の
+  show_contract_visible_departments=False でフィールド自体をサーバー側からも除去
+  （フォーム改ざん耐性あり）
+- B189-192 契約書-分類-表示: contract_visible_groups + visible_groups(kind="contract")
+- B194-199 契約書-契約書-契約書情報変更（Rev1.2新規）: contract_edit + can_edit_contract
+  （メイン画面の保管枠「契約書」ボタン非表示はtemplates/core/menu.html、詳細画面の編集・削除
+  非表示はcontracts/api.py、DeleteView.post側のサーバー側再検証もcontracts/views.pyで確認）
+- B201-203 契約書-契約書-ダウンロード: contract_download + can_download(kind="contract")
+- B211-218 電子決裁3項目「※保留」: eapproval_view_setting/eapproval_doc_name_manage/
+  eapproval_retention はフィールドとして保持、連動ロジックは無し（xlsx確定仕様通り、
+  CLAUDE.md「既知の未実装・保留事項」）
+- B220-223 更新ボタン、管理者0人ガード: AuthorityEditForm.clean_role の
+  would_orphan_admins() + AuthorityEditView.post の transaction.atomic() +
+  lock_active_admin_profiles()（同時実行時の競合も行ロックで対処済み）
+- AuditLog記録方針（CLAUDE.md）との整合: AuthorityEditView.post は成功時のみ
+  audit_services.log()、can_manage_target 拒否時（他部署/他ロールへの直打ち）は
+  audit_services.log_denied_cross_department_access() で操作履歴ログに記録、
+  権限不足による保存拒否（PermissionDenied）はlogger.warning止まり、という設計で
+  CLAUDE.mdの記録方針と一致している。
+
+
+■ 判断が必要な項目
+--------------------
+該当なし（0件）。
+
+強いて挙げれば、CSVエクスポート（AuthorityCsvExportView）は「権限管理一覧CSV出力」として
+毎回AuditLogに記録しているが、これはxlsx本シートに記載のある挙動ではなく
+accounts.StaffCsvExportViewの前例に倣った実装判断であり、権限管理シート側の記載との
+矛盾ではないため、本シート担当としての指摘事項には含めない。
+
+
+■ 低優先度（軽微・見送り候補）
+--------------------
+1. システム権限プルダウン変更時の全項目リセット（B114、authority_edit.html の
+   initRoleChangeReset）はクライアントサイドJSのみの挙動で、Djangoの自動テスト
+   （permissions/tests.py）ではカバーされない（他のJS-onlyの挙動と同様の一般的な限界であり、
+   本シート固有の欠落ではない）。E2E/手動確認でのみ検証可能。
+
+2. xlsx B171/B181/B192「※管理者は、所属長及び職員に対して設定する。所属長は職員に対して
+   設定する。」という対象者スコープの注記は、実装上は画面全体のアクセス制御
+   （permissions.services.can_manage_target、対象ロールが所属長の場合は一般のみ等）で
+   一括して担保されており、フラグ単位の個別チェックにはなっていない。原本HTML・現行実装
+   ともに画面単位でのアクセス制御という設計で一貫しており、機能的な差異は無いため見送り。
+
+========================================================================
+簡易設計指示書xlsx（Rev1.6）「分類管理」シート ⇔ 実装 突合監査報告
+====================================================================
+監査範囲: xlsx「分類管理」シート（[1]分類管理一覧 A6/B6〜 / [2]分類管理登録 A95/B95〜 /
+[3]分類管理編集 A140/B140〜 / [4]分類管理削除 A185/B185〜）
+突合対象コード: masters/models.py（Group）, masters/views.py（GroupListView/RegistView/
+EditView/DeleteView）, masters/forms.py（GroupSearchForm/GroupForm）, masters/services.py
+（department_scope_ids/scope_queryset_by_department/scoped_get_object_or_404）,
+core/master_views.py（BaseScopedMasterListView/RegistView/EditView/DeleteView）,
+templates/masters/class_list.html / class_regist.html / class_edit.html / class_delete.html,
+原本HTML（../../HTML/html6/index.html 2775-2947行 screen-class-list/regist/edit/delete）,
+分類管理_drawing.png（4画面すべて crop・拡大確認済み）
+修正は一切行っていない（洗い出しのみ）。
+
+--------------------------------------------------------------------
+■ 確度の高い実装漏れ
+--------------------------------------------------------------------
+該当なし。
+
+xlsxの全セル（分類名部分一致検索、書類管理区分プルダウンの選択肢と並び順、部署プルダウンの
+管理者限定表示、分類コード半角数字必須＋全角→半角変換、コード重複登録/更新エラー、一覧の
+初期ソート順〈部課コード→分類コード→書類管理区分〉、▲▼ソート、1ページ100件のページャー、
+総件数表示、文書件数0件時のみ削除ボタン有効化、権限別（管理者=全部署／それ以外=自部署のみ、
+一覧の「部署」列非表示）、論理削除）について、実装（models/views/forms/services/
+core.master_views共通基底/テンプレート）・原本HTML・drawing.png画像モックの3者を突き合わせたが、
+いずれも一致しており未実装・欠落は確認できなかった。この画面群は過去に複数回（2026-08-09原本
+フィデリティ監査、2026-08-17▲▼ソート追加、2026-08-18総件数表示追加、Rev1.2部署スコープ追加時の
+埋め込み画像差し替え再監査、2026-09-10部署単位の一意性制約見直し）にわたり監査・修正済みで、
+今回の突合でも新規の乖離は発見されなかった。
+
+--------------------------------------------------------------------
+■ 判断が必要な項目（仕様の解釈が割れる、業務ルールが未確定 等）
+--------------------------------------------------------------------
+
+1. シート名: 権限管理（参考、分類管理シートへの影響あり） ／ セル番地: 権限管理!B201, B234
+   （分類管理シートには当該セルは存在しないが、記載内容が分類管理画面の挙動を規定するため
+   参考記載）
+   現状（xlsx記載）: 権限管理シートの要再確認（赤字）箇所リストに「B201 ONの場合…設定メニュー
+   画面「分類管理」で"書類管理区分"が"文書管理"のみ新規作成/編集/削除可能となる」「B234 ONの
+   場合…設定メニュー画面「分類管理」で"書類管理区分"が"契約書管理"のみ新規作成/編集/削除可能
+   となる」とあり、HTML_REIMPL_CHECKLIST_ARCHIVE2.md「要再確認（赤字）箇所リスト」No.7/No.15と
+   して未解決のまま記録されている。
+   あるべき姿（実装に必要な変更）: 現在のmasters/views.py・permissions/services.py
+   （ACCESS_ROLES辞書）には、書類管理区分(doc_kbn)単位で分類管理の新規作成/編集/削除を制限する
+   ロジックは存在しない（class_management/category_managementはロールのみで判定、doc_kbn別の
+   絞り込みは無い）。この要再確認事項が解消され業務要件が確定した場合、GroupForm.doc_kbn選択肢
+   絞り込みやGroupRegistView/EditView/DeleteViewでのdoc_kbn別アクセス制御を追加実装する必要が
+   ある。
+   分類根拠: 分類管理シート自体には記載が無く、権限管理シート側の未確定事項（担当外シート）に
+   起因するため、本担当（分類管理シート）としては「実装漏れ」ではなく「他シートの未確定仕様に
+   依存する保留事項」として判断が必要な項目に分類した。CLAUDE.md「既知の未実装・保留事項」には
+   電子決裁3フラグ（B211-215）のみ明記されており、本件（B201/B234、およびカテゴリー管理側の
+   B210/B243）は現時点で同セクションに明記されていない。権限管理シート担当の監査結果と合わせて
+   要再確認事項の解消要否・CLAUDE.md追記要否を判断されたい。
+
+2. シート名: 分類管理 ／ セル番地: B39
+   現状（xlsx記載）: 「分類名」欄（B38見出し）の説明文であるB39が「・カテゴリー名の部分一致
+   検索とする。(スペース区切りの複合検索は考慮しない）」と、カテゴリー管理シートの文言が
+   そのまま残っている（分類名なのに「カテゴリー名」表記）。
+   あるべき姿（実装に必要な変更）: 実装（GroupSearchForm.name、`name__icontains`）は文言の
+   対象（分類名）に対して部分一致検索を行っており、xlsxのセルの言い回し違いが実装へ影響する
+   余地はない。実装変更は不要。
+   分類根拠: xlsxの表記揺れ（コピペ起因と推測）であり実装への影響が無いことを確認済みだが、
+   分類管理・カテゴリー管理シート双方を横断監査する立場（あるいはxlsx側の誤記修正要否）の
+   判断のため一応記録した。実装側の対応要否という観点では「判断不要」に近いが、xlsx原本の
+   誤記自体をユーザー側に報告すべきか（原本改訂を促すか）の判断が必要なため本群に置いた。
+
+--------------------------------------------------------------------
+■ 低優先度（軽微・見送り候補）
+--------------------------------------------------------------------
+
+1. シート名: 分類管理 ／ セル番地: B53/J53, B58
+   現状（xlsx記載）: 初期ソート・部署列ソートの基準は「部課コード（本支所コード+部課コードの
+   5桁）」という単一の連結値として記載されている。
+   あるべき姿（実装に必要な変更）: 実装は`department__branch_code`と`department__section_code`の
+   2フィールドを個別に`order_by`へ渡す方式（`organizations.services.department_composite_order_by`
+   に一元化済み）で、5桁連結値のフィールドをDBに新設してはいない。
+   分類根拠: 2フィールドの複合order_byは連結5桁文字列でのソートと結果が一致するため機能的な
+   差異は無く、既に過去の監査（2026-08-25「Department関連の共通ロジック集約」）で確立された
+   意図的な設計。実装変更不要、見送り候補として記録のみ。
+
+2. シート名: 分類管理 ／ セル番地: B71
+   現状（xlsx記載）: 「文書件数が 0 件の分類のみ「削除」ボタンを有効化すること」。
+   あるべき姿（実装に必要な変更）: 実装は原本HTML同様`disabled`属性で非活性化した上で、
+   CLAUDE.mdコーディング規約に沿って`title="紐づく書類があるため削除できません（件数が0の
+   ときのみ削除可）"`という理由表示を追加している（原本HTMLにはtitle属性は無い）。
+   分類根拠: xlsx/原本HTMLに無いUX改善の上乗せであり、CLAUDE.md「未実装・対象外の機能をUIに
+   残す場合はdisabled＋titleで理由を明示する」規約に沿った意図的な追加。差異ではあるが原本
+   フィデリティを損なわない改善のため見送り（現状維持）で問題ない。
+
+以上。
+
+========================================================================
+カテゴリー管理シート監査報告（xlsx Rev1.6 × 実装突合）
+担当範囲: masters.Category（screen-cat-list/regist/edit/delete）
+対象コード: masters/models.py, masters/views.py, masters/forms.py, masters/services.py,
+            core/master_views.py, templates/masters/cat_*.html
+参照: カテゴリー管理_cells.txt（全行）, カテゴリー管理_drawing.png（4画面モック）,
+     HTML/html6/index.html:2949-3136（screen-cat-list/regist/edit/delete）
+
+===========================================================
+【総評】
+カテゴリー管理画面は、分類管理（Group）と共通基底クラス（core.master_views.
+BaseScopedMasterListView/RegistView/EditView/DeleteView）に既に集約されており、
+xlsxのセル記載（部署プルダウンの管理者限定表示、カテゴリーコードの半角数字変換・重複エラー、
+初期ソート順、▲▼ソート対象列、ページャー100件、総件数表示、文書件数0件時のみ削除可、
+部署別閲覧範囲、論理削除方針等）はほぼ全項目が実装済みで、かつ実装コメントに
+xlsxのセル番地・Rev番号まで対応付けられている（2026-08-24〜2026-09-11の複数回の
+既存監査で相当数が既に発見・修正済みと判断できる）。
+今回の突合で新規に見つかった論点は1件（分類の論理削除に伴うカテゴリー編集画面の
+不整合リスク）で、それ以外は軽微な指摘のみ。
+
+===========================================================
+■ 確度の高い実装漏れ
+該当なし。
+
+xlsx記載の主要項目（B35-36部署プルダウン、B38-39カテゴリー名部分一致検索、
+B41-42分類名プルダウン、B44-48書類管理区分プルダウン、B50-51一覧表示、
+B55-59初期ソート順、B61-66▲▼ソート対象列、B68内部スクロール、B70ページャー100件、
+B72総件数表示、B74文書件数カウント方法、B76文書件数0件時のみ削除ボタン有効化、
+B78-83権限別閲覧範囲・部署列非表示、B109-115登録画面の部署/コード重複・半角変換、
+B117-123分類/書類管理区分プルダウン、B125-128登録ボタン、B151編集画面、
+B153-156更新ボタン、B195-196削除ボタン・論理削除）は、いずれもmasters/views.py・
+masters/forms.py・core/master_views.py・テンプレート側で1対1に対応する実装を確認した。
+
+===========================================================
+■ 判断が必要な項目（仕様の解釈が割れる、業務ルールが未確定 等）
+
+--- 項目1 ---
+シート名: カテゴリー管理（分類管理シートとの跨りあり）
+セル番地: B117-118「分類　プルダウン／・「分類管理」メニューで設定した分類名リストを
+          表示する。」、B153-156「更新ボタン／入力した内容でカテゴリーマスタを更新する。」
+現状（xlsx記載）: カテゴリー編集画面の「分類」プルダウンは、分類管理で設定された分類名の
+          リストを表示するとのみ記載され、分類（Group）が論理削除された場合の挙動は
+          xlsx上どこにも記載が無い。
+あるべき姿（実装に必要な変更、要ユーザー判断）:
+  実装を確認したところ、以下の経路で「有効なカテゴリーが、既に論理削除済みの分類を
+  参照したまま残る」状態が発生しうる:
+  1. masters/views.py GroupDeleteView.blocking_count() は、その分類(Group)自体に
+     直接紐づく文書・契約書件数（doc_count/contract_count）だけを見て削除可否を判定し、
+     その分類の下にある「カテゴリー」が有効（is_deleted=False）のまま残っているか
+     どうかはチェックしていない。分類配下の各カテゴリーの文書件数が個別に0件であれば、
+     分類自体の直接紐付け件数も0になりうるため、分類だけを論理削除できてしまう
+     （masters/views.py 199-221行目 GroupDeleteView）。
+  2. その状態で、当該カテゴリーの編集画面（CategoryEditView）を開くと、
+     masters/forms.py CategoryForm.__init__（211行目）で「分類」プルダウンの
+     queryset は `Group.objects.filter(is_deleted=False)` に絞られており、
+     現在そのカテゴリーが参照している（論理削除済みの）分類は選択肢から消える。
+     Django ModelChoiceField はbound valueがqueryset内に無い場合、どの<option>にも
+     selected属性を付けずにレンダリングするため、ブラウザ上は先頭の別の分類が
+     見た目上選択された状態になる。
+  3. 利用者が「分類」欄を意図的に触らずに、他の項目（カテゴリー名等）だけ変更して
+     「更新」した場合、送信されるgroup値はブラウザが暗黙に選んだ先頭の分類になり、
+     カテゴリーの「分類」が利用者の意図に反して別の分類へサイレントに変わってしまう
+     （masters/tests.py 278-283行目 test_group_queryset_excludes_deleted は
+     「新規登録フォームで削除済み分類が選択肢に出ないこと」のみを確認しており、
+     「既存カテゴリー編集時に紐付け先の分類が削除済みだった場合」のテストは無い）。
+  実装に必要な変更の方向性は複数あり、xlsx/原本HTMLに明記が無いため要ユーザー判断:
+    (a) GroupDeleteView.blocking_count()に「配下の有効なカテゴリーが0件であること」も
+        条件に加え、分類の削除自体をブロックする（カテゴリー管理観点では最も安全）。
+    (b) CategoryForm.group のqueryset を「is_deleted=Falseの分類」＋「現在の
+        instance.group（削除済みでも含める）」に広げ、削除済みの分類が既に
+        紐付いている場合はプルダウンにその分類を残す（無効化はしない、原本HTMLに
+        disabled optionの実装例が無いため）。
+    (c) 現状維持（発生頻度が低い運用上のエッジケースとして許容する）。
+  どの対応を取るかは分類管理（Group）シート側の削除仕様とも関わるため、分類管理シート
+  担当箇所と合わせてユーザー確認が必要。
+
+===========================================================
+■ 低優先度（軽微・見送り候補）
+
+--- 項目1 ---
+シート名: カテゴリー管理
+セル番地: B41-42「分類名　プルダウン／・「分類管理」メニューで設定した分類名リストを
+          表示する。」
+現状（xlsx記載）: 分類名リストの並び順についての明記は無い。
+あるべき姿（実装に必要な変更）: masters/forms.py CategorySearchForm（一覧検索パネルの
+          「分類名」フィルタ、150-173行目）の`group`フィールドは
+          `scope_queryset_by_department(Group.objects.filter(is_deleted=False), dept_ids)`
+          のみでorder_by が無く、DBの自然順（挿入順相当）になる。一方、登録・編集画面の
+          CategoryForm.group（219行目）は明示的に`.order_by("code")`している。
+          両者の並び順を揃える（検索パネル側にも`.order_by("code")`を足す）のが一貫性の
+          観点で望ましいが、xlsxに並び順の明記が無く、原本HTMLも静的モックのため実害は
+          小さい。優先度低。
+
+--- 項目2 ---
+シート名: カテゴリー管理
+セル番地: B61-66「下記項目に▲▼ボタンにて昇順/降順切替が可能なようにする。」
+          （C62部署／C63カテゴリーコード／C64分類コード／C65分類名／C66文書件数）
+現状（xlsx記載）: ソート対象として列挙されているのは上記5項目のみで、「カテゴリー名」列は
+          含まれていない。
+あるべき姿（実装に必要な変更）: masters/views.py CATEGORY_SORT_FIELDS（243-248行目）に
+          `"name": "name"` というキーが定義されているが、templates/masters/cat_list.html
+          のヘッダーには対応する`sort_url`リンクが無く（カテゴリー名列はth単体、71行目
+          周辺参照）、UI上は到達不能。ただし`?sort=name`をURLに直接指定すれば有効に働いて
+          しまう（xlsxが要求していない並び替えキーが裏口として機能する状態）。実害は
+          小さいが、未使用のsort_fieldsエントリを削除するか、削除しない理由をコメントに
+          残すかのどちらかが望ましい。優先度低。
+
+===========================================================
+【件数サマリ】
+確度の高い実装漏れ: 0件
+判断が必要な項目: 1件
+低優先度: 2件
+
+========================================================================
+担当シート：保存期間設定（xlsx Rev1.6, seed=保存期間設定_cells.txt/_drawing.png）
+突合対象コード：masters/models.py, masters/views.py, masters/forms.py, masters/services.py,
+                templates/masters/retention_list.html, retention_regist.html, retention_edit.html,
+                retention_delete.html, masters/migrations/0001_initial.py
+突合対象原本HTML：HTML/html6/index.html（screen-retention-doc/regist-doc/edit-doc/delete、
+                  handlePermanent/kbnSelectForDocSave/confirmInsert/confirmUpdate/confirmDelete）
+
+## 前提確認
+- HTML_REIMPL_CHECKLIST.md記載の通り、本シートは Rev1.0〜Rev1.4 で無改訂（セル文言・埋め込み画像8枚
+  ともハッシュ一致）、Rev1.5（html5→html6, 職員マスタ/権限管理/部署統合分割が対象）・Rev1.6（契約書
+  関連書類機能のみ対象）双方とも本シートに変更なし。2026-09-03に行単位全数監査済みで、その時点で
+  発見された唯一の乖離（B77/B104/B191/B229「保存期間そのもの」の重複未制御）は
+  unique_retention_period_value／unique_retention_permanent の2制約追加で解消済み（migrations/
+  0001_initial.py:86で現物確認）。「永年」を編集画面で開いた際に数値欄が編集可能だった不具合も
+  DOMContentLoaded初期化で解消済み（retention_edit.html/retention_regist.html で確認）。
+- 今回はこの既存監査結果を鵜呑みにせず、cells.txt全行・drawing.png（list/regist(文書)/edit(文書)/
+  regist(電子決裁)の主要4区画をクロップして拡大確認）・原本HTML該当セクション・現行コードを
+  独立して再突合した。結果、上記の解消済み事項も含め新たな乖離は見つからなかった。
+
+## 確度の高い実装漏れ
+該当なし。
+
+一覧（ラジオ切替・書類名プルダウン・No.連番・初期ソート＝表示順昇順）、新規登録・編集（保存期間
+プルダウン ヵ月/年/永年、「永年」時の数値クリア+入力不可、表示順）、登録・更新ボタンの重複制御
+（表示順／保存期間値の両方、電子決裁は書類名毎にスコープ）、削除ボタンの論理削除（is_deleted=True、
+文書・契約書からの参照はPROTECTのまま保護）、「永年」実年数の設定ファイル化
+（settings.RETENTION_PERMANENT_YEARS、既定50年、B74と一致）はすべて実装済みで、drawing.png の
+6画面モック（一覧×2、登録/編集/削除×文書・電子決裁）とテンプレートの見た目（配色・ボタン種別・
+「書類名」欄が電子決裁登録画面のみプルダウンでなく固定表示テキストである点を含む）も一致した。
+
+## 判断が必要な項目
+該当なし（下記「低優先度」の1件は既に判断済み・意図的保留のため本項目には計上しない）。
+
+## 低優先度（軽微・見送り候補／既知トラッキング事項の再確認）
+
+1. シート名／セル番地：保存期間設定／B76-79（登録ボタン）・B185-186（書類名表示）・B190-193
+   （電子決裁登録ボタン）
+   現状（xlsx記載）：区分・書類名は「一覧画面のプルダウンで選択した書類名を表示」する文脈値として
+   のみ記載されており、登録・編集フォーム自体で区分/書類名を変更する仕様は無い。
+   あるべき姿（実装に必要な変更）：`RetentionPeriodForm.Meta.fields` の `kbn`/`doc_name` は
+   HiddenInputだがModelFormの通常フィールドとして保存対象に含まれるため、POST改ざんで既存の
+   保存期間設定を別区分（例：文書→電子決裁、または電子決裁で doc_name="" のまま保存）へ移し替え
+   できてしまう。編集時は instance 側の値に固定する（フォームから除外し view 側で明示的に
+   instance.kbn/doc_name を上書きするか、clean() で不整合を拒否する）方が安全。
+   分類根拠：`review_pending.txt` No.99（＝`review_code_organizations_masters.txt` No.6）で既に
+   検出済み・「管理者専用画面でデータ破壊は起きない」ため優先度「低」として明示的に見送り済み。
+   また doc_name 側の「電子決裁時は必須」検証も同ファイルNo.4追記で「電子決裁機能自体がスコープ外の
+   ため対象外のまま」と確定済み（CLAUDE.md「既知の未実装・保留事項」の電子決裁スコープ外方針と
+   整合）。新規の実装漏れではなく、既存トラッキングの再確認として記載。
+
+2. シート名／セル番地：保存期間設定／B43-44（一覧表示）
+   現状（xlsx記載）：「保存期間マスタの一覧表示を行う。(No.は表示連番)」。ページャーに関する記載は
+   無い。
+   あるべき姿（実装に必要な変更）：CLAUDE.mdコーディング規約は「一覧画面のページネーションは
+   Django Paginatorで実装する」を原則とし、明示的に「ページャー不要」と書かれた画面のみ例外と
+   している。本シートにはその明示記載が無い一方、原本HTML（screen-retention-doc）自体もページャーを
+   持たない静的テーブルであり、対象データは管理者が随時登録するマスタ設定（文書用最大数件〜電子決裁
+   書類名毎に数件程度）で無制限に増える性質のものではない。
+   分類根拠：規約の文言上は形式的にグレーだが、原本フィデリティ（動的制御を勝手に追加しない）と
+   実害の小ささから見送り妥当と判断。今後、運用で保存期間設定行数が大きく増える想定が生じた場合のみ
+   再検討で足りる。
+
+3. シート名／セル番地：保存期間設定／B73
+   現状（xlsx記載）：「「永年」を選択した場合「保存期間」の数値をクリアし、数値を入力出来ないように
+   する(readonly)。」
+   あるべき姿（実装に必要な変更）：実装（retention_regist.html/retention_edit.html の
+   handlePermanent()）はHTMLの`readonly`属性ではなく`disabled`属性で制御している。
+   （`disabled`は値がPOSTされない点が`readonly`と異なるが、サーバー側`RetentionPeriodForm.clean()`
+   が`period_unit==PERMANENT`のとき`period_value`を強制的に`None`へ上書きするため、実害は無い。）
+   分類根拠：原本HTML自身の`handlePermanent()`（index.html:3636-3649）も`.disabled`を使っており、
+   xlsxの「(readonly)」という注記は原本モックの実装とは字義通り一致しない。CLAUDE.mdの原本フィデリティ
+   方針（原本JSに実装が追従していれば良い）に従い、xlsx文言との字義差は実装漏れとして扱わない。
+
+========================================================================
+操作履歴ログ シート監査報告（Rev1.6 xlsx ⇔ ja_pj実装 突合）
+====================================================================
+
+## 監査対象・方法
+- xlsx: 操作履歴ログ_cells.txt（A1:FV80、結合セル情報付き）
+- 埋め込みモック画像: 操作履歴ログ_drawing.png（auditlog_seg0.png等に分割して確認。全内容は
+  幅3093pxの左端セグメントに収まっており右側・下部は空白のみ）
+- 原本HTML: C:\Users\yamad\Claude\JA\HTML\html6\index.html 3322-3412行（screen-log-list）
+- 実装: audit/models.py, audit/views.py, audit/forms.py, audit/services.py,
+  templates/audit/log_list.html, core/management/commands/purge_expired_audit_logs.py,
+  core/search_services.py（build_search_audit_message）, 各アプリの audit_services.log()呼び出し
+  約40箇所, audit/tests.py ほか
+- 前提: 本シートは HTML_REIMPL_CHECKLIST_ARCHIVE.md に2026-09-03付で「行単位全数監査」が既に
+  実施済み（区切り文字の全角スペース統一・B51-52実装等を反映済み）。今回はその後の変更
+  （2026-09-11 P9最終ゲート修正 3fda456：日付範囲逆転のフェイルオープン修正等）を含めて再監査した。
+  cells.txt上のRev注記はAI8/AI40/AI43/AI62いずれもRev1.1止まりで、Rev1.2以降この シートは無改訂
+  （ARCHIVE.md記載と整合）。
+
+## 総評
+検索条件（職員番号完全一致・職員名フルネーム検索・イベントメッセージAND部分一致・個人情報書類
+チェックボックス）、一覧表示（初期ソート降順・内部スクロール・ページャー100件・総件数表示）、
+CSV出力（ユーザー依頼によるalert()超えの実機能実装、3ヵ月保存上限との整合）、イベントメッセージの
+連結書式（差分形式・検索項目列挙・ファイル名形式）、記録対象/非対象の切り分け（ログイン系・
+成功した権限操作・他部署URL直打ちはAuditLogへ、権限不足拒否やフォーム改ざんはlogger.warningのみ）
+のいずれも、xlsxセル記載・原本HTMLのモック・CLAUDE.mdの運用方針と整合しており、確度の高い実装漏れは
+検出されなかった。過去の行単位監査（2026-09-03）・P9最終ゲート（2026-09-11）で発見された問題は
+いずれも現在の実装に反映済みであることをコードで確認した。
+
+====================================================================
+## 群1: 確度の高い実装漏れ
+該当なし。
+
+====================================================================
+## 群2: 判断が必要な項目
+
+### [判断1] AuditLog.department_name のブランチ名プレフィックス表記が、原本モックのサンプル行と異なる
+- シート／セル番地: 操作履歴ログ_drawing.png（screen-log-listモック、一覧表「部署名」列）
+- 現状（xlsx記載）: 埋め込みモック画像のサンプル行は「本　所|ＤＸ推進課」「本　所|総務課」
+  「本　所|リスク管理課」のように、本支所名＋全角｜＋部課名の形式で表示されている
+  （原本html6 index.html:3368等の静的サンプルデータも同一）。
+- あるべき姿（実装との差異）: audit/models.py docstringに「記録元は str(employee.department)」と
+  明記の通り、実装は organizations.Department.__str__()（`return self.section_name or
+  self.branch_name`）をそのまま保存する。ところが organizations/models.py の同メソッドの
+  コメントによれば、Rev1.1で「本支所名（本　店|等）のプレフィックスを撤去し、部課がある場合は
+  部課名のみ表示する形」に**変更済み**（原本index.html:2364,2461等を根拠に記載）。
+  そのため実際に記録される department_name は「ＤＸ推進課」のようにプレフィックス無しの表記となり、
+  操作履歴ログ画面モックのサンプル行「本　所|ＤＸ推進課」とは見た目が一致しない。
+- 分類根拠: xlsxのセル文言（B36〜B76）には部署名表示フォーマットそのものに関する明示的な指定は
+  無く、モック画像のサンプル行はRev1.1の部署名表示規約変更に追従せず古いフォーマットのまま
+  残っている可能性が高い（他の画面のドロップダウン・一覧では既にプレフィックス無し表記へ統一済み
+  であることをコードコメントで確認）。実装がstr(department)を再利用する設計判断
+  （「イベント発生時点のスナップショットをそのまま保存する」）自体は models.py に明記された意図的な
+  ものであり、単なる実装漏れとは言い切れない。ただし「操作履歴ログ一覧に表示される部署名の書式が
+  モックと異なる」という見た目の差異が実際に存在するため、意図的差異として記録するか、モックの
+  古いサンプルデータの問題として無視してよいか、ユーザー確認が望ましい。
+
+====================================================================
+## 群3: 低優先度（軽微・見送り候補）
+
+### [低1] 職員番号・職員名・イベントメッセージ検索にNFKC正規化（半角/全角ゆれ吸収）が未適用
+- シート／セル番地: 操作履歴ログ!B36-37, B39-40, B42-43
+- 現状（xlsx記載）: 「職員番号の完全一致検索とする」「氏名を…フルネーム検索可能とする」
+  「イベントメッセージの文字列 部分一致検索とする」とあるのみで、半角/全角の表記ゆれ吸収については
+  本シートのセルに明示記載は無い。
+- あるべき姿: documents/contracts検索では core.text_normalization.normalize_for_search による
+  NFKC正規化（半角/全角の数字・カナ・英字を問わず検索可能にする）が適用されているが、
+  audit.services.filter_audit_log_queryset の employee_no（完全一致）・employee_name
+  （filter_by_full_name、スペース除去のみ）・event_message（素のicontains）にはNFKC正規化が
+  適用されていない。職員番号は数字のみ・イベントメッセージはシステムが自動生成する定型文言が
+  大半のため実害は小さいと考えられる。
+- 分類根拠: 本シート（操作履歴ログ）のセルにはこの要件の明示的記載が無く、CLAUDE.mdの方針
+  「xlsxの文言だけを根拠に原本HTMLに存在しない動的挙動を新規実装すべきと判断しない」に照らしても
+  新規実装の必要性は薄い。念のための記録に留める。
+
+### [低2] 操作内容（action）の「画面名」粒度がモックのサンプル行と異なる（既知・意図的差異、再掲）
+- シート／セル番地: 操作履歴ログ!B66「操作内容は『画面名＋□(全角スペース)＋ボタン名』とする」
+- 現状（xlsx記載・モック）: サンプル行は「文書　検索」「文書　閲覧」「文書　アップロード」等、
+  素の「文書」「契約書」を画面名として使用。
+- あるべき姿: 実装は再実装時に採用した実画面名（「文書検索」「契約書検索」「保管画面２」
+  「検索・閲覧画面」）を使用しており、例えば「文書　検索」↔実装「文書検索　検索」、
+  「文書　閲覧」↔実装「文書検索　プレビュー」、「文書　アップロード」↔実装「保管画面２　登録」
+  という対応関係になる。区切り文字（全角スペース）自体は2026-08-27修正でB66の書式要件に統一済み。
+- 分類根拠: HTML_REIMPL_CHECKLIST_ARCHIVE.md「操作履歴ログの行単位全数監査（2026-09-03）」で
+  既に発見・検討済みで、「モック自体もサンプル行内で不整合（『文書ダウンロード』のみ区切りなし）」
+  であることも確認の上、B66の書式要件（画面名＋全角スペース＋ボタン名）を満たすことを優先し、
+  実画面名のまま維持する判断が確定している。新規の指摘ではなく、今回の監査でも現状の実装
+  （区切り文字統一済み・画面名は実画面名）が変わっていないことを再確認した。
+
+### [低3] 一覧・CSVの部署名／イベントメッセージ等にNFKC正規化未適用と同様、ページャーが常に全ページ番号を列挙
+- シート／セル番地: 操作履歴ログ!B62「一覧表の下にはページャーを設けること」
+- 現状: xlsxはページャー設置のみを要求し、ページ数が多い場合の省略表示（elided）は要求していない。
+- あるべき姿: templates/audit/log_list.html は `page_obj.paginator.page_range` を全件ループして
+  ページ番号ボタンを描画するため、ログが増え続けページ数が非常に多くなった場合、ページャーの
+  ボタン数も比例して増える。
+- 分類根拠: 同一パターン（`paginator.page_range` を省略無く展開）が職員マスタ・権限管理・分類管理・
+  カテゴリー管理・文書/契約書検索結果・その他設定 の一覧画面すべてで共通して使われている全画面
+  横断の設計であり、操作履歴ログ固有の問題ではない。操作履歴ログはAUDIT_LOG_RETENTION_MONTHS
+  （既定3ヵ月）でレコード数の上限が事実上抑えられているため実害はさらに小さい。common.js/全画面
+  共通のcross-cutting事項として扱うべきで、本シート単体の指摘としては見送り候補とする。
+
+====================================================================
+## 件数サマリ
+- 確度の高い実装漏れ: 0件
+- 判断が必要な項目: 1件
+- 低優先度（軽微・見送り候補）: 3件
+
+========================================================================
+xlsx「その他設定」シート ⇔ 実装 突合監査報告
+対象: masters系ではなくcore（OtherSettingsView/OtherMainEditView/OtherLogoutEditView、
+core/forms.py OtherPassForm/MenuItemSettingForm/LogoutTimeForm、
+templates/core/other_main.html, other_pass.html, other_main_edit.html, other_logout_edit.html）
+原本HTML: html6/index.html #screen-other-pass, #screen-other-main, #screen-other-main-edit,
+#screen-other-logout-edit（L3414-3781）
+
+結論: 本シートの4画面（[1]一覧 [2]メイン画面項目編集 [3]自動ログアウト時間編集 [4]パスワード編集）は
+セル文言・原本HTML静的マークアップ・JS挙動（kbnSelectForOtherSettings/clearPassFields/
+confirmUpdate）のいずれとも高い精度で一致しており、確度の高い実装漏れは検出されなかった。
+Rev1.1/Rev1.5の各改訂差分（表示件数=100件/チェックボックス制御変更/パスワード画面のレイアウト
+変更）もHTML_REIMPL_CHECKLIST.md・ARCHIVE.mdに反映済みであることを確認した。
+
+
+■ 確度の高い実装漏れ
+該当なし。
+
+
+■ 判断が必要な項目（仕様の解釈が割れる、業務ルールが未確定 等）
+
+1. シート／セル: その他設定 / A70-A76（[2]メイン画面項目編集の「検索・閲覧・変更-電子決裁」
+   チェックボックス、B71「チェックボックスを入れた項目のみ、メイン画面でボタンを表示する」）
+   現状(xlsx記載): チェックボックス3種（文書/契約書/電子決裁）が「入れた項目のみメイン画面で
+   ボタン表示」と一律の仕様として記載されている。
+   実装: organizations.models.MenuItemSetting.show_search_eapprovalはDB保存・一覧表示
+   （core/views.py OtherSettingsView._render_main、templates/core/other_main.html）・
+   編集フォーム（core.forms.MenuItemSettingForm）まで完全に配線されているが、core/views.py
+   MenuView.get_context_dataでは他の4フラグ（show_search_document/show_search_contract/
+   show_storage_document/show_storage_contract）のみをcontextへ渡しており、
+   show_search_eapprovalはメイン画面の実際のボタン表示制御には一切使われていない
+   （メイン画面の「電子決裁」ボタンはtemplates/core/menu.html:40-42でdisabled固定、
+   MenuItemSettingの値と無関係）。
+   あるべき姿（解釈の分岐）:
+     (a) 現状維持が正: 電子決裁機能自体がCLAUDE.md「既知の未実装・保留事項」で恒久的に
+         スコープ外と確定しているため、対応するボタンが存在しない以上フラグを消費する先も
+         存在しない。権限管理の3フラグ（eapproval_view_setting等）と同じ「保留のまま保持のみ」
+         方針を横展開した設計として正当（新規実装は不要）。
+     (b) ドキュメント補強が必要: models.py MenuItemSetting.show_search_eapproval フィールド
+         自体にはこの「意図的に未消費」という設計判断のコメントが無く
+         （organizations/models.py L121）、将来の監査・改修者が「配線漏れ」と誤認しうる。
+         permissions側の3フラグには同種の説明がCLAUDE.md本文にあるのに対し、こちらは
+         フィールド定義にもARCHIVE系ドキュメントにも明記が無い。
+   分類根拠: 機能追加の要否ではなく「意図的な未消費であることの明文化」の要否がユーザー確認
+   ポイントのため。修正するなら organizations/models.py の該当フィールド近辺に一言コメントを
+   追加する程度の軽微な変更で足りる。
+
+
+■ 低優先度（軽微・見送り候補）
+
+1. シート／セル: その他設定 / B105-106（[3]自動ログアウト時間編集の更新ボタン）と
+   B75-76（[2]メイン画面項目編集の更新ボタン）の並び比較。
+   現状: templates/core/other_logout_edit.html には「設定メニューへ戻る」ボタンが無く
+   「キャンセル」のみ（他3画面 other_pass.html/other_main.html/other_main_edit.htmlには
+   「設定メニューへ戻る」が存在）。
+   原本HTML: #screen-other-logout-edit（html6 L3560-3581）も同様に「設定メニューへ戻る」を
+   欠いており、原本自体の作り（おそらく単なる見落とし）をja_pjはそのまま忠実に再現している。
+   HTML_REIMPL_CHECKLIST_ARCHIVE2.md L303で「『設定メニューへ戻る』ボタンが原本通りの画面にのみ
+   存在しcore:settingsに統一されていること」を確認済みの記述があり、既に監査済み・意図的な
+   原本追随と判断できる。
+   あるべき姿: 対応不要（原本フィデリティ優先方針により現状維持が正しい）。「キャンセル」から
+   一覧経由で設定メニューへ戻ることは可能なため機能的な欠落ではない。
+   分類根拠: 原本の非一貫性をそのまま踏襲しており規約違反ではないが、他画面と並べたときの
+   UX非一貫性は事実としてここに記録しておく（新規に発見した論点ではなく、念のため今回の
+   突合でも再確認したもの）。
+
+2. シート／セル: その他設定 / B48「一覧表右上辺りに、総件数を表示すること」
+   現状: 原本HTML（#screen-other-main）には総件数表示要素が存在しない（静的モックが
+   このxlsx指示を反映していない）。
+   実装: templates/core/other_main.html:35で「総件数：{{ page_obj.paginator.count }} 件」を
+   一覧テーブル直上・右寄せで表示しており、xlsx文言は満たしている。
+   あるべき姿: 対応不要（既に実装済み。「原本になくてもxlsxの明示的な要求は実データで満たす」
+   という一貫方針に沿っており問題なし）。念のため記録。
+
+3. シート／セル: その他設定 / B152（半角英数6桁以上、記号・全角はエラー）
+   現状: core.forms.OtherPassForm._PASSWORD_PATTERN = `^[A-Za-z0-9]{6,}$` で上限文字数の
+   指定は無い（xlsx側にも上限の記載は無い）。
+   あるべき姿: 対応不要。念のため確認した限り仕様通り（下限のみで正しい）。
+
+
+■ 参照した実装ファイル
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\core\views.py
+  （OtherSettingsView, OtherMainEditView, OtherLogoutEditView, MenuView）
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\core\forms.py
+  （OtherPassForm, MenuItemSettingForm, LogoutTimeForm）
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\organizations\models.py（MenuItemSetting）
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\masters\models.py（SystemSetting）
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\templates\core\other_main.html
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\templates\core\other_pass.html
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\templates\core\other_main_edit.html
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\templates\core\other_logout_edit.html
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\templates\core\menu.html（電子決裁ボタンdisabled確認）
+- C:\Users\yamad\Claude\JA\ja_system\ja_pj\core\tests.py
+  （OtherSettingsRoutingTests, OtherMainEditViewTests 他、L920, L1074, L1118-1199）
+- 原本: C:\Users\yamad\Claude\JA\HTML\html6\index.html L3414-3781
+  （#screen-other-pass/#screen-other-main/#screen-other-main-edit/#screen-other-logout-edit、
+  および onEnterOtherSettings/clearPassFields/kbnSelectForOtherSettings関数）
+
+========================================================================
+簡易設計指示書 Rev1.6 ×実装 突合監査
+担当シート: 検索・閲覧・変更（範囲 A1:FV691）
+監査日: 2026-09-16
+監査方法: `検索・閲覧・変更_cells.txt`（全セル文言、A1〜B680相当）と`検索・閲覧・変更_drawing.png`
+（画面モック19枚、8バンドに分割してズーム確認）を「実装すべき仕様」として1行ずつ読み、
+原本HTML（C:\Users\yamad\Claude\JA\HTML\html6\index.html、lines 90-1200付近の
+screen-search/popup-detail/popup-select/transitionToStorage/transitionToSearch/
+openDetailPopup/renderSearchResultTable等）と、ja_pj実装（documents/contracts両アプリの
+views.py・api.py・forms.py・search_services.py・services.py、templates/documents・
+contracts/search.html、templates/base.html、static/js/common.js）を突き合わせた。
+
+## 前提となる既存監査の確認
+HTML_REIMPL_CHECKLIST.md には本シートの行単位全数監査が既に2026-09-07・09-08・09-09（Rev1.6
+関連書類対応）に実施済みで「仕様乖離なし」と記録されている。今回の監査でもこの結論を追認した
+（後述の通り、コード側の実装・コメントは xlsx の各セル番地を明示的に引用しながら要件を再現して
+おり、突合の過程で新規の実装漏れは発見できなかった）。以下、突合の過程で目に留まった3件を
+「判断が必要な項目」「低優先度」として記録する。確度の高い実装漏れは0件。
+
+---
+
+## 確度の高い実装漏れ
+該当なし。
+
+以下、今回の監査で個別に確認し「実装済み・xlsxと一致」と判定した主要項目（参考記録）:
+- B46-48／B416-418：部署名の自動セット（閲覧部署範囲テーブルの統合/分割旧部署をカンマ区切り）
+  → `core.forms.apply_search_department_default`。2026-09-08に管理者で効いていなかった不具合を
+  修正済み（ARCHIVE.md該当節）。
+- B50-53／B420-423：部署名「選択」ボタンの表示条件（文書=管理者のみ／契約書=管理者 or
+  契約書-部門間閲覧設定あり）→ `permissions.services.can_select_department(employee, kind=...)`。
+  xlsxのコメント文言をほぼそのまま docstring に引用しており一致を確認。
+- B87-122／B460-496：分類「選択」の自部署スコープ＋権限管理ホワイトリスト（文書管理-分類-表示／
+  契約書-分類-表示）＋部署複数選択権限時の和集合 → `permissions.services.visible_groups`。
+- B128-140／B498-499：年「選択」＝今年〜最古保存年。
+- B146-167／B501-527：カテゴリー「選択」も分類と同型（自部署＋ホワイトリスト＋複数部署和集合）。
+- B169-177／B526-534：タイトル・フリーワードのスペース区切りOR/AND → `core.search_services.
+  apply_word_filter`/`apply_freeword_filter`、正規化は`core.text_normalization.
+  normalize_for_search`（半角全角・カタカナ半角全角・アルファベット半角全角を吸収）。
+- B182-184：保存期間プルダウンが「保存期間設定」マスタ全件ではなく実データ由来・日数昇順
+  → `documents.services.used_retention_periods`（contracts側は保存期間非選択式のため対象外、
+  B182-184の但し書き通り文書のみの機能）。
+- B211-260：初期ソート＝保存日降順、8列/11列の▲▼切替、1万件超ソート確認アラート、
+  ページャー100件、総件数表示、クリックでプレビュー／ダブルクリックで詳細ポップアップ
+  → `core.search_services.apply_sort`（`-save_date`既定）、`static/js/common.js`
+  （`confirm("ソートに時間が掛かる可能性があります。よろしいですか？")`は`count > 10000`で分岐）、
+  `documents/contracts.views.SearchView.PAGE_SIZE = 100`。
+- B258-267／B593-597：一括選択（一括解除トグル）・一括ダウンロード（ZIP、権限が無い場合は
+  ボタン非表示＝`{% if can_download %}`）・メイン画面お知らせ「直近Xヵ月以内で削除された」
+  リンク経由時は一括選択/一括ダウンロード/一括編集を丸ごと非表示（`{% if notice != "recently_
+  deleted" %}`）。サーバー側も`core.record_views.BaseBulkDownloadView.post`が`can_download`を
+  再検証（URL直打ち対策）。
+- B269-272／B599-600：一括編集ボタン。xlsxはこのボタンに権限別非表示の指示が無く、実装も
+  notice=recently_deleted時のみ非表示（権限が無いユーザーがクリックした場合は`contracts.views.
+  RequiresContractEditMixin`がサーバー側で`PermissionDenied`を返す設計）＝xlsxの記述と一致。
+- B324-342／B652-668：詳細ポップアップの[+][-]（`zoomPdf`→PDF.js実ズームへ委譲）、ダウンロード／
+  変更／削除ボタンの`is_deleted`・1週間（`core.deletion_services.DELETE_WINDOW_DAYS = 7`）・
+  契約書側`can_edit_contract`による非表示。3ボタンとも`style.display`方式で統一されており
+  （過去に発見・修正済みのdisabled/style.display不統一は解消済み）、`documents/contracts.api.
+  DetailAPIView`がクライアントに渡す`download_url`/`edit_url`/`delete_url`自体をNoneにする形で
+  サーバー側の権限・状態判定と完全連動。`contracts.views.DeleteView.post`は`can_edit_contract`の
+  URL直打ちバイパスも別途検証済み（コード内コメントに過去の発見経緯あり）。
+- B344-348／B670-675：有効期限切れバナー・削除済みバナー（「本文書/本契約書は削除されています」）
+  → `static/js/common.js renderDetailPopup()`。
+- B672「契約書の有効期限切れデフォルト値10年」→ `settings.CONTRACT_RETENTION_YEARS`（`.env`既定10）。
+- B677-680（Rev1.6）関連書類：リンク化＋別タブPDFプレビュー、削除済みは赤フォント＋クリックで
+  「既に削除されている関連資料です」→ `static/js/common.js renderRelatedResourceLink()`
+  （文言はxlsxと完全一致）。閲覧部署スコープ外の関連契約書は伏せ字ラベルに置換
+  （`review_security.txt` S1対応、xlsxに明記は無いが情報漏洩対策として上乗せ実装）。
+
+---
+
+## 判断が必要な項目（仕様の解釈が割れる、業務ルールが未確定 等）
+
+1) シート/セル: 検索・閲覧・変更 / B623・C623
+   現状（xlsx記載）: 「2) 検索・閲覧画面(契約書)」という見出し。直前の並びは
+   B7=「1) 検索・閲覧画面(文書)」→B295=「2) 検索・閲覧画面(文書)」→B376=「3) 検索・閲覧画面
+   (契約書)」と続いており、本来この4番目の画面見出しは「4)」となるはずが「2)」に戻っている
+   （通し番号の付け忘れ・コピペ起因と推測）。
+   あるべき姿（実装に必要な変更）: 実装への影響なし。`documents/contracts`とも検索一覧・詳細を
+   個別画面として実装済みで、見出し番号自体は画面上の文言・UIに出てこない（xlsxの目次的な
+   通し番号に過ぎない）ため、コード修正は不要。
+   分類根拠: xlsxの体裁上の疑問点であり、CLAUDE.md「xlsxのセル文言diffは『何が変わったか』の
+   手がかりに過ぎない」方針に照らし、実装要否の判断が必要な情報として記録（対応不要と判断）。
+
+2) シート/セル: 検索・閲覧・変更 / B677（Rev1.6見出し「関連資料」）と B1018相当（原本HTML/
+   detail popupの項目ラベル「関連書類」）
+   現状（xlsx記載）: Rev1.6追加のセクション見出しは「関連資料」（B677 "□ 関連資料"）。
+   一方、原本HTML index.html（1018行目 `<td class="label">関連書類</td>`）および保管画面の
+   セクション見出し（`section3Title.textContent = "[3] 関連書類"`, 623行目transitionToStorage内）は
+   一貫して「関連書類」を使用しており、ja_pj実装（`common.js`の`rows`配列、`storage2.html`等）も
+   全て「関連書類」で統一されている。
+   あるべき姿（実装に必要な変更）: 原本フィデリティ運用方針（原本HTML最優先、xlsxのセル文言は
+   手がかりに過ぎない）に従い「関連書類」表記を維持するのが妥当で、変更不要と判断する。
+   ただし今後の原本改訂でxlsx側の「関連資料」表記がUI文言側にも波及していないか（例えば
+   B680「既に削除されている関連資料です」というアラート文言は実装済みでこちらは"関連資料"表記の
+   ままでOK＝xlsxそのままの引用文言のため）を次回改訂時に再確認する価値はある。
+   分類根拠: 表記ゆれの解釈問題であり、機能的な差異ではないため実装漏れには分類しない。
+
+3) シート/セル: 検索・閲覧・変更 / B344-345, B670-671（有効期限切れ表示のバナー文言）
+   現状（xlsx記載）: 「画面上部に「有効期限が切れています」のメッセージを表示する。」
+   原本HTML実装（index.html 474行目）: `この文書は有効期限切れです`。
+   ja_pj実装（common.js renderDetailPopup）: `この${label}は有効期限切れです`（原本HTML文言に
+   一致、xlsx文言とは字面が異なる＝「有効期限が切れています」ではなく「有効期限切れです」）。
+   あるべき姿: 原本フィデリティ運用方針により原本HTML文言を正とする現状実装が適切。
+   分類根拠: 文言差異は「原本のJS自体は正常に機能しておりxlsxの言い換えに過ぎない」ケースに
+   該当するため対応不要と判断するが、xlsx記載文言との字面不一致として記録しておく。
+
+---
+
+## 低優先度（軽微・見送り候補）
+特筆すべき軽微な実装差異は見つからなかった（既存の行単位全数監査＝2026-09-07実施分で
+発見された唯一の軽微差異「お知らせ『削除された文書』一覧の行クリックプレビュー補助文言」は
+既に修正済み）。
+
+このシートに関しては、確度の高い実装漏れ・重大な低優先度課題とも新規には検出されなかった。
+
+========================================================================
+簡易設計指示書 Rev1.6「保管」シート（A1:FV612）監査報告
+================================================================
+
+監査方法：
+- 保管_cells.txt（セルテキスト、行1-236）を「実装すべき仕様」として1行ずつ現行実装
+  （documents/contracts の views.py, api.py, forms.py, services.py, storage_paths.py, templates,
+  static/js/common.js, pdf-preview.js）と突き合わせ。
+- 保管_drawing.png（画面モック、8バンドに分割してズーム確認）で cells.txt に文言化されていない
+  画面項目（契約書の契約日/契約期間/契約更新日/契約金額/契約先名、[3]関連書類欄の構成、登録完了・
+  更新完了ポップアップのボタン配置等）を補完確認。
+- 原本HTML（C:\Users\yamad\Claude\JA\HTML\html6\index.html、screen-storage1/screen-storage2、
+  transitionToStorage()・triggerChangeFromDetail()・openDetailPopup()）と1行ずつ突き合わせ、
+  xlsx文言のみを根拠にした動的制御の新規実装をしないよう注意した。
+- 文書/契約書の2モード共有画面のため、両モードの差分（項目の表示/非表示、ラベル文言、
+  保存期間プルダウンの有無等）を個別に確認した。
+- 保管画面２「削除」ボタン・一括編集のステージング型仕様（確定済み）は実装済みであることを
+  documents/contracts の views.py・services.py・tests.py で確認済み（この確定仕様自体は
+  「判断が必要な項目」に含めない）。
+
+総評：本シートは既に非常に高いフィデリティで実装されており、cells.txt の全項目
+（部署/分類/カテゴリー選択ポップアップとそのスコープ規則、保存期間プルダウン、[+][-]PDFズーム、
+[＜][＞]文書切替、削除ボタンの「1週間経過で非表示」規則（B300/B583）、登録完了・更新完了
+ポップアップのボタン群、契約書モードの関連書類ポップアップ検索〈Rev1.6・B478-484〉とその
+閲覧権限スコープ・自己参照除外・削除済み表示等）について、コード側に xlsx セル番地を明記した
+docstring・コメント・回帰テストが揃っており、実装漏れは検出されなかった。
+
+
+■ 確度の高い実装漏れ
+--------------------
+該当なし。cells.txt の全ブロック（文書選択／登録／登録完了ポップアップ／編集／更新完了ポップアップ
+を文書・契約書の両モードで）を実装（views/api/forms/services/templates/JS）と突き合わせたが、
+明確な仕様欠落は見つからなかった。
+
+
+■ 判断が必要な項目
+--------------------
+
+1. シート名／セル番地：保管！B194-195（保存期間プルダウン。画面モックでは「年」プルダウンの
+   選択肢として 2026/2025/2024/2023/2022/2021 の6件を原本HTMLが静的にハードコードしている
+   〈index.html:229-234〉）
+   現状（xlsx記載・原本HTML）：原本の`<select id="storage-year">`は「現在年～現在年-5」に相当する
+   6件を固定列挙（未来年を含まない）。
+   あるべき姿（実装に必要な変更）：`core.forms.year_choices_with_existing(ahead=1, behind=5)`が
+   `documents/contracts.forms.UploadStep2Form`で使われており、実際の生成範囲は
+   「現在年+1～現在年-4」（未来年を1件含み、過去5年目〈現在年-5〉は含まない）。ハードコード回避の
+   動的生成自体は合理的な設計判断（コメントで明記済み）だが、原本が暗黙に示す「未来年は選ばせない・
+   過去5年分は選べる」という窓と1年分ズレている。年またぎで先付け登録するニーズが実際にあるかは
+   業務要件次第のため、意図的な仕様拡張として現状維持するか、原本の窓（ahead=0, behind=5）に
+   揃えるかはユーザー判断が必要。
+   分類根拠：xlsxセル自体には年プルダウンの範囲規則の明文記載が無く、原本HTMLの静的値のみが手がかり
+   （静的モックのため経年で自明に陳腐化する値ではあるが、示された「相対window」のズレは実装判断の
+   余地がある）。
+
+2. シート名／セル番地：保管！B478-484（Rev1.6「関連書類」欄。画像のみで確認できる[3]関連書類の
+   契約金額欄はB478-484の説明対象外）
+   現状（xlsx記載）：契約金額欄の入力規則についての明文記載なし（画像モックにのみ「円」単位の
+   テキスト欄として存在）。
+   あるべき姿：`contracts/forms.py`の`contract_amount`（DecimalField）に下限（0以上）バリデーションが
+   無く、改ざん経路（フォーム直接POST等）を用いれば負値を保存し得る。実害は限定的だが、xlsxに
+   明文規則が無いため「元々未規定」なのか「実装で追加すべき健全性チェック」なのかは判断が必要。
+   → 既に`review_pending.txt`項目2（review_code_doc_contract_full.txt出典）で把握・追跡済みの
+   既知の低リスク事項であり、本監査で新規に発見したものではない。参考として記載。
+   分類根拠：xlsx/HTMLとも規則の明文記載が無く、業務ルール未確定の範囲に該当するため。
+
+
+■ 低優先度（軽微・見送り候補）
+--------------------
+
+1. シート名／セル番地：保管！B168-194（カテゴリー選択、AI174「Rev1.2　仕様追加」）とB127-161
+   （分類選択、AI139「Rev1.2　仕様追加」・AI160「Rev1.1　説明追加」）の非対称性についての注記漏れ
+   現状（xlsx記載）：分類選択には「※更に、設定メニュー「権限管理」にて　文書管理-分類-表示　の
+   項目に設定された分類のみを表示すること」（B160-161、契約書側B447-448も同様）という追加の
+   権限ベース絞り込みがあるが、カテゴリー選択には対応する追加規則の記載が無い（部署スコープのみ）。
+   あるべき姿：`core.forms.scoped_group_and_category_querysets`の実装（`group_qs`のみ
+   `permissions.services.visible_groups`でホワイトリスト適用し、`category_qs`は適用しない）は
+   xlsxのこの非対称性と正確に一致しており、対応は完了済み。今回の監査で不一致は無かったが、
+   将来の改修時にこの非対称性を見落として横展開してしまうリスクがある（同一注記の横展開ミスと
+   逆で「分類にだけある規則をカテゴリーにまで広げてしまう」誤修正のリスク）ため、
+   `core/forms.py scoped_group_and_category_querysets`のdocstringにこの非対称性の理由を明記して
+   おくことを推奨（現状のdocstringは処理内容の説明のみで「カテゴリーには意図的に適用しない」旨の
+   明記が薄い）。
+   分類根拠：現状の実装は正しいため実装漏れではないが、将来の保守性の観点でのコメント補強候補。
+
+2. シート名／セル番地：保管！B72-76（[+][-]・[＜][＞]ボタン、「PDFを拡大、縮小する」
+   「複数文書をアップロードした場合、文書ファイルを切り替える」）
+   現状：原本は`zoomPdf()`・`changeActiveDoc()`という素朴なモック関数だが、ja_pjはPDF.js
+   （`static/js/pdf-preview.js`）による実プレビュー化で置き換え済み（ユーザー依頼による意図的な
+   原本超えの実装、ARCHIVE.md記載）。
+   確認結果：登録画面・編集画面の双方でズーム・ページ送りボタンは正しく配線されており問題なし。
+   参考記載のみ（実装漏れではない）。
+
+========================================================================
+## フェーズ2-2: 判断が必要な項目14件の確定結果（2026-09-16、ユーザー確認済み）
+========================================================================
+
+1. [ログイン/メイン/設定メニュー] メイン画面 電子決裁disabledボタンのtitle属性
+   → 【現状維持】title属性なし（原本HTML index.html:105と完全一致のまま）。対応不要。
+
+2. [職員マスタ] CSV取込「管理者0人ガード」抵触時の中止範囲（B127-128）
+   → 【現状維持】行単位でスキップし他の行は取込続行。実装変更なし。
+
+3. [部署管理] 新規登録画面での部課コード・部課名空欄「本支所のみ」部署の登録可否
+   → 【現状維持】Web新規登録画面では不可のまま。CSV取込・初期データ投入経由のみ許容する運用とする。
+
+4. [部署管理] 統合・分割対象ポップアップの部課コード"99"（退職）除外要否
+   → 【現状維持】除外しない。候補に含めたまま。
+
+5. [分類管理] 権限管理B201/B234「書類管理区分別に分類管理の作成/編集/削除を制限」
+   → 【対応不要・陳腐化確認】HTML_REIMPL_CHECKLIST_ARCHIVE2.md「要再確認（赤字）箇所リスト」の
+   No.2〜17は、2026-08-19追記で「Rev1.1改訂により権限管理の個別フラグ方式が廃止されシステム
+   権限プルダウン1段階に統一されたため対象を失った」と既に陳腐化が明記されている。分類管理
+   シート担当agentが解消済みの注記を見落として「未解決」と誤認したための過検出。現在のRev1.6
+   xlsx権限管理シートには「書類管理区分」の文言自体が存在しない（B201は現在「契約書-契約書-
+   ダウンロード」に変わっている）ことも確認済み。実装対応なし。
+
+6. [分類管理] xlsx B39の「カテゴリー名」表記残り（分類名の説明文にカテゴリー管理シートの文言混入）
+   → 【見送り・記録のみ】実装への影響なし。xlsx原本側への誤記報告は今回は行わない。
+
+7. [カテゴリー管理] 分類(Group)論理削除時、配下の有効カテゴリーの「分類」プルダウンがサイレントに
+   別分類へ変わりうるリスク
+   → 【対応する】(a)案を採用：GroupDeleteView.blocking_count()に「配下の有効なカテゴリーが
+   0件であること」も削除ブロック条件として追加する。フェーズ2-3で実装。
+
+8. [操作履歴ログ] AuditLog.department_nameの表示形式（モックのサンプル行は本支所名プレフィックス
+   付き「本　所|○○課」、実装はRev1.1の表示規約変更に従いプレフィックスなし）
+   → 【現状維持】プレフィックスなしの実装を正とする。モックのサンプル行が古いまま残っていると判断。
+
+9. [その他設定] MenuItemSetting.show_search_eapprovalが未配線であることの明文化要否
+   → 【現状維持】モデルへのコメント追加は行わない。電子決裁はCLAUDE.md全体で既にスコープ外と
+   明記済みのため追加コメント不要と判断。
+
+10. [検索・閲覧・変更] xlsx画面見出し通し番号の付け忘れ（1)→2)→3)→2)、体裁のみ）
+    → 【対応不要】agentの判定通り、体裁上の疑問点であり実装への影響なし。
+
+11. [検索・閲覧・変更] Rev1.6見出し「関連資料」 vs 原本HTML・実装「関連書類」の表記ゆれ
+    → 【現状維持】「関連書類」表記を維持する。原本HTML・実装の一貫性を優先。
+
+12. [検索・閲覧・変更] 有効期限切れバナー文言（xlsx「有効期限が切れています」 vs 原本HTML・実装
+    「有効期限切れです」）
+    → 【現状維持】原本HTML文言「有効期限切れです」を維持する。
+
+13. [保管] 登録・編集画面「年」プルダウンの選択範囲（原本の静的値=現在年〜現在年-5・未来年なし
+    vs 実装=現在年+1〜現在年-4・未来年1年分を含む）
+    → 【現状維持】未来年+1年を許容する現行の動的生成仕様を維持する（年またぎ先付け登録ニーズに
+    対応する意図的拡張として確定）。
+
+14. [保管] 契約金額欄（contract_amount）の下限（0以上）バリデーション欠如
+    → 【見送り】現状維持、review_pending.txtでの追跡を継続する。今回は対応しない。
+
+---
+【フェーズ2-3（実装反映）対象は No.7 の1件のみ】
+それ以外の13件は「現状維持」または「見送り／対応不要」で確定し、コード変更は発生しない。
+
+========================================================================
+## フェーズ2-3: 実装反映結果（2026-09-16）
+========================================================================
+
+No.7 [対応完了] カテゴリー管理／分類(Group)論理削除時の配下カテゴリー保護
+  → masters/views.py GroupDeleteView.blocking_count() に配下の有効カテゴリー件数を加算する分岐を
+  追加。masters/tests.py にテスト2件新規追加＋既存2件修正。manage.py test masters 134件PASS。
+  詳細はHTML_REIMPL_CHECKLIST_ARCHIVE.md「簡易設計指示書 Rev1.6 全行監査（xlsx全行監査フェーズ2）」
+  節参照。
+
+他13件は「現状維持」または「見送り」で確定、コード変更なし（本ファイル冒頭の
+「フェーズ2-2: 判断が必要な項目14件の確定結果」参照）。
+
+xlsx全行監査フェーズ2、完了。

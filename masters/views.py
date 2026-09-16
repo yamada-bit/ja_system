@@ -217,7 +217,14 @@ class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.
         return scoped_get_object_or_404(_group_queryset_with_counts(), request.user, pk)
 
     def blocking_count(self, obj):
-        return obj.doc_count if obj.doc_kbn == DocKbn.DOCUMENT else obj.contract_count
+        # 文書・契約書の直接紐付けが0件でも、配下に有効なカテゴリー（Category）が残っている場合は
+        # 削除をブロックする。放置すると、CategoryForm.group のqueryset（is_deleted=False限定）から
+        # 削除済みの分類が選択肢に消え、当該カテゴリーの編集画面で「分類」欄がブラウザの暗黙選択
+        # （先頭要素）にすり替わり、利用者が意図せず別の分類を選んだ状態で更新してしまう
+        # （xlsx全行監査フェーズ2-1で発見・2026-09-16ユーザー確認、対応する=(a)案を採用）。
+        doc_or_contract_count = obj.doc_count if obj.doc_kbn == DocKbn.DOCUMENT else obj.contract_count
+        active_category_count = Category.objects.filter(group=obj, is_deleted=False).count()
+        return doc_or_contract_count + active_category_count
 
 
 def _category_queryset_with_counts():

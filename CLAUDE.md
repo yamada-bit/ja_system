@@ -13,9 +13,10 @@ JAふくおか八女向け「クラウド文書管理システム」。**画面�
 
 改訂履歴（原本HTML html1→html6、指示書 Rev1.0→Rev1.6）の各差分と反映経緯は
 [HTML_REIMPL_CHECKLIST.md](HTML_REIMPL_CHECKLIST.md)「実装状況サマリ」および
-`HTML_REIMPL_CHECKLIST_ARCHIVE.md`（Rev1.4=2026-08-28以降）／`HTML_REIMPL_CHECKLIST_ARCHIVE2.md`
-（Phase 0〜8・Rev1.1〜1.3期）に反映節あり。新しい原本改訂を受け取ったら下記「原本改訂を受け取った
-時の手順」に従う（追記先は ARCHIVE.md）。
+`HTML_REIMPL_CHECKLIST_ARCHIVE.md`（Rev1.5=2026-09-04以降）／`HTML_REIMPL_CHECKLIST_ARCHIVE3.md`
+（Rev1.4期=2026-08-28〜2026-09-03頃）／`HTML_REIMPL_CHECKLIST_ARCHIVE2.md`（Phase 0〜8・
+Rev1.1〜1.3期、それより前）に反映節あり（2026-09-16、ARCHIVE.mdの肥大化に伴いARCHIVE3.mdへ再分割）。
+新しい原本改訂を受け取ったら下記「原本改訂を受け取った時の手順」に従う（追記先は ARCHIVE.md）。
 
 旧実装（`../ja_pj_old/`）は参照専用。画面構成・機能範囲・命名は一切引きずらないこと。
 

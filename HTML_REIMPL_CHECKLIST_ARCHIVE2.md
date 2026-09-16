@@ -7,7 +7,11 @@ Rev1.1〜Rev1.3改訂の反映まで）の記録を2026-09-07に切り出した�
 
 **新規セッションが通常参照すべきはHTML_REIMPL_CHECKLIST.mdのみ**。このアーカイブ2は、Phase 0〜8や
 Rev1.1〜1.3期の特定の過去判断・バグ修正の詳しい経緯を掘り下げたい時にのみ参照する。
-Rev1.4（2026-08-28）以降の記録はHTML_REIMPL_CHECKLIST_ARCHIVE.mdにある。
+Rev1.4改訂の反映（2026-08-28）〜2026-09-03頃の記録は
+[HTML_REIMPL_CHECKLIST_ARCHIVE3.md](HTML_REIMPL_CHECKLIST_ARCHIVE3.md)、
+Rev1.5（html5→html6、2026-09-04）以降の記録は
+[HTML_REIMPL_CHECKLIST_ARCHIVE.md](HTML_REIMPL_CHECKLIST_ARCHIVE.md)にある
+（2026-09-16、ARCHIVE.mdの肥大化に伴い再分割）。
 
 一般化済みの運用ルールはCLAUDE.md「原本フィデリティに関する運用方針」に集約済み。
 

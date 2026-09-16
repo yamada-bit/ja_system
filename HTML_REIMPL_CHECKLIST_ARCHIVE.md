@@ -1,896 +1,23 @@
-# HTML確定版への作り直し チェックリスト（アーカイブ：Rev1.4以降の詳細記録）
+# HTML確定版への作り直し チェックリスト（アーカイブ：Rev1.5以降の詳細記録）
 
 このファイルは[HTML_REIMPL_CHECKLIST.md](HTML_REIMPL_CHECKLIST.md)から、完了済み作業の詳細な
 実装経緯・監査結果・バグ修正ログを切り出したアーカイブである（2026-08-24に分割、2026-09-07に
-さらに初期分を[HTML_REIMPL_CHECKLIST_ARCHIVE2.md](HTML_REIMPL_CHECKLIST_ARCHIVE2.md)へ再分割。
-方針は[[feedback_html_checklist_archive_split]]）。
+初期分を[HTML_REIMPL_CHECKLIST_ARCHIVE2.md](HTML_REIMPL_CHECKLIST_ARCHIVE2.md)へ、2026-09-16に
+Rev1.4期〜2026-09-03頃の記録を[HTML_REIMPL_CHECKLIST_ARCHIVE3.md](HTML_REIMPL_CHECKLIST_ARCHIVE3.md)
+へ再分割。方針は[[feedback_html_checklist_archive_split]]）。
 
-**このファイルにはRev1.4改訂の反映（2026-08-28）以降の記録のみが入っている**。それより前
-（Phase 0〜8の作り直し・原本フィデリティ監査・Rev1.1〜Rev1.3期）は
-[HTML_REIMPL_CHECKLIST_ARCHIVE2.md](HTML_REIMPL_CHECKLIST_ARCHIVE2.md)を参照。
+**このファイルにはRev1.5改訂（html5→html6、2026-09-04）以降の記録のみが入っている**。それより前は
+以下を参照：
+- Phase 0〜8の作り直し・原本フィデリティ監査・Rev1.1〜Rev1.3期は
+  [HTML_REIMPL_CHECKLIST_ARCHIVE2.md](HTML_REIMPL_CHECKLIST_ARCHIVE2.md)
+- Rev1.4改訂の反映（2026-08-28）〜2026-09-03頃は
+  [HTML_REIMPL_CHECKLIST_ARCHIVE3.md](HTML_REIMPL_CHECKLIST_ARCHIVE3.md)
 
 **新規セッションが通常参照すべきはHTML_REIMPL_CHECKLIST.mdのみ**。このアーカイブは特定の過去の
 判断・バグ修正の詳しい経緯を掘り下げたい時にのみ参照する。一般化済みの運用ルールはCLAUDE.md
 「原本フィデリティに関する運用方針」に集約済み。今後の新規記録はこのファイルの末尾に追記する。
 
 ---
-
-## 原本HTML改訂差分の確認（html4→html5）・簡易設計指示書 Rev1.4改訂の反映（2026-08-28）
-
-### 受領物と機械diffの結果
-- `HTML/html5/index.html`（+ 同ディレクトリ`style.css`）、`HTML/文書管理システム_簡易設計指示書_Rev1_4.xlsx`。
-- **xlsx（Rev1_3→Rev1_4 / Rev1_2→Rev1_4）のセル文言diff**：実質改訂は「保管」シートのみ。
-  Rev1.3で「不要文言削除」として消していた説明文言（B194-195 保存期間プルダウン／B197-198 削除ボタン／
-  B200-201 登録ボタン）を「Rev1.4 不要文言復活」として元に戻し（AI195）、「図1：スクロールの続き」の
-  説明画像追加マーカー（V71/T395、AI71/AI395）が付いただけ。**新しい業務挙動の追加はゼロ**。
-  復活した文言の挙動は「保管画面２『削除』ボタンをメモ消去→…へ変更（2026-08-27）」節で実装済み。
-- **埋め込み画像のハッシュ突き合わせ**：Rev1_3→Rev1_4で`image69.png`/`image70.png`が新規追加
-  （保管シートdrawing13、`srcRect`クロップあり・白塗りsp矩形なし）。内容は文書／契約書の登録
-  フォームを下端までスクロールした状態の図で、[4]メモ欄ボックスの**外側**に赤い「削除」ボタンが
-  独立配置されている（html5のHTML変更と対応、下記B項）。`image19`/`image20`（権限管理、Rev1.2→Rev1.3で
-  差し替え済み）はRev1.4では無変更。
-- **html4→html5のHTML実体diff**は大きいが、大半は**モックHTMLがRev1.2/Rev1.3の指示書内容に
-  ようやく追いついたもの**で、ja_pj側は指示書ベースで先行実装済み（分類・カテゴリー管理の部署列、
-  メイン画面お知らせの契約書対応、権限管理編集レイアウトのRev1.3化、権限管理一覧の契約書情報変更列・
-  編集ボタンのピンク化）。html5で**新規に**発生した反映対象は下記A〜Eのみ。洗い出しの詳細は
-  受領時レポート（scratchpad `html5_rev1_4_diff_report.md`）に記録。
-
-### A. 権限管理一覧：「操作」列を横スクロール追従（固定）列にする
-- **差分**：html5で`<th class="sticky-col col-6">操作</th>` ＋ 行セル`<td class="sticky-col-td col-td-6">`、
-  style.cssに`.col-6 { left: 382px; z-index: 200 !important; }`・`.col-td-6 { left: 382px; }`を追加。
-  「操作」列を権限付与フラグ群の前へ置く列順自体はRev1.2で反映済み、Rev1.3の画像で固定列化された分が
-  html5でマークアップに現れた。原本style.cssは`th:nth-of-type(5)`の`box-shadow`（固定列右端の影）を
-  移動していないため、ja_pj側もそのまま（影は権限列の右に出たまま）。
-- **変更ファイル**：`templates/permissions/authority_list.html`（th/tdにクラス付与）、
-  `static/css/style.css`（`.col-6`/`.col-td-6`定義追加、`.col-5`/`.col-td-5`の誤ったコメントを整理）、
-  `static/js/common.js`（`fixAuthorityStickyOffsets`のループを`i <= 5`→`i <= 6`に拡張、下記）。
-- **`fixAuthorityStickyOffsets`の拡張が必須**：この一覧の固定列left値は`common.js`が実描画幅から
-  都度再計算している（`.col-1〜.col-5`のCSS固定値は原本モックの固定文言前提で実データとズレるため）。
-  当初この関数のループが`i <= 5`のままだったため、追加した「操作」列（col-6）はCSSの`left: 382px`が
-  そのまま効き、実データの1〜5列合計幅（約282px）と約100pxズレて「操作」列が権限付与（文書管理）の
-  列に重なった（ユーザー報告で発覚）。ループを`i <= 6`にして解消。実プレビューで既定表示・横スクロール時
-  とも col-5→操作→権限付与 がフラッシュに並ぶことを確認（seam ±1〜2px、opaque背景＋z-indexで被覆）。
-- **テスト**：`permissions.tests.AuthorityListOperationColumnStickyTests`を新規追加（th/tdのクラス付与、
-  style.cssの`left: 382px`定義、common.jsのループが`i <= 6`まで回ることをセットで検証。
-  いずれか欠けると固定が効かない/列が重なるため全部まとめて確認）。関連3クラスとも PASS。
-
-### B. 保管画面（登録）：「削除」ボタンの div を [4]メモ欄ボックスの外へ移動
-- **差分**：html4では赤い「削除」ボタンの`<div style="text-align:right;margin-top:10px">`が`[4]メモ欄`の
-  `<div class="form-section">`の内側にあったが、html5でその外（スクロール領域の末尾、`storage-outer-actions`
-  の手前）へ移動。Rev1.4で追加された説明画像`image69.png`（文書）/`image70.png`（契約書）がこの配置を
-  示している。ボタンのクラス・`id`・挙動（`btn-remove-upload`＝アップロード取り消し、
-  2026-08-27確定分）は不変。
-- **変更ファイル**：`templates/documents/storage2.html`・`templates/contracts/storage2.html`
-  （`form-section`の閉じ`</div>`をボタン`div`の前へ移動しただけ。関連コメントもインデント調整）。
-  `feedback_repeated_ui_notes_verification`の観点で文書・契約書の両テンプレートを個別に確認・修正。
-  移動ついでに当該箇所の`{# … #}`が1行内で閉じているか（CLAUDE.md「Djangoテンプレートの複数行コメントの罠」）も確認済み。
-- **テスト**：`documents.tests.UploadStep2RemoveViewTests` / `contracts.tests.UploadStep2RemoveViewTests`に
-  `test_remove_button_div_is_outside_memo_form_section`を追加（`form.memo`はTextarea単体でdivを含まないため、
-  「メモ欄見出し～削除ボタン」の間に`</div>`が出ること＝form-section外にあることで判定）。両クラス11件PASS。
-
-### C. common.js `openPopupPopup`：ポップアップの縦位置反転を移植
-- **差分**：原本 html5 で `openPopupPopup` が (1)先頭で `renderPopupPopupItems()` を呼んで中身の実寸を
-  確定してから配置、(2)`rect.bottom + 5 + popRect.height > windowHeight`（下に置くと画面下端で切れる）なら
-  ポップアップをボタンの**上**（`rect.top - popRect.height - 5`）へ反転、上にも入らなければ `scrollY + 10`、
-  (3)右端はみ出しは再測してから補正、(4)`activePopupTargetInput = btn.previousElementSibling || btn.nextElementSibling`、
-  に変更された。Rev1.3で権限管理編集の表示欄が rows=5 textarea になりポップアップが縦に伸びたことへの追随。
-- **ja_pj への移植**：ja_pj は選択肢を非同期 `fetch` する場合があり、原本のように「先頭で render→即実寸測定」が
-  できない。配置ロジックを `positionPopupPopup(btn)` に切り出し、キャッシュヒット側・fetch解決側の
-  **両方で `renderPopupPopupItems()` の直後に呼ぶ**構成にした。縦反転・右端再測の式は原本 html5 と同一。
-  `|| btn.nextElementSibling` は ja_pj のウィジェット構造（表示要素→hidden input→ボタン順）では発火しないが、
-  原本との差異を残さないため移植（コメントで明記）。
-- **変更ファイル**：`static/js/common.js`（`openPopupPopup` 改修、`positionPopupPopup` 追加）。
-- **テスト**：本プロジェクトに JS 単体テストの仕組みは無い（クライアント JS は実プレビュー確認方針、
-  過去の `startBulkEdit()` 等と同じ）。`core.tests.PopupSelectPositioningJsTests` を回帰ガードとして追加
-  （静的ファイルを読み、`positionPopupPopup` 定義・縦反転式・両キャッシュ経路での呼び出し・`|| nextElementSibling`
-  を検証）。2件PASS。実挙動は dev サーバーで確認（下記「検証」）。
-
-### D. メイン画面お知らせ：ラッパを `.notice-columns` クラスに統一
-- **差分**：原本 html5 で文書列／契約書列のラッパが `<div class="notice-columns">`（＋ `notice-columns > div > ul`
-  構造）になり、style.css に `.notice-columns { display:flex; justify-content:space-between; gap:20px }`
-  `.notice-columns > div { flex:1 }`、`.notice-area ul` に `margin:0` が追加された。お知らせを文書・契約書の
-  2列にすること自体は Rev1.2 で反映済みで、html5 は**モックの見た目定義がマークアップに現れた**もの。
-- **ja_pj の従来実装**：ラッパは `<div style="display:flex; gap:40px; flex-wrap:wrap;">`＋`<ul style="flex:1; min-width:280px;">`
-  のインライン style だった。html5 に合わせクラス＋CSS へ寄せ、`<ul>` を `<div>` で1段包む構造に変更。
-  件数集計と遷移先を一致させるため、**契約書側リンクは html5 の死んだリンク（`onclick="return false;"`）に
-  合わせず実際の検索画面へ配線したまま**（2026-08-13 の不一致対応と同じ方針、テンプレートのコメントに明記）。
-- **変更ファイル**：`templates/core/menu.html`（ラッパ構造）、`static/css/style.css`（`.notice-columns` 定義追加、
-  `.notice-area ul` に `margin:0`）。
-- **テスト**：`core.tests.MenuNoticeTwoColumnLayoutTests` に `test_notice_columns_wrapper_matches_html5` を追加
-  （`<div class="notice-columns">` の存在、旧インライン flex style が消えたこと、style.css の定義をセットで検証）。
-  既存の `test_notice_area_contains_two_ul_blocks`（`<ul` が2個）もそのままPASS。4件PASS。
-
-### E. 権限管理編集の表示欄 textarea を `rows="5"` に
-- **差分**：Rev1.3 で input→textarea 化した権限管理編集の3表示欄について、原本 index.html html5（Rev1.4時点の
-  マークアップ）では `rows="5"`。ja_pj は `core/widgets.py` の `PopupSelectWidget`（`display_multiline=True`）で
-  `rows="4"` を出していた。`rows="4"`→`"5"` の1箇所修正。
-- **影響範囲**：`rows` リテラルは `if self.display_multiline:` ブロック内にあり、`display_multiline=True` は
-  `permissions/forms.py` の `AuthorityEditForm` 3フィールドのみが指定（全数確認）。検索画面・保管画面2の
-  `PopupSelectWidget` は `else` の `<input type="text">` 分岐のため**影響なし**。
-- **変更ファイル**：`core/widgets.py`（`rows="4"`→`"5"`、コメントを html5/Rev1.4基準に更新）。
-- **テスト**：`core.tests.PopupSelectWidgetTamperResistanceTests.test_display_multiline_renders_readonly_textarea_with_value_as_content`
-  と `permissions.tests.AuthorityEditFormTests.test_multi_select_display_fields_render_as_textarea` に
-  `rows="5"` のアサーションを追加。PASS。
-
-### 検証
-- `manage.py test`（全件）exit 0。`manage.py test permissions core documents contracts` = 475件 OK。
-  `manage.py check` 問題なし。
-- dev サーバー（`django-dev`、employee_no=9005 でログイン）で computed style / DOM 実測により確認：
-  - A：権限管理一覧の「操作」th/td＝`position:sticky`（class `sticky-col col-6` / `sticky-col-td col-td-6`）、
-    `common.js`が実測でleftを補正し、既定表示・横スクロール時とも col-5(R292)→操作(L293/R350)→
-    権限付与(L348) がフラッシュに並ぶ（当初ループ`i<=5`のままで約100px重なっていたのを`i<=6`で解消）。
-    編集ボタン背景＝`rgb(255,204,255)`。
-  - C：権限管理編集で画面下部の「選択」ボタン押下 → viewport 460px では popup(高さ221px)が
-    ボタンの**上**へ反転（popBottom 326 ≤ btnTop 331）、viewport 720px では従来どおり**下**に展開
-    （popTop 363 ≥ btnBottom 358）。非同期 fetch 経路でも 3 件描画後に配置。コンソールエラーなし。
-  - D：メイン画面お知らせ `.notice-columns`＝`display:flex; justify-content:space-between; gap:20px`、
-    子 div 2つが `flex-grow:1`・各 604px・それぞれ `<ul>` 1本。
-  - E：権限管理編集の3表示欄すべて `<textarea rows="5">`。
-  - B：`documents/contracts.tests.UploadStep2RemoveViewTests` で step2 GET 後のマークアップ順
-    （[4]メモ欄見出し → `</div>`（form-section 閉じ）→ 削除ボタン）を検証。
-
-## 一括編集を「更新ボタンで全ページ一括確定」モデルへ改修（2026-08-28、ユーザー確定）
-
-### 背景
-前節（保管画面2の削除ボタン再定義）に続き、一括編集の挙動をユーザーが確定した。従来の一括編集は
-**save-as-you-go**（ページャー ＜ ＞ で移動する都度、表示中の1件を即DB保存＋監査ログ）だった。
-これは原本html4のモックJS（全件をブラウザ内配列に溜めて最後に一括保存）を、`ModelChoiceField`の
-セッションJSON直列化を避けるため簡略化した実装（2026-08-20〜27の経緯は「検索結果一覧 一括編集の
-実装」「〜原本html4との挙動差異の修正」各節）。ユーザーの想定は「更新で全ページ一括確定」で、
-save-as-you-go は複数点で食い違っていた（訪問しただけのページが無変更でもUPDATE＋監査ログ／
-保存満了日が素通りで再計算／削除が即時・取消不可）。
-
-### 確定した仕様
-- 一括編集の「更新」= **全ページ一括確定**。それまで一切DB未反映。
-- **変更が無いページは更新しない**（「更新なし」）。判定は**更新押下時点のDB現在値との比較**
-  （dirty check）。
-- 完了ポップアップは**全件**を「更新／更新なし／削除」の3状態＋件数サマリで表示。
-- 「削除」ボタンは**削除予定マーク**（即削除しない）。押すとボタンが「削除取消」に変わり、
-  マーク中のページは入力欄を**disabled（グレーアウト）＋バナー表示**。「更新」でまとめて論理削除。
-- 契約書の**関連書類の追加・削除も「更新」までステージ**（追加ファイルは`MEDIA_ROOT/tmp_uploads/`へ
-  退避）。「キャンセル」で入力・削除マーク・関連書類すべて破棄（一時ファイルも実体削除）。
-- 入力エラーが1ページでもあれば**全体を止め、最初のエラーページへジャンプ**して表示（未コミット）。
-- **単独編集画面**（`DocumentEditView`/`ContractEditView`の削除＝`EditDeleteView`、即時論理削除→
-  検索画面へ）と**登録画面**（`UploadStep2RemoveView`、表示中ファイルの即時アップロード取り消し）は
-  **前節のまま据え置き**。
-
-### 設計
-- **セッション構造**（`core/bulk_edit_services.py`）を
-  `{"pks", "index", "staged": {"<pk>": {生値dict}}, "to_delete": [pk], "staged_related": {"<pk>":
-  {"add": [{temp_name, original_name}], "remove": [id]}}}` に拡張（全てJSON直列化可能）。
-  新ヘルパー: `stage_page` / `staged_page_data` / `toggle_delete_mark` / `is_marked_for_delete` /
-  `stage_related` / `staged_related_for` / `discard_staged_related_files` / `discard_bulk_edit`。
-  前節で追加した `remove_bulk_edit_pk` は未使用化のため削除。
-- **`BulkEditView`**（documents/contracts）を作り替え。GETは `staged` があれば bound フォームで
-  ステージ値を表示、`marked_delete` なら全フィールド `disabled`。POSTは送信ボタンで分岐
-  （`bulk_nav=prev/next`＝現ページをステージして移動／`bulk_action=toggle_delete`／
-  `bulk_action=update`＝`_commit()`／`bulk_action=cancel`＝`discard_bulk_edit`）。
-  `_commit()` は 検証パス（NGなら最初のエラーページへ）→ `transaction.atomic()` で
-  to_delete は論理削除、staged は dirty のみ `apply_document_edit`/`apply_contract_edit`、
-  それ以外は「更新なし」→ 一時ファイル整理 → 完了モーダル（`complete.mode="bulk"`,
-  `rows=[{obj,status}]`, `counts`）。
-- **dirty判定**: `documents.services.document_edit_is_dirty` / `contracts.services.contract_edit_is_dirty`
-  （`apply_*_edit` と同じ department 正規化後に全コピー対象フィールドを比較。契約書は
-  `related_changed` も条件。`expiry_date` は派生値のため比較対象外
-  ※2026-08-28のレビュー指摘C-1対応で「保存期間変更時のみ引き直す」に整理。下記
-  「documents/contractsコードレビューの反映」節参照）。
-- **関連書類のステージ退避**: `core.upload_services.stash_files_to_tmp`（`save_pending_files` の
-  書き込みロジック流用、セッション非依存で `[{temp_name, original_name}]` を返す）。確定時は
-  `open_pending_file()` で開き直し `.name` を元ファイル名に戻して `apply_contract_edit` の
-  `new_related_files` へ渡す。
-- **テンプレート**: 共有 `edit.html` を `{% if bulk %}` で拡張（削除ボタン＝`toggle_delete` submit、
-  「削除取消」トグル、`marked_delete` バナー、キャンセル/戻る＝`bulk_action=cancel` submit、
-  契約書の関連書類は view が渡す `related_rows` をループ〈既存−staged remove ＋ staged add
-  「追加予定」〉）。単独編集の外部 `record-delete-form` は `{% if can_delete and not bulk %}` に。
-  `_complete_modal.html` に `complete.mode == "bulk"` 分岐（状態列＋件数サマリ）を追加。
-
-### 変更ファイル
-- `core/bulk_edit_services.py`（構造拡張・ヘルパー群・`remove_bulk_edit_pk`削除）
-- `core/upload_services.py`（`stash_files_to_tmp`）
-- `documents/services.py`・`contracts/services.py`（`*_edit_is_dirty`）
-- `documents/views.py`・`contracts/views.py`（`BulkEditView` 作り替え、`EditDeleteView` を
-  単独編集専用に簡素化＝`from_bulk`分岐撤去、`*_BULK_FORM_FIELDS` 定数）
-- `templates/{documents,contracts}/edit.html`・`templates/{documents,contracts}/_complete_modal.html`
-- `documents/tests.py`・`contracts/tests.py`（`BulkEditViewTests` 作り替え、`EditDeleteViewTests` の
-  bulk 系テスト撤去）、`core/tests.py`（`RemoveBulkEditPkTests`→`BulkEditServicesStagingTests`）
-
-### 検証
-- `manage.py check` 問題なし。`manage.py test` **706件PASS**。
-- dev サーバーで手動確認：5件一括編集→2件だけ編集して「更新」→完了モーダルに5件（更新×2・
-  更新なし×3）、DBも編集2件のみ変更・監査ログ2件／削除マーク→「削除取消」で復帰→再マーク→
-  「更新」で論理削除／編集して「キャンセル」→検索一覧が元のまま／必須項目を空にして「更新」→
-  該当ページへジャンプしエラー表示／契約書：関連書類を追加→「キャンセル」で未反映。
-
-## documents/contractsコードレビューの反映（2026-08-28）
-
-`review_code_documents_contracts.txt`（`/code-review high`、対象：documents/・contracts/の
-models/views/api/services/forms/storage_paths/urls＋両アプリが委譲しているcore側共通実装）の
-指摘のうち、ユーザー指示（「優先度『高』『中』の指摘を1件ずつ順番に修正。`python manage.py
-test documents contracts`で確認してから次へ。低優先度は修正せず理由付きで記録だけ残す」）に
-基づき対応した。高＝0件。中＝C-1/C-2/C-3の3件、加えてC-4（低〜中、ユーザー判断で「修正する」）。
-
-### C-1（中）保存満了日(expiry_date)の編集時再計算が三者三様
-- **確定した仕様（ユーザー選択）**：「保存期間(retention_period)を変更した時だけ」今日基準で
-  引き直す。文書の単体編集・一括編集・契約書の3経路で挙動を統一。
-- `documents/services.py apply_document_edit`：無条件だった
-  `doc.expiry_date = calculate_expiry_date(今日, retention_period)` を
-  `retention_changed`（代入前の`doc.retention_period_id`と`cleaned_data`のpk比較）が真のときのみに
-  変更。`doc_retention_edit`権限が無い職員はフォーム側で保存期間欄が実質固定されるため、
-  他項目だけ編集しても満了日は動かなくなった。
-- `document_edit_is_dirty` のdocstring修正：旧「保存期間が変わらない限り実質不変」は今日基準の
-  派生値としては誤りだったが、新挙動では実際に「retention_period変更時のみ変化」する値になり、
-  既存の`retention_period_id`比較でカバーされるため`expiry_date`自体を比較対象に含める必要が
-  無い旨に書き換え。
-- `contracts/services.py apply_contract_edit`：もともと`expiry_date`を触らない（契約書は保存期間が
-  `settings.CONTRACT_RETENTION_YEARS`固定で編集要素が無い）。これがC-1の統一方針と一致することを
-  docstringに明記。
-- `templates/documents/edit.html`：保存期間欄の横に出る「（有効期限：…）」プレビューJSが常に
-  今日+保存期間を表示していたため、保存期間が現在値のままなら保存済みの`expiry_date`をそのまま
-  表示するよう変更（`#expiry-edit-config`のdata属性で現在の`retention_period_id`・`expiry_date`を
-  渡す）。保存後の実値と表示が食い違わない。
-- **見送り**：`document_edit_is_dirty`への`expiry_date`直接比較の追加は、上記のとおり
-  `retention_period_id`比較で等価にカバーされるため不要と判断。
-
-### C-2（中）契約書編集で関連書類(RelatedFile)保存が途中失敗すると物理ファイルが孤児化
-- `contracts/services.py apply_contract_edit`：`RelatedFile.objects.create()`ループを
-  `try/except (OSError, DBError)`で囲み、例外時は`created_related`に積んだ（＝save成功済みの）
-  ファイル実体を`file.delete(save=False)`してから再raise。`transaction.atomic()`はDB行を
-  ロールバックするがストレージ実体は戻さないため。`contracts/views.py`の「登録」経路
-  （`UploadStep2View`）が既に持つ後始末と同型に揃えた。単体編集(`ContractEditView`)・
-  一括編集(`BulkEditView._commit`)の両方に効く。
-- `contracts/services.py`冒頭に`from django.db import Error as DBError`を追加。
-- テスト追加：`contracts/tests.py ContractEditViewFileHandlingTests.
-  test_related_file_partial_failure_cleans_up_orphan_files`（関連書類2件中2件目のcreateが
-  OSErrorで失敗→1件目のファイル実体が`default_storage`から消えていること・本体タイトルも
-  ロールバックされること）。
-
-### C-3（中）一括ダウンロードのZIP構築がFileNotFoundErrorしか捕捉せず他のOSErrorで全滅
-- `core/zip_services.py build_zip_archive`：`except FileNotFoundError` を `except OSError` に拡大
-  （`PermissionError`・`IsADirectoryError`・ストレージI/Oエラー等も1件ずつ`missing_count`計上して
-  継続）。単体ダウンロード`core/record_views.py BaseFileServeView`が既にOSError全般をHttp404へ
-  変換しているのと整合。
-- `core/record_views.py`：利用者向けmessages.warningの文言を「見つからなかった」→
-  「取得できなかった」に微修正（欠損以外も含むため）。既存テストの文言アサーション2件
-  （documents/contracts）も追随修正。
-- テスト追加：`documents/tests.py BulkDownloadViewTests.
-  test_non_filenotfound_oserror_is_skipped_not_500`（PermissionErrorでも500にならず該当1件のみ
-  スキップ）。
-
-### C-4（低〜中、ユーザー判断で修正）ZIP内ファイル名がUUID接頭辞付き内部名
-- `core/zip_services.py`：ZIPエントリ名を`obj.file.name`の末尾（UUID付き）→`obj.display_name`
-  （元名）に変更。単体ダウンロードのContent-Dispositionと揃えた。
-- `display_name`は文書間で重複し得るため`_dedupe_entry_name()`ヘルパーを追加し、衝突時は
-  拡張子の手前に" (2)", " (3)"…を付与（OSのファイルマネージャ慣習）。
-- テスト追加：`documents/tests.py BulkDownloadViewTests.
-  test_zip_entry_names_use_display_name_and_dedupe_collisions`（同名`dup.txt`2件→
-  `["dup (2).txt", "dup.txt"]`）。
-
-### 見送った低優先度（C-5〜C-9・R-1〜R-7の12件）
-`review_pending.txt`「■ documents / contracts（追補：review_code_documents_contracts.txt、
-2026-08-28）」に項番45〜56として理由付きで記録。要点：C-5（契約金額0円のfalsy-zero空表示）、
-C-6（一括編集_commitの対象再取得にis_deleted/部署スコープ条件無し・TOCTOU）、
-C-7（`_render_complete`の`rows[0]`無条件参照）、C-8（チャンク結合APIのtotal_chunks上限無し）、
-C-9（複数ファイル一括登録でDB INSERT失敗ファイルの孤児化）、R-1（EditViewのUpdateView不使用）、
-R-2（`combine_upload_chunks`のセッションリストin-place変更）、R-3（DetailAPIViewの部署スコープ
-判定インライン重複）、R-4（一括DLのqueryset2回評価＋ZIP全量メモリ保持）、
-R-5（`_post_delete_redirect` docstring乖離）、R-6（documents/services.pyにモジュールlogger無し）、
-R-7（論理削除のたびに正規化カラム再計算）。
-
-### 検証
-中優先度3件＋C-4を1件ずつ修正し、都度 `manage.py test documents contracts` を実行
-（287→288→290件、いずれも全件PASS）。最終 `manage.py test documents contracts` は
-**290件PASS**（開始時287件から新規テスト3件純増）。
-
-
-## セキュリティレビュー（review_security.txt）優先度「高」「中」の反映（2026-08-28）
-
-`review_security.txt`（リポジトリ全体のセキュリティ精査）の指摘のうち、ユーザー指示で
-優先度「高」3件・「中」2件を1件ずつ順番に修正した。低優先度（L-1〜L-3）は修正せず
-`review_security.txt`冒頭「対応結果」節に理由付きで記録。詳細な指摘内容は同ファイル参照。
-
-### H-1（高）格納型XSS：検索結果詳細ポップアップ renderDetailPopup の innerHTML 直組み立て
-- `static/js/common.js`：`escapeHtml()` ヘルパーを新設（getCsrfToken の直後）。
-  `renderDetailPopup()` のプロパティ表（`rows.map(...)`）は各値を `escapeHtml(value)` してから
-  `<td>` に埋め込むよう変更。関連書類一覧（複数ファイル名を `<br>` 連結する行）は
-  `{html: ...}` 形式で「整形済みHTML（各ファイル名は生成時に escapeHtml 済み）」であることを
-  マークし、その行だけ二重エスケープしないようにした。
-- 検証：ブラウザ実機（dev サーバー＋ログイン）で `renderDetailPopup()` に
-  `<img src=x onerror=...>` を含む API 応答を流し、`window.__xss` が立たず `&lt;img` として
-  エスケープ表示されること、関連書類行では `<br>` 区切りが維持されることを確認。JS 単体
-  テストハーネスはリポジトリに無いため（package.json 不在）、検証はブラウザ実機で実施。
-
-### H-2（高）格納型XSS：検索結果行クリックプレビュー showSearchPreview の innerHTML
-- `static/js/common.js`：`showSearchPreview()` の3か所の `titleEl.innerHTML = \`<strong>${title}\`...`
-  代入を廃止。`setSearchPreviewMessage(titleEl, title, message)` を新設し、タイトルを
-  `<strong>` の `textContent` として、説明文を静的テキストノードとして DOM API で組み立てる。
-  `|escapejs` は「JS文字列リテラルとして安全」なだけで innerHTML では `<` が復元される点への対応。
-- 検証：ブラウザ実機で `showSearchPreview('<img src=x onerror=...>', '', ...)` を呼び、
-  ペイロードが発火せず `<strong>` の textContent としてエスケープ表示されることを確認。
-
-### H-3（高）アップロードファイルのMIME/拡張子未検証＋プレビューの同一オリジン inline 配信
-2層で対応:
-- **配信側**（`core/file_serving.py` 新設）：`SAFE_INLINE_EXTENSIONS`（PDF＋ラスター画像）以外は
-  `PreviewView`/`PendingPreviewView`（本来 inline 意図）でも `as_attachment=True` へフォール
-  バックする `resolve_as_attachment()`、および全配信レスポンスに
-  `X-Content-Type-Options: nosniff` と `Content-Security-Policy: script-src 'none'; object-src 'none'`
-  を付与する `apply_file_response_security_headers()` を用意。`core/record_views.py
-  BaseFileServeView.get`・`core/upload_views.py BasePendingPreviewView.get` に適用。
-  検索プレビュー機能は元々 `get_preview_kind` が image/pdf しか返さないため、フォールバックに
-  よる画面上の機能低下は無い。`Content-Security-Policy: sandbox` や `default-src 'none'` は
-  ブラウザ内蔵 PDF ビューアの表示に影響しうるため、あえて `script-src`/`object-src` のみに絞った。
-- **アップロード側**（`core/upload_validation.py` 新設）：`BLOCKED_UPLOAD_EXTENSIONS`
-  （html/htm/xhtml/shtml/mht/svg/svgz/js/mjs/htc/hta/swf）を拒否リスト方式で判定する
-  `blocked_upload_message()`。`core/upload_views.py BaseUploadStep1View.post`（通常アップロード、
-  documents/contracts 共通）と `BaseChunkUploadAPIView.post`（分割アップロード、`file_name` を検証）で
-  拒否。Office 文書・PDF・画像・テキスト・圧縮ファイル等の通常業務形式には一切影響しない。
-- **原本フィデリティ**：原本 HTML/xlsx はファイル種別を制限していないが、ユーザー依頼の
-  セキュリティ修正に伴う意図的逸脱。`accounts/forms.py StaffCsvImportForm.clean_csv_file` が
-  既に .csv を検証しているのと同じ考え方。
-- **見送り**（H-3 推奨対応のうち中期対応）：アプリ全体への CSP 導入（テンプレートが原本由来の
-  `onclick` 等インラインハンドラに全面依存しており段階的移行が必要）、MEDIA の別オリジン配信。
-  `review_security.txt`「未対応」節に記録。
-- テスト追加：`core/tests.py SafeInlineFileServingTests`（5）・`BlockedUploadValidationTests`（3）、
-  `documents/tests.py PreviewViewTests.test_preview_adds_security_headers` /
-  `test_html_file_is_never_served_inline_via_preview`、`UploadBlockedFileTypeTests`（2）。
-  ブラウザ実機で PDF のインラインプレビュー（iframe）が CSP 付与後も維持されることを確認。
-
-### M-1（中）一括編集のステージング型削除が can_delete() をサーバー側で検証しない
-コミット 9358b6d の一括編集ステージング型改修で新規混入したリグレッション。
-`toggle_delete` ハンドラと `_commit` の確定前検証は `deletion_services.can_delete()` を
-呼んでおらず、`{% if can_delete %}` のクライアント側ゲートしか無かった。
-- `documents/views.py`/`contracts/views.py BulkEditView`：
-  - `toggle_delete` ハンドラ：削除マークを「付ける」操作のみ `can_delete()` を検証し、
-    NG なら `deletion_denial_message` を出して `redirect`（マーク解除は常に許可）。
-  - `_commit`：入力エラー検証パスの直後に「削除予定pkの `can_delete()` 検証パス」を追加。
-    1件でも NG なら `set_bulk_edit_index` で該当ページへ飛ばし、削除マーク済み（disabled）
-    フォームでエラー付き再描画してコミット全体を中断（既存の入力エラー時の扱いと同型）。
-  部署スコープは既存の `scoped_get_object_or_404` ＋ `resolve_ordered_pks` で強制済みのため、
-  欠落していた「削除済み／登録から7日以上経過」ルールのみを補った。
-- テスト追加：`documents/tests.py BulkEditViewTests` /
-  `contracts/tests.py BulkEditViewTests` に各2件
-  （`test_toggle_delete_mark_rejected_for_*_past_delete_window`、
-  `test_commit_rejects_smuggled_delete_mark_for_*_past_delete_window`。後者は
-  `to_delete` をセッションへ直接注入して改ざん・API直叩きを模す）。
-
-### M-2（中）SECRET_KEY に本番でも有効な安全でないハードコードデフォルト
-- `config/settings/prod.py`：`SECRET_KEY = env("SECRET_KEY")`（デフォルト無し）を追加。
-  `base.py` の `default="django-insecure-dev-key-change-me"` は dev 用に残し、prod では
-  未設定なら django-environ が `ImproperlyConfigured` を送出して起動失敗させる。
-- `.env.example`：`SECRET_KEY=change-me` → `<REQUIRED-generate-a-unique-50-char-random-key>` ＋
-  生成コマンド例のコメントに変更。
-- 検証：`.env` から SECRET_KEY を一時的に除いたサブプロセスで
-  `DJANGO_SETTINGS_MODULE=config.settings.prod` を setup し、
-  `ImproperlyConfigured: Set the SECRET_KEY environment variable` で停止することを確認
-  （設定時は正常ロード）。
-
-### 検証（全体）
-高3件・中2件を1件ずつ修正し、都度関連テストを実行。最終 `manage.py test`（全アプリ）は
-**752件PASS**（本修正で新規テスト14件純増）。
-
-
-## チャンク分割アップロードのチャンクサイズを settings 化（2026-08-28）
-
-ユーザーから「500MB等の大容量文書を5MBずつ分割アップロードしているが、このサイズで
-妥当か」という問い合わせ。評価結果は「5MBは安全側で、そのままでも問題なし。大容量主体で
-往復回数を減らしたいなら10MB程度まで可。5MB未満にはしない。上限は必ず
-`MAX_UPLOAD_SIZE_BYTES`（1リクエストボディ上限）より十分小さく、かつ本番リバースプロキシの
-ボディサイズ上限がこの値＋αを許可していること」。あわせてユーザー指示で、JSハードコードを
-やめて settings 化した（過去に「テスト用1MBのまま戻し忘れ」事故があった箇所。同ファイル
-「チャンク分割アップロードのチャンクサイズ食い違いを修正」節参照）。
-
-- [x] `config/settings/base.py`：`CHUNK_UPLOAD_CHUNK_SIZE_BYTES`（`env.int`、既定 5 * 1024 * 1024）
-  追加。推奨サイズ・下限/上限の制約・リバースプロキシ依存をコメントで明記。
-- [x] `.env.example`：`CHUNK_UPLOAD_CHUNK_SIZE_BYTES` をコメントアウトで追記（推奨値の注記付き）。
-- [x] `core/upload_views.py` `BaseUploadStep1View._context()`：`chunk_upload_chunk_size_bytes` を
-  テンプレートコンテキストへ追加（documents/contracts 共通）。
-- [x] `templates/{documents,contracts}/storage1.html`：`uploadFilesInChunks()` の第3引数へ
-  `{{ chunk_upload_chunk_size_bytes }}` を渡す。
-- [x] `static/js/chunk_upload.js`：`const CHUNK_UPLOAD_CHUNK_SIZE`（ハードコード）を廃止し、
-  `uploadFilesInChunks(files, uploadUrl, chunkSize)` の引数で受け取る方式に変更。引数未指定・
-  不正値（0以下・NaN）用に `CHUNK_UPLOAD_CHUNK_SIZE_FALLBACK`（5MB）を残す。推奨サイズを
-  ファイル冒頭コメントに記載。サーバー側（`combine_upload_chunks`）はチャンクサイズを参照
-  していないため変更不要。
-- [x] テスト追加：`documents/tests.py ChunkUploadAPITests.
-  test_step1_passes_configured_chunk_size_to_template`（settings 上書きが保管画面１の
-  レンダリング結果に反映されること）。
-
-### 検証
-`manage.py test documents contracts` **332件PASS**（新規1件純増）。
-
-## 保管画面２／編集画面のフィールドエラー表示位置を入力欄の下へ（2026-08-31）
-
-ユーザー報告：保管画面２で分類・カテゴリーを空欄のまま「登録」すると
-「このフィールドは必須です。」（Django必須エラーの日本語ロケール訳）が出るが、
-`.form-row`（`display:flex; align-items:center;`）の中に素の `<div style="color:#c0392b;">`
-で描画していたため、エラーが入力欄・「選択」ボタンの**右隣に横並び**で表示されていた。
-入力欄の真下に出す方が自然、という指摘。原本モックはDjangoのエラー`<div>`を描画しないため
-原本フィデリティ上の制約は無い。
-
-- [x] `static/css/django_widgets.css`：`.form-row:has(.field-error) { flex-wrap: wrap; }` ＋
-  `.form-row .field-error { flex-basis:100%; margin-left:100px; margin-top:2px;
-  color:#c0392b; font-size:12px; }` を追加。`margin-left` は `.form-row label` の
-  `width:100px` に合わせ、折り返したエラーを入力欄の左端に揃える。`.form-row` を使う
-  テンプレートは保管／編集の4画面のみ（`grep` で確認済み）。
-  ※当初は `.form-row { flex-wrap: wrap }`（全行）だったが、契約書 storage2 の
-  「契約期間 [from]～[to]」行が折り返す副作用があり `:has(.field-error)` で
-  エラー行のみに限定した（同日、下記「追補」参照）。
-- [x] `templates/{documents,contracts}/storage2.html`：部署／分類／カテゴリー／文書タイトルの
-  エラー `<div>` を `style="color:#c0392b;"` から `class="field-error"` へ。
-- [x] `templates/{documents,contracts}/edit.html`：文書／契約書タイトルのエラー `<div>` も同様に
-  変更（同じ `.form-row` 構造で同じ横並び不具合があるため）。edit.html は部署／分類／
-  カテゴリーのエラー自体を描画していない（別件・今回はスコープ外）。
-
-### 検証
-実プレビューで管理者ログイン → `/documents/upload/step1/` にダミーPDFをPOST →
-`/documents/upload/step2/` で空submit。分類・カテゴリー両方のエラーが
-`getBoundingClientRect()` 実測で入力欄の直下（`err.y >= input.bottom`）かつ
-左端一致（`err.x == input.x`）に表示されることを確認。
-
-## 保管画面２：複数件登録のメタデータをファイルごとの個別入力へ（2026-08-31、ユーザー依頼）
-
-ユーザー依頼：保管画面２（新規保管）で複数ファイルを一括選択したとき、メタデータ
-（部署・分類・年・カテゴリー・保存期間・個人情報・メモ／契約書は契約日等）を「1回の入力で
-バッチ全件へ共通適用」ではなく、**ページャーで表示中のファイルごとに個別入力**する。
-未入力ファイルの初期値は「空欄・既定値スタート」（部署＝ログインユーザーの部署、個人情報＝
-「含まれる」、年＝当年。直前ファイルからのコピーはしない）。
-
-原本HTML確定版のJS（`startRegisterMock()`）はタイトル以外をバッチ共通適用しており、これは
-**原本との意図的な差異**（ユーザー明示依頼のため原本一致よりユーザー指示を優先。CLAUDE.md
-「原本フィデリティに関する運用方針」）。編集画面（`edit.html`＝単体編集・一括編集、常に
-1ファイル）は挙動不変。
-
-### 設計
-
-- ページャーは従来どおり純JS（サーバー往復なし）。createモードではメタデータ欄を
-  ファイル数ぶんDOMに展開し、`.doc-fieldset[data-doc-index]` をJSで表示/非表示切替、送信は全件同時。
-- `documents/contracts.forms.UploadStep2Form`：`self.per_file_mode = not edit_mode`。createでは
-  `PER_FILE_FIELDS`（クラス属性）を `copy.deepcopy` でファイル数ぶん複製して `{name}_{i}` に
-  差し替える（1ファイルでも `_0`）。年choices・部署disable/初期値・分類/カテゴリー部署スコープ・
-  （documents）保存期間widgetの `id`/`onchange` 添字化を、生成後の添字付きフィールド全てに適用。
-  ヘルパー `file_data(i)`（保存する値の辞書、per_file_mode なら `{name}_{i}` を引く）と
-  `first_error_file_index()` を追加。編集モードは無添字のまま（`_build_form` は `edit_mode=True`）。
-- `core/upload_views.py`：`file_field_sets(form, pending, field_names)` を追加（ファイル単位の
-  `{"item", "index", "fields": {...}}` をテンプレートへ）。`file_rows` は据え置き（JSのファイル名一覧用）。
-- `documents/contracts.views.UploadStep2View`：保存ループを `form.file_data(i)` ベースへ。
-  バリデーションエラー時は `messages.error("N件目に入力エラーがあります。")`（複数件時）＋
-  context `active_doc_index = form.first_error_file_index()`。`_expiry_preview_context` は
-  `retention_period` または `retention_period_0` の queryset を使うようガード。
-- `templates/{documents,contracts}/storage2.html`：静的な [1]〜[4] ブロックを `file_field_sets`
-  ループ（`.doc-fieldset`）へ。documents は保存満了日プレビューを `calculateExpiryDate(idx)` に
-  引数化（`#storage-period-{idx}` / `#expiry-date-calc-{idx}`、previews マップは共通1個）。
-  contracts は関連書類（`related_files_{index}`、以前から一括対応済み）も `.doc-fieldset` 内へ移設し、
-  JSの個別切替（`.title-row`/`.related-files-row`）を `.doc-fieldset` 一括切替に統一。
-  Djangoの `messages` を表示するブロックを追加（従来は `form.non_field_errors` のみ）。
-
-### テスト
-
-- 既存の単一ファイルPOSTテスト（`UploadStep2ViewValidationTests`、`UploadStep2FormDepartmentInitialTests`、
-  `UploadStep2FormGroupCategoryScopeTests`、`UploadFileIOErrorTests`、`UploadStep2ImmediateExtractionTests`、
-  `RelatedFilesMultiUploadTests`）のメタデータキーを `department` → `department_0` 等へ更新
-  （documents/contracts 両方）。
-- 追加（documents `UploadStep2PerFileMetadataTests`、contracts `UploadStep2ViewValidationTests`）：
-  2ファイルを別々の分類/カテゴリー/年/保存期間/個人情報/メモで登録 → 各々が自分の値で保存され
-  保存満了日もファイルごとに計算されること／2件目だけ分類欠落 → 200・`group_1` エラー・
-  `active_doc_index==1`・messages「2件目」・レコード0件／`file_data()`・`first_error_file_index()`。
-
-### 検証
-
-- `manage.py test documents contracts` **336件PASS**（新規4件）。`manage.py test core` 134件PASS。
-- 実プレビュー：管理者ログイン → step1へダミーPDF2件POST → step2。`.doc-fieldset` が2個・
-  各フィールド名が `*_0`/`*_1`・`storage-period-{i}`/`expiry-date-calc-{i}` が個別・ページャーで
-  表示切替。file0=(分類Ａ,一般文書,2025,1年,個人情報あり)、file1=(分類Ｂ,予算関係,2023,10年,なし)で
-  登録 → DBで Document 2件が各々の値・別々の `expiry_date` を保持することを確認。
-  2件目の分類を空にPOST → `activeDocIndex=1`・「2件目に入力エラーがあります。」・2件目の
-  `.doc-fieldset` に `.field-error` 表示を確認。
-
-### 追補（同日、ユーザー報告）
-
-1. 契約書 storage2 の [3]関連書類の複数行 `{# … #}` コメントが画面に生表示されていた
-   （CLAUDE.md「技術的な既知の落とし穴」＝複数行 `{# #}` は `.` が改行に不一致でコメントとして
-   機能しない、の再発）。`{% comment %}…{% endcomment %}` に修正。
-2. 「保管画面２／編集画面のフィールドエラー表示位置」節で `.form-row { flex-wrap: wrap }` を
-   全 `.form-row` に付けたところ、契約書 storage2 の「契約期間 [from] ～ [to]」行が折り返して
-   縦積みになった。`django_widgets.css` を `.form-row:has(.field-error) { flex-wrap: wrap }` に
-   限定し、エラーを含む行だけ折り返す（`:has()` は対象4画面の利用ブラウザで可）。実プレビュー
-   （幅1400）で契約期間の from～to が同一行、必須エラーは入力欄直下・左端一致を再確認。
-
-### 追補（2026-08-31、ユーザー要望）：「削除」で他ファイルの入力を保持する
-
-ファイルごと個別入力にしたことで、複数件登録中に「削除」（アップロード取り消し）を押すと
-入力済みの全ファイルの内容がクリアされる問題が顕在化。**削除しても残るファイルの入力を保持**
-するよう変更。
-
-- 旧：「削除」は専用フォーム `#remove-upload-form`（`upload_step2_remove` URL、
-  `BaseUploadStep2RemoveView`）を submit → セッションから1件外し **redirect**（PRG）→
-  step2 の GET が空フォームを再描画。
-- 新：「削除」は**メインフォームごと** submit（hidden `action=remove` ＋ `remove_index`）。
-  `UploadStep2View._handle_remove`（documents/contracts）がセッションから1件外し、
-  `core.upload_views.remap_step2_initial_after_remove` で残りファイルのPOST値を削除位置に
-  合わせて詰め直し（後ろの `{name}_{i}` を1つ前へ）、**unbound**フォームの `initial` に載せて
-  そのまま render（redirectしない＝バリデーションエラーも出さない）。全件外れたら step1 へ redirect。
-- `UploadStep2Form.__init__` の部署初期値を `self.initial[...] =` から
-  `self.initial.setdefault(...)` に変更（削除後再描画でview側が渡す保持済み部署を優先）。
-- `templates/{documents,contracts}/storage2.html`：`#remove-upload-form` を廃止。メインフォームに
-  `<input type="hidden" name="action">` `<input type="hidden" name="remove_index">` を追加。
-  削除ボタンJSは `mainForm.requestSubmit()`。契約書は送信前に file input を `disabled` にして
-  関連書類の無駄な二重アップロードを防ぐ（関連書類はブラウザ仕様で復元不可＝選び直し、と confirm 文言で明示）。
-- `BaseUploadStep2RemoveView`・`documents/contracts.views.UploadStep2RemoveView`・
-  `upload_step2_remove` URL を**削除**（UIから到達不能かつ redirect で入力を捨てる旧実装のため）。
-  関連テスト（`UploadStep2RemoveViewTests`）は新方式（`action=remove` を step2 へ POST、
-  200 render・入力保持・詰め直しを検証）に書き換え。
-
-### 検証（追補分）
-
-- `manage.py test documents contracts core` **470件PASS**。
-- 実プレビュー：3ファイルに別々のタイトル・メモ・分類・年を入力 → 3件目を「削除」→ 2件が
-  値保持（分類は表示ラベルも解決）。続けて1件目を「削除」→ 残り1件が `_0` へ詰め直されて表示。
-  最後の1件を「削除」→ step1 へ redirect。通常の「登録」（action 空）は従来どおり動作。
-
-## 保管画面２・詳細・編集画面の右側エリアが原本より狭い問題の修正（2026-08-31、ユーザー指摘）
-
-### 症状
-
-保管画面２・検索結果詳細ポップアップ（`popup-detail`）・編集画面（documents/contracts の
-`edit`）で、右側の「情報表示・入力エリア」（`.meta-input-form-wrapper`、原本レイアウトでは
-`.storage-layout` の 35%）が原本HTMLより約10px 狭く、左のPDFプレビュー（`.pdf-preview-container`
-65%）が約10px 広くなっていた。
-
-### 原因
-
-これらの画面は原本の左右分割レイアウト（`.storage-layout` flex ＝ 左 `.pdf-preview-container`
-`width:65%` ＋ 右 `.meta-input-form-wrapper` `width:35%`、`flex-shrink:1`）を共有している。
-`.storage-layout` の合計幅では 65%+35%+gap がコンテナをオーバーするため、本来は両列が
-flex-basis 比で少しずつ収縮して原本の 757.8 / 408.0px（詳細ポップアップ・幅1360時）に落ち着く。
-
-ところが ja_pj では、ユーザー依頼（2026-08-12）で追加した実プレビューのドラッグスクロール／
-ズーム用に、PDF枠の内側へ `.pdf-scroll-area`（`width:1140px; flex-shrink:0`。拡大後の最大
-はみ出し幅を先取り確保するラッパー）を挟んでいる。この固定1140px幅が、`overflow:hidden` の
-PDF枠を貫通して左列 `.pdf-preview-container`（`overflow:visible`・`min-width:auto`）の
-**flex アイテム自動最小サイズ（min-width:auto = min-content）** として染み出し、左列が
-`.storage-layout` の収縮時にほとんど縮まなくなっていた（実測：左列が本来より約10px 広いまま
-＝収縮ぶんが全部右列に寄る）。原本HTMLには `.pdf-scroll-area` が無いため顕在化しなかった。
-
-### 修正
-
-`static/css/style.css` の `.pdf-preview-container` に **`min-width: 0`** を追加（理由コメント付き）。
-flexbox で「コンテンツ幅を下回る収縮」を許可する定石。これで左右が原本どおり flex-basis 比で
-収縮し、65/35 に復帰する。`.pdf-view-box{2}` の `overflow:hidden` と `.pdf-scroll-area` の
-1140px はそのままなので、ドラッグスクロール／ズーム（`common.js` の `initDragScroll` /
-`centerScrollArea` / `zoomPdf`）は影響なし。
-
-### 検証
-
-実プレビュー（Django dev、viewport 1360、`seed_test_data` の職員番号1でログイン）で
-`getBoundingClientRect().width` を実測し、同条件の原本HTML（html5、簡易HTTPサーバ）と突き合わせ：
-
-| 画面 | 箇所 | 修正前 | 修正後 | 原本 |
-|------|------|--------|--------|------|
-| 詳細ポップアップ | 右列 `.meta-input-form-wrapper` | 398.29 | **408.02** | 408.02 |
-| 詳細ポップアップ | 左列 `.pdf-preview-container` | 767.51 | **757.78** | 757.78 |
-| 詳細ポップアップ | `#detail-properties-view` | 366.69 | **376.43** | 376.43 |
-| 編集画面（documents/edit） | 右列 | 446.x | **456.75** | 456.75 |
-
-PDFプレビュー枠は幅848px・スクロール領域1140pxのままでドラッグスクロール可能を確認。
-
-## PDFプレビューを PDF.js 自前描画へ（2026-08-31、ユーザー依頼）
-
-### 経緯
-
-保管画面２・編集画面・検索結果詳細ポップアップの実プレビュー（2026-08-12 追加）で、PDF を
-ブラウザ内蔵 PDF ビューアの `<iframe>` に読み込ませていたが、原本の紙モック枠（`.pdf-mock-page`
-380px＝実質 iframe 340px）が Chrome 内蔵ビューアの実用最小幅（約 460〜500px）を下回るため、
-①ツールバーが右で見切れて水平スクロールバーが出る ②横長 PDF が過大描画で右が欠ける、という
-問題があった。`#toolbar=0` 等の URL パラメータは現行 Chrome の `<iframe>` では無効。枠を広げる案・
-先頭ページのみ画像化案（複数ページの下スクロールが失われる）・全ページ画像化案（500 ページ級で
-非現実的）を検討の上、ユーザーが **PDF.js で各ページを枠幅ぴったりの canvas に自前描画** する
-方針（①）を選択。「元に戻せるように」との指示で settings フラグ方式にした。
-
-### 実装
-
-- **`static/vendor/pdfjs/`**：PDF.js 3.11.174 の legacy(UMD) ビルド（`pdf.min.js` /
-  `pdf.worker.min.js`、Apache-2.0、`LICENSE`＋取得手順を `README.md` に記載）。CDN 不使用・
-  オフライン可。legacy ビルドを選んだのは庁内端末のブラウザ世代が不明なため。
-- **`settings.PDF_JS_PREVIEW_ENABLED`**（`config/settings/base.py`、`env.bool`、既定 `True`、
-  `.env.example` にも記載）。`False` で従来の `<iframe>` へ完全復帰し、PDF.js アセットも読み込まれ
-  なくなる（テンプレート・JS 双方でこの値で分岐）。画像プレビュー（`<img>`）とモック文言は不変。
-- **`core/context_processors.preview_settings`**（新規、`TEMPLATES` に登録）：全画面共通の
-  base.html 詳細ポップアップへ `pdf_js_preview_enabled` を渡すため。
-- **`static/js/pdf-preview.js`**（新規、`window.PdfPreview`）：`render(el,url)` / `clear(el)` /
-  `zoom(el,factor)`。最初の `render()` 時のみ `pdf.min.js` を動的 `<script>` で遅延ロード。
-  各ページの空プレースホルダ `<div>` を並べ、枠の `scroll` イベント（＋初回・`ResizeObserver`）で
-  「表示付近のページだけ」canvas 描画、離れたら canvas 破棄 → 数百ページでも同時描画は数枚。
-  `FileResponse` の Range 対応で必要バイトのみ転送。IntersectionObserver はタブ非表示時に
-  発火しないため主機構にしない。レイアウトの要（`align-self:stretch` / `width:100%` /
-  `overflow` / スクロール）は CSS の読み込み順・キャッシュに依存しないよう inline でも当てる。
-- **`static/css/style.css`**：`.pdfjs-preview` / `.pdfjs-page` / `.pdfjs-message`（背景色・影・
-  余白などの装飾のみ。幅・高さは JS が実測 px で設定）。
-- **`static/js/common.js`**：`zoomPdf()` は枠内に表示中の `.pdfjs-preview` があれば
-  `PdfPreview.zoom()` へ委譲（＋/− ボタン共有）。`renderDetailPopup()` / `closeDetailPopup()` に
-  PDF.js の表示切替・破棄を追加。
-- **テンプレート**：`base.html`（詳細ポップアップに `#detail-pdfjs-preview`、`<iframe>` を
-  `{% if not pdf_js_preview_enabled %}` でガード、`window.PDFJS_LIB_URL`/`WORKER_URL`/
-  `PDFJS_PREVIEW_ENABLED` を埋め込み `pdf-preview.js` を読み込み）、`{documents,contracts}/edit.html`
-  （PDF＋can_download かつフラグ ON なら `.pdfjs-preview[data-pdf-url]` を直接出力、else 従来の
-  `.pdf-scroll-area`＞`.pdf-mock-page`）、`{documents,contracts}/storage2.html`（`#pdf-preview-pdfjs`
-  枠を追加、`setupActiveDoc()` がページャーのファイル種別で `.pdfjs-preview` / `.pdf-scroll-area`
-  を排他表示）。
-
-### 検証
-
-- `manage.py test` **全766件PASS**（`ImagePreviewTests` にフラグ ON/OFF 両方のテストを追加）。
-- `collectstatic`（prod, `CompressedManifestStaticFilesStorage`）で pdfjs アセットのハッシュ化・
-  gzip 生成がエラー無く完了。
-- 実プレビュー（Django dev, viewport 1440, 職員番号1）：
-  - 編集画面（縦長 PDF）：枠幅約830pxの canvas、水平スクロールバー無し、ツールバー無し。
-  - 保管画面２（横長A4 3ページ）：各ページ 831×587 で枠幅にフィット、右端の欠け無し、
-    下スクロールで2・3ページ目も描画、水平スクロールバー無し。
-  - 詳細ポップアップ（縦長 PDF）：枠幅約787pxで描画、縦スクロールで全体、水平バー無し。
-  - ＋/− ボタン：`PdfPreview.zoom` に委譲。起点は「今表示している枠の中央」（変更前に中央に
-    あった文書上の点を縦横の割合で覚え、リサイズ後に同じ点が中央へ来るよう scroll 復元。
-    原本 zoomPdf の transform-origin:top center 固定と違い、拡大した箇所を見続けられる）。
-    拡大でページが枠より広くなると横スクロール可。
-  - 移動操作：縦スクロールバー／マウスホイールに加え、**枠内をマウスドラッグでパン**できる
-    （縦＝複数ページ、横＝ズームで枠より広い時。原本 `.pdf-view-box` の initDragScroll と同じ操作感。
-    はみ出している軸だけ動く、ネイティブのスクロールバー上のドラッグはブラウザに委ねる、
-    カーソルは grab/grabbing）。
-  - `PDF_JS_PREVIEW_ENABLED=False`：edit/storage2 とも `<iframe>` に戻り pdfjs アセット未読込を確認。
-
-### 検索・閲覧画面「文書イメージ」欄も PDF.js へ（2026-08-31 追補、ユーザー依頼）
-
-上記の PDF.js 化は保管画面2・編集画面・検索結果詳細ポップアップの3か所のみを対象とし、
-**文書／契約書 検索・閲覧画面（screen-search）の「文書イメージ」欄はブラウザ内蔵 PDF ビューアの
-`<iframe>`（`#search-preview-frame`）のまま取り残されていた**。ユーザーから「メイン画面お知らせの
-件数リンク経由と『検索・閲覧・変更』ボタン経由でプレビューの見え方が違う」と指摘があり調査した
-結果、画面・iframe・PDF バイト列・サーバー応答はすべて同一で、差はブラウザ内蔵 PDF ビューアが
-ズーム倍率・ツールバー表示をブラウザ側で保持し前回値を引き継ぐことによる（`notice` パラメータや
-アプリ側の差ではない）ものと判明。狭い枠でのツールバー見切れ・横長 PDF の右端欠けという当初の
-動機がこの欄にもそのまま当てはまるため、他3か所と同じ方式に揃えた。
-
-- **`templates/{documents,contracts}/search.html`**：`.pdf-view-box`（`height:320px`）内に
-  `{% if pdf_js_preview_enabled %}<div class="pdfjs-preview" id="search-pdfjs-preview" style="display:none;">`
-  を追加。枠に `id="search-pdf-view-box"` を付与（命名を `detail-`/`storage-` に合わせる。現状
-  ズームボタンは無いため参照はされないが、他3枠との一貫性のため）。既存の `#search-preview-frame`
-  は画像フォールバック用・`PDF_JS_PREVIEW_ENABLED=False` 時の PDF 用に残す。
-- **`static/js/common.js` `showSearchPreview()`**：行クリック時、`previewKind === "pdf"` かつ
-  `window.PDFJS_PREVIEW_ENABLED` なら `#search-pdfjs-preview` を表示して `window.PdfPreview.render()`。
-  画像、または PDF.js 無効時の PDF は従来どおり `<iframe>`。毎回まず `PdfPreview.clear()` で前回
-  描画を破棄してから出し直す（`renderDetailPopup()` / `setupActiveDoc()` と同じ構造）。権限不足・
-  非対応形式・削除済みの案内文言は不変。
-- ズームボタン（`＋`/`−`）は原本の screen-search「文書イメージ」欄に無く、フィデリティ監査済みの
-  ため今回も追加しない（edit/detail/storage2 は原本モックにボタンがあるため保持しているのと逆）。
-- **`{documents,contracts}/tests.py`**：`SearchPreviewPaneTests`（既定でPDF.js枠を出力／
-  `PDF_JS_PREVIEW_ENABLED=False` で非出力＋`#search-preview-frame` 残置）。
-
-検証（Django dev, 職員番号9005, viewport 1280）：
-
-- お知らせ「有効期限切れまで1ヶ月以内」経由（`?notice=expiring_soon`）と「検索・閲覧・変更＞文書」
-  経由の両方で、同じ PDF（Book1・pk21）行クリック時に PDF.js が枠幅フィットで描画。ツールバー無し・
-  水平スクロールバー無し。両ルートで見え方が一致することを確認。
-- 複数ページ PDF（画面イメージ・pk24、6ページ）：全ページ縦積みで描画、下スクロールで各ページ canvas 化。
-- 別行へ連続クリック：`clear()`→`render()` で canvas がリークせず入れ替わる（6→6、二重描画無し）。
-- コンソールエラー無し。`manage.py test documents contracts` **全342件PASS**。
-
-### 登録・編集フォームの「登録/更新」ボタンが必須エラー後に押せなくなる不具合の修正（2026-09-01、ユーザー報告）
-
-**現象**：職員マスタの登録・編集で、未入力のまま「登録」/「更新」を押す→ブラウザの必須入力
-バリデーション（「このフィールドを入力してください」等）でフォーム送信がブロックされる→
-その後フィールドを修正してもボタンが `disabled` のままで二度と押せない。
-
-**原因**：全登録・編集・削除フォームの送信ボタンに付いていた二重送信防止のインライン
-`onclick="if (!confirm('…')) return false; setTimeout(() => { this.disabled = true; });"` が、
-`confirm` OK 後に**フォームが実際に送信されたかに関わらず** `setTimeout` でボタンを無効化して
-いた。サーバーへ POST が飛んだ場合はページ遷移するので問題にならないが、HTML5 の
-クライアント側必須バリデーションで送信がブロックされた場合はページが遷移せず、無効化だけが
-残る。職員マスタは `職員番号`/`氏名`（必須テキスト）・`職階`/`役職`（必須 `<select>`、先頭
-`(選択してください)` = 値空）があるため踏みやすい。
-
-**修正**：`onclick` の先頭に `if (!this.form.reportValidity()) return false;` を追加。
-フォームが不正なら（ネイティブのバリデーション吹き出しを出したうえで）`return false` して
-`confirm` も `setTimeout` も実行しない。正常時のみ従来どおり confirm→送信→ボタン無効化。
-`core.double_submit`（トークン方式のサーバー側二重送信対策）は不変で、ボタン無効化は
-あくまで UX 補助。
-
-- 対象16ファイル（同一スニペットのため一括置換）：`accounts/staff_regist.html`・
-  `accounts/staff_edit.html`・`organizations/dept_regist.html`・`organizations/dept_edit.html`・
-  `permissions/authority_edit.html`・`masters/{class,cat,retention}_{regist,edit,delete}.html`・
-  `core/other_main_edit.html`・`core/other_logout_edit.html`。`*_delete.html` は検証対象
-  フィールドが無く `reportValidity()` は常に true（実質無変更）だが、スニペットを全画面で
-  揃えるため同じく適用。
-
-**検証**（Django dev, 職員番号1, viewport 1280）：
-
-- 職員マスタ登録：空フォームで「登録」→ボタンは `disabled` にならず、confirm も出ない
-  （不正フォームで無駄な確認ダイアログを出さない副次効果）。必須項目を全部埋めてから
-  「登録」→ confirm 1回・`submit` 発火・ボタン `disabled`（二重送信防止は維持）。
-- 職員マスタ編集：`氏名` を空にして「更新」→ボタン無効化されず、修正後そのまま押下可能。
-- `manage.py check` 問題なし。`manage.py test accounts masters organizations` **211件PASS**。
-
-### 職員マスタ登録・編集：部課が1つだけの本支所で部課が表示・選択できない不具合の修正（2026-09-01、ユーザー報告）
-
-**現象**：職員マスタの登録・編集で、部課が1つしかない本支所（例: 本支所コード 011 / 100 / 101）を
-選ぶと、部課プルダウンが無効化されたまま何も表示されず、部課を選べない。
-
-**原因**：`staff_regist.html` / `staff_edit.html` の `updateSections()` が、原本モック
-`updateCode()`（「部課区分を持つのは本店(000)のみ」という固定サンプル前提）をそのまま移植して
-おり、`if (branchCode && branchCode !== '000')` の場合は無条件で部課selectを無効化していた。
-上記「職員マスタの本支所→部課連動プルダウン無効化ロジックを復元」で入れた分岐がまさにこれ。
-実データでは本店以外にも実在の部課を持つ本支所があるため、本店決め打ちが誤りだった。
-
-**修正**：判定を「本支所コードが000か」から「その本支所が実在する部課
-（`section_code` が空でないレコード）を持つか」に変更。
-- 実在部課が1件以上 → 部課selectを有効化し、その部課だけを選択肢に出す（本店に限らない）。
-- 実在部課が0件（＝「本支所コード＋空の部課コード」のレコードが1件だけの物流センター等）→
-  従来どおり部課selectを無効化し、そのレコードのpkを直接 hidden `department` へ入れる。
-
-`static/js/common.js` の検索パネル側（`staff_list.html` / `dept_list.html` の
-`updateSectionOptions()`）は元から `d.section_code` 真偽で絞り込んでおり影響なし。
-
-**検証**（Django dev, 職員番号1, ブラウザ実操作）：
-
-- 登録：本支所 000（3部課）→ 3件表示・有効。011 / 100 / 101（各1部課）→ その1部課が表示・有効
-  （従来は無効・空）。900（物流センター, 空部課）→ 無効・プレースホルダのみ・hidden department に
-  当該レコードpkが入る。部課を選ぶと部課コード表示欄も追従。
-- 編集：本支所 101 / 部課 04「業務4課」の職員 → 初期表示で部課selectに「業務4課」が選択済みで
-  表示される（従来は無効・空）。本店へ切替→3部課表示、101へ戻す→「業務4課」表示。
-- `manage.py test accounts` 77件PASS。
-
-## 「操作履歴ログ」シートの行単位全数監査（2026-09-03、ユーザー依頼）
-
-### 監査範囲・方法
-xlsx「操作履歴ログ」シート（Rev1.4）を openpyxl で全セル抽出し、B6〜B76 の全行＋Rev1.1改訂注記
-4箇所（AI8「画面変更」、AI40/AI43「仕様変更」、AI62「表示件数変更」）＋埋め込み画像1枚
-（screen-log-list モック、row6 アンカー）を1行ずつ、`audit` アプリおよび各アプリの
-`audit_services.log()` / `log_raw()` 呼び出し全箇所（約40リテラル）、テンプレート
-`templates/audit/log_list.html`、原本 `index.html:3323-3399` の screen-log-list（サンプル
-データ行含む）と突き合わせた。Rev1.3→Rev1.4 でこのシートは無改訂（セルテキスト・画像とも
-ハッシュ一致）。シート本体は Rev1.1 で確定済み。
-
-### 実装済み・仕様通りと確認した項目
-- 職員番号の完全一致検索（B36-37）、職員名の全角スペース区切りフルネーム検索
-  （B39-40、`core.text_normalization.filter_by_full_name`）、イベントメッセージの部分一致＋
-  スペース区切りAND検索（B42-43）、個人情報書類チェックボックス絞り込み（B45-46）。
-- 初期ソート＝操作日時 降順（B57-58、`order_by("-timestamp")`）、明細部の内部スクロール（B60）、
-  ページャー1ページ100件（B62、Rev1.1で50→100）、一覧右上の総件数表示（B64）。
-- CSV出力（B49-50、原本 alert() を超えるユーザー依頼実装、既記録）。
-- イベントメッセージ連結形式（B68-76）：職員マスタ更新の差分形式（B69-70、
-  `audit.services.build_diff_message`）、検索の項目列挙（B72-73、
-  `core.search_services.build_search_audit_message`）、閲覧・DL 等の「ファイル名：…」（B75-76）。
-- イベント記録の網羅性（ログイン/ログアウト/ログイン失敗、職員・部署・分類・カテゴリー・
-  保存期間・権限・メイン画面項目・自動ログアウト設定の各登録/更新/削除、パスワード更新、
-  CSV出力/取込、検索、DL/プレビュー、保管画面２の登録/更新/削除、権限自動リセット、
-  物理削除バッチ）はすべて `audit_services.log()` / `log_raw()` 経由で記録済み。
-
-### 発見・修正した乖離1件：操作内容の区切りが半角スペース（B66）
-B66「操作内容は『画面名 ＋ □(全角スペース) ＋ ボタン名』とする」に対し、`action` 引数の全リテラル
-（"分類管理 新規登録" 等）が**半角スペース(U+0020)区切り**だった。原本モックのサンプルデータは
-一貫して全角（"カテゴリー管理　新規登録"、"文書　ダウンロード" 等）で、`audit/models.py` の
-`help_text`・`audit/services.py` の docstring 自身も「全角スペース」と記載しており、コードだけが
-不一致だった。2026-08-27 の行単位監査はイベントメッセージ連結形式（B68-76）を検証したが B66 の
-区切り文字幅は突き合わせ対象外だった。
-
-**修正**：`action` の「画面名／ボタン名」境界の区切りを全角スペースへ統一（`views.py`・
-`master_views.py`・`record_views.py`・`services.py`・`csv_import_services.py`・
-`purge_expired_deleted_records.py` の計約40リテラル＋対応するテスト assertion、20ファイル
-125行）。`職員マスタ　CSV取込 所属長昇格` の内側の半角スペースは画面名境界ではなく
-複合ラベル内の区切りのため据え置き（B66 が求めるのは画面名の後の1つ）。
-`検索・閲覧画面 完全削除`（2026-08-24廃止の旧 DeleteView action 名を説明する core/tests.py の
-docstring）は歴史的記述のため対象外。`manage.py test` 全780件PASS。`makemigrations --check`
-差分なし。
-
-### 原本モック 操作内容カラムとの差分監査（区切り修正後）
-区切り修正後、B66 の書式（画面名＋全角スペース＋ボタン名）とは一致。ただし**画面名の粒度**が
-モックのサンプルデータと異なる（既存の意図的差異、今回は変更せず）：
-- モックは検索・閲覧・DL・編集・削除・アップロードいずれも画面名を素の「文書」「契約書」と
-  しているが、実装は再実装時に採用した実画面名「文書検索」「契約書検索」「保管画面２」
-  「検索・閲覧画面」を使う（例：モック「文書　検索」↔実装「文書検索　検索」）。
-- モック「文書　閲覧」↔実装「文書検索　プレビュー」（ボタン名も閲覧→プレビュー）。
-- モック「文書　アップロード」↔実装「保管画面２　登録」。
-- モック自体もサンプル行内で不整合（"文書ダウンロード" のみ区切りなし）。
-CLAUDE.md「xlsx/HTML のサンプル文言は手がかりに過ぎず、実装の要否・粒度は原本の実マークアップと
-突き合わせて判断」に従い、正規の書式要件（B66）を満たすことを優先し、画面名は実画面名のまま
-維持した。
-
-### 対応不要（既確認済みの意図的乖離、再確認のみ）
-- パスワード更新イベントの新旧パスワード平文 diff、権限管理更新のフラグ単位 diff：いずれも
-  マスキング方針・記録粒度の既確定判断（`core/views.py`・`permissions/views.py` に理由コメント）。
-
-## 操作履歴ログの最大保存件数／CSV出力最大件数（B51-52）の実装（2026-09-03、ユーザー依頼）
-
-上記行単位監査時点では「2026-08-19 ユーザー確認済みで実装見送り確定」だった B51-52
-「※操作履歴ログの最大保存件数(=CSV出力最大件数)設定値は、初期値を 3ヵ月分 とし、設定ファイル等で
-定義し、先方より変更依頼を受けた際に容易に変更できること」を、ユーザー指示により実装した。
-
-### 方針
-「3ヵ月分」を月数（`settings.AUDIT_LOG_RETENTION_MONTHS`、`.env` 経由、既定3）で表現する。
-`CONTRACT_RETENTION_YEARS`／`RETENTION_PERMANENT_YEARS`（xlsx 保存期間設定!B74、同じ「設定ファイル
-等で定義し容易に変更」文言）が `masters.SystemSetting`（DB）から `.env` 経由の設定値へ移行済み
-だった前例に合わせ、未使用のまま残っていた `SystemSetting.audit_log_retention_months` フィールドは
-**削除**し（`models.py` ＋ `migrations/0001_initial.py` から。開発中のため新規マイグレーションは
-作らず 0001 に畳み込み、`makemigrations --check` クリーンを確認）、`.env` 経由の設定値へ一本化した。
-これで `SystemSetting` で実際に使うのは `session_idle_timeout_minutes` のみ。
-
-### 実装
-- `config/settings/base.py`：`AUDIT_LOG_RETENTION_MONTHS = env.int(..., default=3)` を追加、
-  `.env.example` にも追記。
-- `audit/services.py`：`retention_cutoff_date()` を追加（`core.notice_services.add_months` で
-  今日から −N ヵ月。auditは下位アプリのため documents/contracts モデルを巻き込む
-  notice_services のモジュールロード時結合を避けて関数内 import）。`filter_audit_log_queryset()`
-  の基底 QuerySet に `timestamp__date__gte=retention_cutoff_date()` を追加し、**一覧表示・CSV出力の
-  両方**で保持下限より古いログを除外（＝「最大保存件数＝CSV出力最大件数」をバッチ未実行・遅延時
-  でも厳密に満たす）。検索フォームの操作日(開始)にそれより前を入れてもヒットしない。
-- `core/management/commands/purge_expired_audit_logs.py`（新規）：保持下限より古い `AuditLog` を
-  バルク `delete()`（ファイル実体を伴わず部分失敗要因が無いため 1件ずつにしない）。この物理削除
-  イベント自体は操作履歴ログに記録しない（次回パージ対象になって増えるだけ、かつ「操作」ではなく
-  保守バッチのため。`logger.info` で運用ログには残す）。`ja_system/bat/purge_expired_audit_logs.bat`
-  （新規、`purge_expired_deleted_records.bat` と同じログローテーション付き、日次タスク想定）。
-- `audit/tests.py`：`AuditLogRetentionTests`（一覧除外・設定値変更で下限が動く・パージが期限切れ
-  のみ削除・パージが自己記録しない）＋ CSV除外テスト1件を追加。既存 `test_filter_by_date_range`
-  の固定日付（2026-01）が保持下限より古くなったため、今日基準の相対日付へ書き換え。
-
-### 検証
-`manage.py test` 全**785件PASS**（新規5件）。`makemigrations --check` 差分なし、`manage.py check`
-問題なし。`manage.py purge_expired_audit_logs` を開発DBで実行し `cutoff=2026-06-03 削除=0件` を確認。
-
-### 運用面の申し送り
-本番リリース時、`ja_system/bat/purge_expired_audit_logs.bat` を Windows タスクスケジューラに
-日次で登録する（`purge_expired_deleted_records.bat` と同様）。保持期間の変更依頼を受けた際は
-`.env` の `AUDIT_LOG_RETENTION_MONTHS` を書き換えるだけでよい。
-
-## 「部署管理」シートの行単位全数監査・統合分割の設計確定・対象ポップアップからの自部署除外（2026-09-03）
-
-ユーザー依頼で簡易設計指示書 Rev1.4「部署管理」シートを行単位で機械照合し、現行コードとのフル監査を実施した。
-
-### 監査結果
-- **シートは Rev1.1 で確定し、Rev1.1→Rev1.2→Rev1.3→Rev1.4 で無改訂**。セルテキスト・埋め込み画像
-  6枚（image11〜16.png）とも全リビジョンでハッシュ一致。Rev1.0→1.1 の差分＝B210/B212 の統合・分割
-  実処理が「対象部署を部署マスタから論理削除」→「閲覧部署範囲テーブルを更新」に仕様変更、J165・
-  P195 の補足文言削除、AI178 誤記修正（統合→分割）——が最後の実体改訂。
-- 一覧（B39-62）：本支所/部課連動プルダウン（B40/B42、`departments_list()` + `dept_list.html` の
-  `updateSectionOptions()`）、部課プルダウンの退職99除外（B45、`section_choices()` /
-  `departments_list(exclude_retired=True)`）、4列▲▼ソート（B52-56、`SORT_FIELDS`）、内部スクロール
-  （B58）、ページャー無し（B60、`DeptListView` は Paginator 不使用）、総件数表示（B62）——実装済み。
-- 新規登録（B82-88）：全欄空（B82）、本支所コード+部課コード重複エラー（B87、`UniqueConstraint`
-  + `DeptRegistForm.clean` + IntegrityError 捕捉）、B88 の「本支所既存・部課のみ追加」は本支所を
-  正規化しない設計上そのまま成立——実装済み。
-- 編集（B107）：名称のみ可（`DeptEditForm.Meta.fields = ["branch_name","section_name"]`、コードは
-  テンプレート表示のみ）——実装済み。
-- 統合・分割（B109-212）：`DepartmentViewScope`（viewer_department／visible_department／action）＋
-  `apply_dept_action`（merge=viewer:編集対象・visible:選択部署／split=viewer:選択部署・visible:編集
-  対象）。`visible_department_ids(employee)` が「自部署＋自部署がviewerのスコープのvisible部署」を
-  返し、`documents/contracts.search_services`・`core.notice_services`・保管フォームの部署絞り込み、
-  検索フォームの部署欄初期値（検索・閲覧・変更!B46-48、`", ".join` でカンマ区切り自動表示）に反映。
-  部署編集の「更新」ボタンは Employee を触らず、職員異動は職員マスタ CSV 取込
-  （`_import_employee` の `department_changed`）側で行う——実装済み。`organizations` テスト45件PASS。
-
-### 統合・分割の設計方針の確定（ユーザー確認）
-実装是非を検討する過程でユーザーと設計を確認し、以下で確定：
-- **文書に紐付いた部署情報は書き換えない**（付け替え案は不採用）。「閲覧部署範囲テーブル」
-  （＝現行 `DepartmentViewScope`）に「部署Aの職員は部署Bのデータも見れる」を1行持たせる方式を正とする。
-- 部署自体の統合（職員の一斉異動）は職員マスタ CSV 取込で行われ、そのタイミングで部署Bだった
-  職員が部署Aへ異動する。異動後、検索画面の部署欄に「部署A,部署B」が自動表示され両方を検索・
-  閲覧できる（B46-48）。＝現行実装のまま。
-- 次の2点は本方式の想定挙動として**許容**（バグではない）と確認：
-  1. 統合・分割後に部署Bが作る新規文書が部署A・Cから見える（スコープは無期限・部署単位のため）。
-  2. 統合・分割時に部署A・Cへ「移った」旧・部署B文書が部署Bから見える（文書は実際には移動せず
-     `department=B` のままのため）。
-  いずれも標準フロー（CSV取込で部署Bが空になる）では顕在化しない。部署Bが存続し続ける運用に
-  なった場合の締め付け（`Department.is_active` フラグ、文書単位可視性への変更等）は将来課題として
-  ユーザーへ選択肢提示済み。
-
-### 対象部署ポップアップからの「編集中の部署自体」除外（ユーザー依頼）
-統合は存続部署Aの編集画面で吸収部署Bを、分割は分割元Bの編集画面で分割先を選ぶ運用のため、
-どちらも編集中の部署自体を選択肢に出さないようにした。
-- `organizations/forms.py` `DeptEditForm.__init__`（新規）：`self.instance.pk` があるとき
-  `dept_action_target.queryset` を `Department.objects.exclude(pk=self.instance.pk)` に絞り、
-  ウィジェットの `extra_query = {"exclude": self.instance.pk}` をセット。既存の `clean()` の自己参照
-  チェックは API 直叩き・改ざんへの多重防御として残置。
-- `organizations/api.py` `OptionListAPIView._department_items`：`request.GET.get("exclude")` を
-  `int()` 変換して `qs.exclude(pk=...)`。非数値は 500 にせず全件返し `logger.warning`
-  （`PopupSelectWidget` の非数値選択値ログと同じ方針）。
-- 仕組みは permissions 側の `extra_query={"doc_kbn": ...}` と同一（`PopupSelectWidget.render` が
-  `api_url` に `?exclude=<pk>` を付与 → `common.js openPopupPopup` が `&type=dept` を連結）。
-- `organizations/tests.py`：API の exclude 動作・非数値無視、フォームの queryset 除外＋extra_query
-  セットの3件を追加。`manage.py test organizations core permissions` PASS（organizations 48件）。
 
 ## 原本HTML改訂差分の確認（html5→html6）・簡易設計指示書 Rev1.5改訂の反映（2026-09-04）
 
@@ -1805,3 +932,90 @@ department=1`等）は従来通り優先される。
 - `contracts.tests.NoticeLinkDepartmentScopeConsistencyTests`（新設）：管理者、および部門間閲覧
   設定ありの非管理者の両方で、お知らせ経由の検索結果件数がバッジ集計と一致することを確認。
 - `manage.py test`（documents/contracts/core、計597件）PASS、既存テストの回帰無し。
+
+---
+
+## 簡易設計指示書 Rev1.6 全行監査（xlsx全行監査フェーズ2、2026-09-16、ユーザー依頼）
+
+原本改訂を伴わない、リリース前総仕上げとしての実装漏れ網羅監査
+（`REVISION_TO_RELEASE_WORKFLOW.md`フェーズ2手順）。フェーズ0〜1（差分反映）が「変更点」だけを
+追うのに対し、xlsxシート全体を実装と1行ずつ突き合わせて改訂の有無に関わらない実装漏れを洗い出す。
+
+### 監査方法
+
+1. openpyxlで全16シートのセルテキストを抽出。画像埋め込みセル（画面モック・権限マトリクス等）は
+   `ws._images`の生画像だけでなく、`xl/drawings/drawingN.xml`をパースして`xdr:pic`の`srcRect`
+   クロップと`xdr:sp`の塗りつぶし矩形を実際にz-order順で合成レンダリングしてから読む専用スクリプト
+   （`extract_xlsx.py`、PIL使用）を新規作成。既知の誤読事例（設定メニューシート「分類管理　一覧」
+   行、本来○/○/―だが生画像だけでは○/―/―に見える）で正しく合成できることを検証済み。
+2. 表紙・目次・(ひな形)を除く13シート（ログイン画面・メイン画面・設定メニューは1グループに統合）
+   を、mainセッションで一括抽出したファイル（cells.txt＋drawing.png）を渡した上で、11本の
+   background agentへシート単位で並行調査を依頼（結果報告のみ、修正はしない）。
+3. 各agentの報告を「確度の高い実装漏れ」「判断が必要な項目」「低優先度」の3群に分類して
+   `xlsx_audit_Rev1.6.txt`（プロジェクトルート直下）に集約。
+
+### 結果
+
+**確度の高い実装漏れは全13シートで0件**。既に複数回の原本フィデリティ監査・規約準拠監査・
+コードレビューを経ているシートが大半で、新規の高確度な乖離は検出されなかった。
+
+判断が必要な項目14件をAskUserQuestionでユーザーに1件ずつ確認：
+
+- 13件は「現状維持」または「見送り・対応不要」で確定。
+- うち1件（分類管理シート担当agentが報告した「権限管理B201/B234の書類管理区分別制限が未解決」）
+  は、調査の結果**過検出**と判明：`HTML_REIMPL_CHECKLIST_ARCHIVE2.md`「要再確認（赤字）箇所
+  リスト」の該当項目（No.7/No.15）は、同リストの2026-08-19追記で「Rev1.1改訂により権限管理の
+  個別フラグ方式が廃止されシステム権限プルダウン1段階に統一されたため対象を失った」と既に
+  陳腐化が明記されていた。分類管理シート担当agentがこの解消済みの追記を見落として「未解決」と
+  誤認したもの。現在のRev1.6権限管理シートには「書類管理区分」の文言自体が存在しないことも
+  再確認済み。実装対応なし。
+- 実装対応が必要だったのは**1件のみ**（No.7、カテゴリー管理シート担当agent発見）：
+
+### 対応した1件：分類(Group)論理削除時の配下カテゴリー保護
+
+**問題**：`masters.views.GroupDeleteView.blocking_count()`は、その分類に直接紐づく文書・契約書
+件数（doc_count/contract_count）だけを見て削除可否を判定しており、配下の「カテゴリー」
+（`masters.Category`）が有効（`is_deleted=False`）のまま残っているかは考慮していなかった。
+分類配下の各カテゴリーの文書件数が個別に0件であれば、分類自体を論理削除できてしまう。その状態で
+当該カテゴリーの編集画面（`CategoryEditView`）を開くと、`masters.forms.CategoryForm.__init__`の
+「分類」プルダウンのqueryset（`is_deleted=False`限定）から現在参照中の分類が選択肢から消え、
+Django `ModelChoiceField`はbound valueがqueryset内に無い場合どの`<option>`にも`selected`を
+付けずにレンダリングするため、ブラウザ上は先頭の別の分類が見た目上選択された状態になる。利用者が
+「分類」欄を意図的に触らずに他の項目だけ変更して更新すると、カテゴリーの「分類」が意図に反して
+別の分類へサイレントに変わってしまうリスクがあった。
+
+xlsx/原本HTMLに直接の記載が無い業務ロジックのため、CLAUDE.md「xlsx/HTMLに仕様記載の無い危険な
+業務ロジックは無断で憶測実装しない」方針に従い、実装前にユーザーへ対処方針を確認（(a)分類削除を
+ブロック／(b)カテゴリー編集時に削除済み分類も選択肢に残す／(c)現状維持の3案を提示）。
+ユーザーは(a)案（分類削除をブロック）を選択。
+
+**実装**：`GroupDeleteView.blocking_count()`に、配下の有効なカテゴリー件数
+（`Category.objects.filter(group=obj, is_deleted=False).count()`）を加算する分岐を追加。
+既存の「紐づくデータが存在するため削除できません」という汎用メッセージ・ブロック条件
+（`count > 0`）の仕組みをそのまま流用でき、テンプレート・URLの変更は不要。
+
+**テスト**：`masters/tests.py`に以下を追加・修正。
+- `test_group_with_active_category_cannot_be_deleted_even_without_documents`（新規）：文書0件でも
+  有効なカテゴリーが紐づいていれば削除できないことを確認。
+- `test_group_with_only_deleted_category_can_be_deleted`（新規）：配下カテゴリーが既に論理削除済み
+  なら削除できることを確認（対比）。
+- `test_trashed_document_is_excluded_from_count_and_delete_block`・
+  `test_trashed_contract_is_excluded_from_count_and_delete_block`（既存）：setUpで分類に有効な
+  カテゴリーが紐づいたまま「文書0件なら削除できる」ことを検証していたため、新しいブロック条件と
+  衝突しないよう、削除成功を確認する直前でそのカテゴリーも論理削除するよう修正
+  （このテストの検証対象＝文書/契約書件数のみを切り分けるため）。
+
+`manage.py test masters`134件PASS。
+
+### 未対応（今回は見送り）の主な項目
+
+- CSV取込の管理者0人ガード抵触時、中止範囲は行単位のまま（ファイル全体中止には変更しない）。
+- 部署新規登録画面での「本支所のみ」部署（部課コード・部課名空欄）登録は引き続きWeb画面からは
+  不可（CSV取込・初期データ投入経由のみ）。
+- 部署統合・分割対象ポップアップは部課コード"99"（退職）を引き続き除外しない。
+- 操作履歴ログのAuditLog.department_name表示はプレフィックスなしのまま（モックのサンプル行が
+  古いと判断）。
+- 保管画面の「年」プルダウンは未来年+1年を許容する現行仕様を維持（原本の静的な窓より1年広い）。
+- 契約金額欄の下限バリデーション欠如は`review_pending.txt`での追跡を継続（対応せず）。
+
+いずれも詳細な検討根拠は`xlsx_audit_Rev1.6.txt`（プロジェクトルート直下、gitで追跡）参照。

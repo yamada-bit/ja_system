@@ -10,11 +10,12 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
 コメントの罠など）。
 
 完了済みフェーズの詳細な実装経緯・監査結果・バグ修正ログは
-[HTML_REIMPL_CHECKLIST_ARCHIVE.md](HTML_REIMPL_CHECKLIST_ARCHIVE.md)（Rev1.4＝2026-08-28以降）と
-[HTML_REIMPL_CHECKLIST_ARCHIVE2.md](HTML_REIMPL_CHECKLIST_ARCHIVE2.md)（Phase 0〜8・Rev1.1〜1.3期、
-それより前）に切り出した（2026-08-24分割、2026-09-07にARCHIVE2を再分割。**新規セッションが通常
-参照すべきはこのファイルのみ**。アーカイブは特定の過去の判断・バグ修正の詳しい経緯を掘り下げたい
-時にのみ開く）。
+[HTML_REIMPL_CHECKLIST_ARCHIVE.md](HTML_REIMPL_CHECKLIST_ARCHIVE.md)（Rev1.5＝2026-09-04以降）、
+[HTML_REIMPL_CHECKLIST_ARCHIVE3.md](HTML_REIMPL_CHECKLIST_ARCHIVE3.md)（Rev1.4期＝2026-08-28〜
+2026-09-03頃）、[HTML_REIMPL_CHECKLIST_ARCHIVE2.md](HTML_REIMPL_CHECKLIST_ARCHIVE2.md)（Phase 0〜8・
+Rev1.1〜1.3期、それより前）の3ファイルに切り出した（2026-08-24分割、2026-09-07にARCHIVE2へ再分割、
+2026-09-16にARCHIVE3へ再分割。**新規セッションが通常参照すべきはこのファイルのみ**。アーカイブは
+特定の過去の判断・バグ修正の詳しい経緯を掘り下げたい時にのみ開く）。
 
 原本HTML/xlsxの外側にある、コード側で必要な本番リリース前作業（static/js の minify など）は
 [RELEASE_PREP_NOTES.md](RELEASE_PREP_NOTES.md) に集約する。
@@ -318,6 +319,15 @@ CLAUDE.mdへ昇格済み（原本改訂受領時のdiff優先手順、同一注�
   ユーザー確認済み）。操作履歴ログは `build_search_audit_message(form, request.GET.keys())` で
   GET 実在キーのみ列挙し自動セット部署を除外。`manage.py test` 全829件PASS（新規10件）。詳細は
   ARCHIVE.md「検索・閲覧・変更シート全行監査 追補：部署名の自動セットが管理者で効いていなかった」節。
+- 簡易設計指示書 Rev1.6 全行監査（xlsx全行監査フェーズ2、2026-09-16、ユーザー依頼）：原本改訂を
+  伴わない、リリース前総仕上げとしての実装漏れ網羅監査。表紙・目次・(ひな形)を除く全13シートを
+  background agentへシート単位で並行調査。確度の高い実装漏れは全シートで0件。判断が必要な項目
+  14件をユーザーに1件ずつ確認した結果、13件は現状維持／見送り（うち1件は権限管理B201/B234の
+  「要再確認」事項が2026-08-19時点で既に陳腐化済みだった過検出と判明）、実装対応が必要だったのは
+  1件のみ：分類(Group)を論理削除する際、配下に有効なカテゴリーが残っていれば削除をブロックする
+  （`masters.views.GroupDeleteView.blocking_count()`に配下カテゴリー件数を追加）。`manage.py test
+  masters`134件PASS。詳細はARCHIVE.md「簡易設計指示書 Rev1.6 全行監査（xlsx全行監査フェーズ2）」節、
+  一覧は`xlsx_audit_Rev1.6.txt`参照。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加

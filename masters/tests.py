@@ -671,6 +671,32 @@ class MasterDeleteViewTests(TestCase):
         self.group_empty.refresh_from_db()
         self.assertTrue(self.group_empty.is_deleted)
 
+    def test_group_with_active_category_cannot_be_deleted_even_without_documents(self):
+        """xlsx全行監査フェーズ2-1 No.7（2026-09-16ユーザー確認、対応する=(a)案採用）：分類に
+        直接紐づく文書が0件でも、配下に有効なカテゴリーが残っている場合は削除をブロックする。
+        放置すると、CategoryForm.groupのqueryset（is_deleted=False限定）から選択肢が消え、当該
+        カテゴリーの編集画面で「分類」欄がブラウザの暗黙選択（先頭要素）にすり替わり、利用者が
+        意図せず別の分類へ変更した状態のまま更新してしまう（xlsx/原本HTMLに明記のない業務ロジック
+        追加のため、実装前にユーザーへ判断確認済み）。"""
+        group = Group.objects.create(code="D", name="分類Ｄ", doc_kbn=DocKbn.DOCUMENT)
+        Category.objects.create(code="002", name="カテゴリーＤ", group=group, doc_kbn=DocKbn.DOCUMENT)
+        token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
+        self.client.post(f"/masters/class/{group.pk}/delete/", {"token": token})
+        group.refresh_from_db()
+        self.assertFalse(group.is_deleted)
+
+    def test_group_with_only_deleted_category_can_be_deleted(self):
+        """上記と対比：配下カテゴリーが既に論理削除済み（is_deleted=True）ならブロック対象に
+        数えず削除できる。"""
+        group = Group.objects.create(code="E", name="分類Ｅ", doc_kbn=DocKbn.DOCUMENT)
+        Category.objects.create(
+            code="003", name="カテゴリーＥ", group=group, doc_kbn=DocKbn.DOCUMENT, is_deleted=True,
+        )
+        token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
+        self.client.post(f"/masters/class/{group.pk}/delete/", {"token": token})
+        group.refresh_from_db()
+        self.assertTrue(group.is_deleted)
+
     def test_trashed_document_is_excluded_from_count_and_delete_block(self):
         """2026-09-10 No.2（ユーザー確認済み）：ゴミ箱保管中（is_deleted=True）の文書は
         「文書件数」列に数えず、削除ボタンのブロック条件（blocking_count）からも外す。"""
@@ -683,7 +709,12 @@ class MasterDeleteViewTests(TestCase):
         response = self.client.get("/masters/class/")
         counts = {g.pk: g.item_count for g in response.context["page_obj"]}
         self.assertEqual(counts[self.group_with_docs.pk], 0)
-        # 削除もできること（xlsx 分類管理!B71「文書件数が0件のときのみ削除可」）
+        # 削除もできること（xlsx 分類管理!B71「文書件数が0件のときのみ削除可」）。setUpでこの分類には
+        # 有効なカテゴリー(self.category)が紐づいており、配下カテゴリーの削除ブロック
+        # （GroupDeleteView.blocking_count、xlsx全行監査フェーズ2-1 No.7）にも触れてしまうため、
+        # このテストの検証対象（文書件数のみ）を切り分けるために先に削除しておく。
+        self.category.is_deleted = True
+        self.category.save(update_fields=["is_deleted"])
         token = self.client.get(f"/masters/class/{self.group_with_docs.pk}/delete/").context["token"]
         self.client.post(f"/masters/class/{self.group_with_docs.pk}/delete/", {"token": token})
         self.group_with_docs.refresh_from_db()
@@ -814,6 +845,11 @@ class ContractSideMasterCountTests(TestCase):
         response = self.client.get("/masters/class/", {"doc_kbn": DocKbn.CONTRACT})
         item = {g.pk: g for g in response.context["page_obj"]}[group.pk]
         self.assertEqual(item.item_count, 0)
+        # test_trashed_document_is_excluded_from_count_and_delete_blockと同じ理由：
+        # このテストの検証対象（契約書件数のみ）を切り分けるため、配下カテゴリーの削除ブロック
+        # （GroupDeleteView.blocking_count）に触れないよう先に削除しておく。
+        category.is_deleted = True
+        category.save(update_fields=["is_deleted"])
         token = self.client.get(f"/masters/class/{group.pk}/delete/").context["token"]
         self.client.post(f"/masters/class/{group.pk}/delete/", {"token": token})
         group.refresh_from_db()
