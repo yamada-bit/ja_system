@@ -2,7 +2,8 @@
 
 原本改訂（RevX.X）を受け取ってから本番リリース判断に至るまでの一連の流れを、フェーズに分けて
 Claude Codeへそのまま渡せる指示文としてまとめたもの。個別の運用ルールの一次情報源は
-CLAUDE.md／RELEASE_QUALITY_WORKFLOW.md／MODEL_AUDIT_INSTRUCTION_TEMPLATE.mdであり、
+CLAUDE.md／RELEASE_QUALITY_WORKFLOW.md／MODEL_AUDIT_INSTRUCTION_TEMPLATE.md／
+RELEASE_PREP_CHECKLIST_RUN.md（release_baseline.txt取得のP0手順の一次情報源）であり、
 本ファイルはそれらの**実行順序と呼び出し方をオーケストレーションする位置づけ**（内容の重複記述
 はしない。各フェーズの詳細ルールは参照先を必ず読む）。
 
@@ -207,25 +208,16 @@ RELEASE_QUALITY_WORKFLOW.mdの①〜④テンプレートを対象アプリに�
 ## フェーズ5：リリースに向けた最終ゲート
 
 詳細テンプレート：RELEASE_QUALITY_WORKFLOW.md ⑦（既存、コピー不要でそのまま使う）。
+release_baseline.txtが無い場合のP0手順（作業ツリーをクリーンにしてから全体テスト・環境情報を
+取得し保存する）は、RELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」を参照する
+（現時点でrelease_baseline.txtは未生成のまま＝次回フェーズ5実行時は必ずP0から始める）。
 フェーズ1〜4の修正がすべてコミットされた状態で、別セッション（`/clear`後）で実行する。
 
 ```
 RELEASE_QUALITY_WORKFLOW.mdの⑦最終ゲートを実行して。対象はmain...HEAD。
+release_baseline.txtが無ければ、先にRELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」の
+手順で取得し、生成後に必ずファイルの存在を確認してから⑦へ進めて。
 結果はRELEASE_PREP_NOTES.mdに追記して。
-
-1. 全体テスト×ベースライン照合。release_baseline.txtと突き合わせる
-   （無ければP0として改めて取得し、生成後に必ずファイルの存在を確認する）。
-2. 静的チェック（makemigrations --check --dry-run／check／
-   check --deploy --settings=config.settings.prod）。
-3. 差分全体レビュー（git diff main...HEAD を対象に/code-review high。
-   リリース重要度が高ければ/code-review ultra）。
-4. フィデリティ・スポット再確認（views.py/forms.py/api.pyを変更した画面のみ、
-   原本HTML（../../HTML/htmlN/index.html + style.css）と突き合わせる。全画面の再監査は不要）。
-5. 実アプリのスモークテスト（Browser paneでrunserverを起動し、主要フローを一巡：
-   ログイン→メイン画面→文書検索・詳細ポップアップ→アップロードstep1〜3→削除→ゴミ箱→
-   契約書側で同様に1往復→設定メニュー各画面（職員/部署/分類/カテゴリー/保存期間/権限管理/
-   操作履歴ログ）→/healthz/が200）。
-6. 総合判断（ブロッカーの有無）をRELEASE_PREP_NOTES.mdに記録。問題がなければコミットする。
 ```
 
 最終ゲートでブロッカーなしと判断できたら、RELEASE_PREP_NOTES.md「1〜6」に記録済みの
