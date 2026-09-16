@@ -21,7 +21,7 @@ class Document(NormalizedTextFieldsMixin, UuidPrefixedFilenameMixin, models.Mode
 
     保管画面のフォーム項目にそのまま対応する。`extracted_text_normalized` は screen-search の
     「フリーワード」欄がファイル本文に対する全文検索も行う前提（2026-08-07ユーザー指示）で追加した。
-    旧ja_pj_oldでは本番DBのLC_CTYPE=Cが原因でpg_trgmが日本語トライグラムを生成できず、全文検索が
+    旧実装では本番DBのLC_CTYPE=Cが原因でpg_trgmが日本語トライグラムを生成できず、全文検索が
     実質`icontains`単純部分一致にフォールバックしていたが、新ja_db（`Japanese_Japan.utf8`ロケールで
     作成）ではpg_trgmが日本語で正しく機能することを確認済みのため、GinIndex(gin_trgm_ops)による
     類似検索を前提にできる。実際のPDF本文抽出処理は登録直後の同期抽出

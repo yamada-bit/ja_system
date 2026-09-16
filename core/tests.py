@@ -183,7 +183,7 @@ class MenuNoticeTwoColumnLayoutTests(TestCase):
         content = self.client.get("/").content.decode("utf-8")
         notice_area = content.split('class="notice-area"')[1]
         self.assertIn('<div class="notice-columns">', notice_area)
-        # 旧実装のインライン flex スタイルが残っていないこと
+        # 従来のインライン flex スタイルが残っていないこと
         self.assertNotIn("display:flex; gap:40px", notice_area)
         css = (settings.BASE_DIR / "static" / "css" / "style.css").read_text(encoding="utf-8")
         self.assertIn(".notice-columns {", css)
@@ -1713,7 +1713,7 @@ class CleanupTempUploadsCommandTests(TestCase):
     THRESHOLD_HOURSより古いものだけを削除し、閾値内（＝進行中の可能性がある）ものは残すこと、
     chunks/配下は upload_id ディレクトリ単位で削除することを検証する。
 
-    コマンド名は`ja_system/bat/cleanup_temp_uploads.bat`が前提としている名前（Phase1(ja_pj_old)
+    コマンド名は`ja_system/bat/cleanup_temp_uploads.bat`が前提としている名前（旧実装Phase1
     時代の別レイアウト向けコマンドを指したまま移植されていなかった）に合わせている
     （core.management.commands.cleanup_temp_uploadsのモジュールdocstring参照）。
     """

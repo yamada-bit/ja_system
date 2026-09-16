@@ -93,7 +93,7 @@ class BaseSearchablePdfView(View):
     `ocr_textdata` が保存されているスキャン文書について、原本PDF＋座標データからその場で透明
     テキストを埋め込んだPDFを組み立てて添付ダウンロード配信する。`can_download` 権限で保護し、
     BaseFileServeView と同じセキュリティヘッダを付与する。旧 `searchable_file`（事前生成・恒久
-    保存のFileField）を置き換えたもの。旧実装と同じく、この時点ではどの画面からもリンクして
+    保存のFileField）を置き換えたもの。従来の実装と同じく、この時点ではどの画面からもリンクして
     いない（利用者向けUIの追加は別途）。
 
     `model`/`kind`/`scoped_lookup`/`audit_action` をクラス変数で指定して継承する。

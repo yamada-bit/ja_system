@@ -13,6 +13,11 @@ Rev1.5（html5→html6、2026-09-04）以降の記録は
 [HTML_REIMPL_CHECKLIST_ARCHIVE.md](HTML_REIMPL_CHECKLIST_ARCHIVE.md)にある
 （2026-09-16、ARCHIVE.mdの肥大化に伴い再分割）。
 
+（2026-09-17注記：本文中の「旧実装」は執筆当時のまま残している。原則は削除済みの前身システム
+（別リポジトリだった旧ja_pj_old）を指すが、一部（例: 1868行目付近）は本プロジェクト自身の
+当時より前のリビジョンを指しており、前後の文脈で判別する必要がある。旧ja_pj_old削除に伴う
+用語整理はCLAUDE.mdのコーディング規約を参照。）
+
 一般化済みの運用ルールはCLAUDE.md「原本フィデリティに関する運用方針」に集約済み。
 
 ---
@@ -100,8 +105,8 @@ Rev1.5（html5→html6、2026-09-04）以降の記録は
   全文検索も行う仕様として採用（ユーザー指示）。`documents.Document`/`contracts.Contract`に
   `extracted_text`（抽出本文）フィールドと`GinIndex(gin_trgm_ops)`を追加済み。実際の本文抽出処理
   （PDF等からのテキスト抽出）自体はフェーズ4以降で実装する。
-- **DB名の整理**：旧`ja_db`/`ja_app`を`ja_db_old`/`ja_app_old`にリネーム（`ja_pj_old/.env`更新済み、
-  ja_pj_old側は接続確認済み）。新実装は`ja_db`/`ja_app`を新規作成して使用。
+- **DB名の整理**：旧`ja_db`/`ja_app`を`ja_db_old`/`ja_app_old`にリネーム（旧実装の`.env`更新済み、
+  旧実装側は接続確認済み）。新実装は`ja_db`/`ja_app`を新規作成して使用。
 - **pg_trgmの日本語対応を修正**：旧`ja_db`は`LC_CTYPE=C`のためpg_trgmが日本語トライグラムを
   生成できない既知の問題があった（旧CLAUDE.md記載）。新`ja_db`は`Japanese_Japan.utf8`ロケール
   （LC_CTYPE/LC_COLLATE）で作成し、日本語での`similarity()`・トライグラム生成が実際に機能することを
@@ -484,16 +489,16 @@ Rev1.5（html5→html6、2026-09-04）以降の記録は
 
 ## 保管画面１ チャンク分割アップロード追加（2026-08-10）
 
-原本HTML/xlsxには記載の無い技術的対応として、`ja_pj_old`と同様のチャンク分割アップロードを
+原本HTML/xlsxには記載の無い技術的対応として、旧実装と同様のチャンク分割アップロードを
 ユーザー依頼で追加した。
-- [x] `ja_pj_old`側にあった「結合済みファイルを一旦別の保留プールに貯めて通常アップロードPOST側で
+- [x] 旧実装側にあった「結合済みファイルを一旦別の保留プールに貯めて通常アップロードPOST側で
   合流させる」という中間層は、本実装の`save_pending_files`が呼ばれるたびに既存セッション内容へ
   追記する設計のため不要と判断し省略した
 - [x] `settings.CHUNK_UPLOAD_MAX_SIZE_BYTES`追加（結合後最終ファイルサイズ上限、既定500MB）
 - [x] `core/upload_services.py`に`save_upload_chunk`/`combine_upload_chunks`/`ChunkUploadError`追加
 - [x] `core/upload_views.py`（新規）に`BaseChunkUploadAPIView`追加、documents/contracts双方の
   `api.ChunkUploadAPIView`から継承（`upload/chunk/`エンドポイント）
-- [x] `static/js/chunk_upload.js`（新規、`ja_pj_old`から移植）。`storage1.html`のsubmitハンドラで
+- [x] `static/js/chunk_upload.js`（新規、旧実装から移植）。`storage1.html`のsubmitハンドラで
   `max_upload_size_bytes`基準の自動振り分け（単体超過分・合計超過分ともにチャンク経由）を実装
 - [x] `documents/contracts.UploadStep1View.post`の潜在バグを発見・修正：`save_pending_files`は
   ファイルI/Oエラーを`PendingFileStorageError`にラップして送出するにもかかわらず、ビュー側は
@@ -567,14 +572,14 @@ Rev1.5（html5→html6、2026-09-04）以降の記録は
 ## OCR（Google Cloud Vision）本文抽出・PDF埋め込み追加（2026-08-10）
 
 `documents.Document`/`contracts.Contract.extracted_text`（2026-08-07にユーザー指示で追加済みの
-全文検索基盤）の本文抽出処理として、`ja_pj_old`と同種のOCRを追加した（原本HTML/xlsxにOCR・
+全文検索基盤）の本文抽出処理として、旧実装と同種のOCRを追加した（原本HTML/xlsxにOCR・
 全文検索の抽出処理に関する記載は無い）。
-- [x] `ja_pj_old`は「プランA」（Vision同期API`batch_annotate_files`、1リクエスト最大5ページ制約）と
+- [x] 旧実装は「プランA」（Vision同期API`batch_annotate_files`、1リクエスト最大5ページ制約）と
   「プランB」（`pdf2image`でページ画像化、ページ数制限なし）を`settings.OCR_PLAN_B_ENABLED`で
   切替可能にしていたが、本実装ではその切替は設けずプランB方式のみで固定した（2026-08-10ユーザー指示）
 - [x] `OCR_ENABLED`は「コンプライアンス未承認のため既定False」だったのを、承認済みの前提で
   既定Trueに変更（`config/settings/base.py`）
-- [x] 同日追って、OCR結果をPDFへ透明テキストとして埋め込む機能（`ja_pj_old`の`searchable_file`／
+- [x] 同日追って、OCR結果をPDFへ透明テキストとして埋め込む機能（旧実装の`searchable_file`／
   `OCR_EMBED_TEXT_TO_PDF`）も移植。`OCR_EMBED_TEXT_TO_PDF`は既定False（埋め込み済みPDFを原本とは
   別に恒久保存する運用自体は別途承認が必要と判断し、`OCR_ENABLED`とは異なり既定をTrueにはしていない）
 - [x] `OCR_EMBED_TEXT_TO_PDF`がTrueの間、スキャン文書のOCR実行時に座標付き抽出

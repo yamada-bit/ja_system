@@ -1,7 +1,7 @@
 // チャンク分割アップロード（documents/contracts保管画面１から使用する。
-// core.upload_views.BaseChunkUploadAPIViewが受け口）。ja_pj_old（static/js/chunk_upload.js）の
+// core.upload_views.BaseChunkUploadAPIViewが受け口）。旧実装（static/js/chunk_upload.js）の
 // 移植版。ただし本アプリのsave_pending_files/get_pending_filesは呼ばれるたびに既存のセッション
-// 内容へ追記する設計のため、ja_pj_old側にあった「結合済みファイルを一旦別の保留プールへ貯めて
+// 内容へ追記する設計のため、旧実装側にあった「結合済みファイルを一旦別の保留プールへ貯めて
 // 通常アップロードPOST側で合流させる」という中間層は不要（core/upload_services.py参照）。
 //
 // 大容量PDFはDjangoの1リクエストボディ上限（MAX_UPLOAD_SIZE_BYTES/DATA_UPLOAD_MAX_MEMORY_SIZE）に
@@ -28,7 +28,7 @@ const CHUNK_UPLOAD_CHUNK_SIZE_FALLBACK = 5 * 1024 * 1024; // 5MB
 
 // crypto.randomUUID()はSecure Context（HTTPS or localhost）でのみ利用可能。本番運用がTLS終端無し
 // （HTTP）のままの場合、window.crypto.randomUUIDが存在せずTypeErrorになる可能性があるため
-// （ja_pj_oldの同名関数と同じ理由）、使えない場合はMath.randomベースの簡易UUID風文字列に
+// （旧実装の同名関数と同じ理由）、使えない場合はMath.randomベースの簡易UUID風文字列に
 // フォールバックする。upload_idはチャンクを一時的にグルーピングするためだけのキーで
 // 暗号学的な強度は不要。
 function generateUploadId() {

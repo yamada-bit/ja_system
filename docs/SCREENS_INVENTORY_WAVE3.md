@@ -9,7 +9,7 @@
 - 対象HTML: `C:\Users\yamad\Claude\JA\HTML\html1\index.html`（担当範囲 2663〜3437行目、実測で確認済み）
 - 対応Excel: `C:\Users\yamad\Claude\JA\HTML\文書管理システム_簡易設計指示書_Rev1_0.xlsx`
 - HTML分割ファイル格納先: `C:\Users\yamad\Claude\JA\HTML\html1\screens\`
-- 本ドキュメントの記載内容はHTML/xlsxに実際に書かれている内容のみ。旧実装(`ja_pj_old`)からの類推は一切含めていない。不明点は「不明（要確認）」と明記。
+- 本ドキュメントの記載内容はHTML/xlsxに実際に書かれている内容のみ。旧実装からの類推は一切含めていない。不明点は「不明（要確認）」と明記。
 
 ## 重要な事前注意（構造上の発見）
 

@@ -698,9 +698,8 @@ class SearchSortTests(TestCase):
 
 
 class NoticeFilterTests(TestCase):
-    """メイン画面お知らせ「有効期限切れまでXヵ月以内」からの遷移時の絞り込み（表示文言は「文書」
-    だが原本HTML実JS通り契約書検索へ遷移する。contracts.search_services._apply_notice_filter、
-    core.notice_services.get_notice_counts参照）。"""
+    """メイン画面お知らせ「有効期限切れまでXヵ月以内」からの遷移時の絞り込み
+    （contracts.search_services._apply_notice_filter、core.notice_services.get_notice_counts参照）。"""
 
     def setUp(self):
         self.department = Department.objects.create(

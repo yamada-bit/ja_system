@@ -6,7 +6,7 @@
 **✅ 2026-09-10：フェーズ2 完了。** 全指摘に対応（実装 or 理由付きで現状維持を確定）。
 各対応の詳細・見送り理由は `HTML_REIMPL_CHECKLIST_ARCHIVE.md`「models定義 妥当性監査 フェーズ2：
 指摘対応」節。モデル変更は全て `0001_initial.py` 直書き、`makemigrations --check` クリーン、
-`manage.py test` 全998件 PASS。コミットは未実施（ユーザー指示待ち）。
+`manage.py test` 全998件 PASS。2026-09-11、コミット611a589で反映済み。
 
 - 監査範囲：全8アプリの `models.py` ＋ 各 `migrations/0001_initial.py`
   ＋ 突き合わせ対象（validators.py / forms.py / services.py / 原本HTML html6 /

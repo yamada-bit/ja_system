@@ -88,13 +88,13 @@ def clear_pending_files(session, session_key):
     まま離脱した残骸を残さないため）、および保管画面２での登録完了後に呼ぶ。
 
     削除に失敗した項目（`OSError`）も`logger.exception`で記録した上で処理を止めずに続行し、
-    最終的にはセッションから無条件に消す（52行目）。これは意図的な設計判断: ここで例外を
-    再送出して処理を止めると、他の正常に削除できた項目まで巻き込んで保管画面の遷移自体が
-    止まってしまい、利用者から見た実害（画面が進まない）の方が大きい。一方、削除に失敗した
-    実体ファイルはセッションから参照が切れた時点でどこからも追跡できなくなる（＝
-    `tmp_uploads/`配下に孤児として残り続ける）ため、自動での回収手段は無くログのみが手がかりになる。
-    現状は定期クリーンアップの仕組みが無いため、運用上はログを見て手動で掃除するか、将来的に
-    `tmp_uploads/`配下の古いファイルを一括削除するバッチ処理を別途用意する必要がある。
+    最終的にはセッションから無条件に消す（本関数末尾の`session.pop`）。これは意図的な設計判断:
+    ここで例外を再送出して処理を止めると、他の正常に削除できた項目まで巻き込んで保管画面の
+    遷移自体が止まってしまい、利用者から見た実害（画面が進まない）の方が大きい。一方、削除に
+    失敗した実体ファイルはセッションから参照が切れた時点でどこからも追跡できなくなる（＝
+    `tmp_uploads/`配下に孤児として残り続ける）ため、自動での回収手段は無くログのみが手がかりに
+    なる（settings.STALE_TMP_UPLOAD_THRESHOLD_HOURSより更新日時が古いものは、
+    core.management.commands.cleanup_temp_uploadsの日次バッチが別途回収する）。
     """
     pending = session.get(session_key, [])
     tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
@@ -166,9 +166,9 @@ def open_pending_file(temp_name):
 # 順次送信し、ここで結合する（core.upload_views.BaseChunkUploadAPIView参照）。
 # サーバー側はチャンクサイズを参照せずchunk_index順に連結するだけ。
 #
-# ja_pj_old（core/upload_services.py）の同名機能とは異なり、結合完了ファイルを別の
+# 旧実装の同名機能とは異なり、結合完了ファイルを別の
 # 「保留プール」に貯めてから通常アップロードのPOST側で合流させる、という中間層は置いていない。
-# 本実装のsave_pending_files/get_pending_filesは（ja_pj_oldと違い）呼ばれるたびに既存の
+# 本実装のsave_pending_files/get_pending_filesは（旧実装と違い）呼ばれるたびに既存の
 # セッション内容へ追記する設計のため、combine_upload_chunksから直接同じセッションキーへ
 # 追記するだけで、documents/contracts.UploadStep1View.postの通常アップロード分と
 # 自然に合流できる。
@@ -209,7 +209,7 @@ def combine_upload_chunks(session, session_key, upload_id, total_chunks, origina
 
     チャンク欠落・settings.CHUNK_UPLOAD_MAX_SIZE_BYTES超過はChunkUploadErrorを送出する。
     いずれの場合も、既に保存済みのチャンク断片はここで削除してから送出する（失敗時にゴミを
-    残さない設計。ja_pj_old combine_upload_chunksと同じ方針）。
+    残さない設計。旧実装のcombine_upload_chunksと同じ方針）。
     """
     # original_filenameはブラウザ側File.nameをそのまま送ってくる値（save_pending_filesの
     # uploaded_file.nameと同じ信頼度）だが、ここではPath区切り文字を含んでいてもファイル名部分
@@ -271,8 +271,7 @@ def _delete_chunk_dir(chunk_dir):
         chunk_dir.rmdir()
     except OSError:
         # 上の削除が一部失敗しディレクトリが空でない場合、または他プロセスのロック等で
-        # rmdir自体が失敗した場合。孤児ディレクトリが残るがcleanup対象は将来の課題とし
-        # （tmp_uploads全体に定期クリーンアップの仕組みが無いのは既存の制約、
-        # core/upload_services.py clear_pending_filesのdocstring参照）、ここでは
-        # ログのみに留めて後続処理（利用者への応答）を止めない。
+        # rmdir自体が失敗した場合。孤児ディレクトリ自体はcore.management.commands.
+        # cleanup_temp_uploadsの日次バッチが後日回収するため（clear_pending_filesの
+        # docstring参照）、ここではログのみに留めて後続処理（利用者への応答）を止めない。
         logger.exception("チャンクディレクトリの削除に失敗しました: %s", chunk_dir)

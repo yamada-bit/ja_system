@@ -395,7 +395,7 @@ class BulkEditStartView(LoginRequiredMixin, View):
     HTML_REIMPL_CHECKLIST_ARCHIVE2.md「検索結果一覧 一括編集の実装」参照）。BulkDownloadViewと同じpks検証パターンで選択された
     文書を確認し、以後のウィザード進行に必要な最小限の状態（pkの並び順と現在位置）だけを
     セッションに積んでBulkEditViewへ渡す。編集権限自体はDocumentEditView・検索詳細ポップアップの
-    「変更」ボタン（static/js/common.js、!data.is_deleted && data.edit_urlのみが条件）と同じく
+    「変更」ボタン（static/js/common.js、data.edit_urlの有無のみが条件）と同じく
     ログイン済み・未削除であれば誰でも編集できる前提のため、can_downloadのような追加の権限判定は
     行わない。
     """

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # （search.html参照）のため、apply_sort側でその複数フィールドの複合ソートとして扱う。
 # 「保存期間」列も、__str__の文字列ではなくmasters.RetentionPeriod.display_order（画面上の
 # 意図された並び順、例:1年→3年→…→永年）でソートする。いずれも表示と無関係な列
-# （department__branch_code／uploader__nameのみ／retention_period_id）で近似していた旧実装は、
+# （department__branch_code／uploader__nameのみ／retention_period_id）で近似していた従来の実装は、
 # 見た目上「ソートがおかしい」不具合だったため、2026-08-17に表示・意図した順序と一致させる形に
 # 修正した。
 SORT_FIELDS = {

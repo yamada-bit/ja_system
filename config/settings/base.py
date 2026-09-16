@@ -210,9 +210,8 @@ RETENTION_PERMANENT_YEARS = env.int("RETENTION_PERMANENT_YEARS", default=50)
 # 実質DB直接操作しか無く「設定ファイル等で容易に変更できる」要件を満たせていなかったため）。
 AUDIT_LOG_RETENTION_MONTHS = env.int("AUDIT_LOG_RETENTION_MONTHS", default=3)
 
-# スキャンPDF（画像PDF）のOCR（Google Cloud Vision）を有効化するかどうか。ja_pj_oldでは
-# コンプライアンス部門の未承認事項として既定Falseだったが、新ja_pjでは承認済みの前提のため
-# 既定True（2026-08-10ユーザー指示）。Falseにすると、テキスト層の無いPDFはextracted_textが
+# スキャンPDF（画像PDF）のOCR（Google Cloud Vision）を有効化するかどうか。コンプライアンス部門の
+# 承認済みの前提で既定True（2026-08-10ユーザー指示）。Falseにすると、テキスト層の無いPDFはextracted_textが
 # 空のまま据え置かれ全文検索の対象外になる（core.ocr_layout_services.OcrDisabledError参照）。
 OCR_ENABLED = env.bool("OCR_ENABLED", default=True)
 # google-cloud-vision SDKはGOOGLE_APPLICATION_CREDENTIALS環境変数からサービスアカウント鍵
@@ -220,9 +219,9 @@ OCR_ENABLED = env.bool("OCR_ENABLED", default=True)
 # os.environへ反映済みのため、.envにこの変数を書くだけでSDK側の追加設定は不要。
 GOOGLE_APPLICATION_CREDENTIALS = env("GOOGLE_APPLICATION_CREDENTIALS", default="")
 # OCRはPDFをpdf2imageでページごとに画像化し、各画像をVisionのdocument_text_detectionへ
-# 1ページずつ個別に投入する方式で固定する（ja_pj_oldにあった「プランA」〈PDFバイト列を直接
-# 同期APIに渡す、1リクエスト最大5ページの制約あり〉との切替は行わない。全ページ確実に
-# OCRできる本方式のみを採用する2026-08-10ユーザー指示）。pdf2imageが依存するpopplerバイナリの
+# 1ページずつ個別に投入する方式で固定する（PDFバイト列を直接同期APIに渡す方式〈1リクエスト
+# 最大5ページの制約あり〉との切替は設けない。全ページ確実にOCRできる本方式のみを採用する
+# 2026-08-10ユーザー指示）。pdf2imageが依存するpopplerバイナリの
 # ディレクトリパス。OSのPATHにpopplerが通っている環境では設定不要（空文字のままでよい）。
 POPPLER_PATH = env("POPPLER_PATH", default="")
 

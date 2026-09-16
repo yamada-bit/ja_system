@@ -96,7 +96,7 @@ No.3  優先度: 低
     正常状態として存在しうる（permissions/services.py get_profile docstring）。
   - 本改修の意図（コメント: 「CSV取込経由の所属長昇格が /audit/ 画面から
     追跡できなかった」ため audit ログを追加）と矛盾する抜け。
-  - 旧実装も同じ挙動のため厳密には本PRの回帰ではないが、周辺を触っている今が
+  - 従来の実装も同じ挙動のため厳密には本PRの回帰ではないが、周辺を触っている今が
     直しどき。get_or_create の created フラグを見て、新規作成時も audit ログを
     出すのが筋。
 対応済み（review_pending.txt 経由でリリース前に対応）: U-20。

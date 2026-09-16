@@ -13,7 +13,7 @@
 （core.management.commands.extract_pending_pdf_textと同様の運用）。
 
 コマンド名は`ja_system/bat/cleanup_temp_uploads.bat`が既に前提としている名前に合わせている
-（2026-08-13、ストレージ調査で判明：同.batはPhase1（ja_pj_old）時代のtmp_uploads配下レイアウト
+（2026-08-13、ストレージ調査で判明：同.batは旧実装（Phase1）時代のtmp_uploads配下レイアウト
 〈`tmp_uploads/<uuid>/`という1アップロード1フォルダ構成〉を前提にした同名コマンドを呼ぶ想定で
 先に用意されていたが、現行実装（`tmp_uploads/<uuid>_<元ファイル名>`の平置き＋
 `tmp_uploads/chunks/<upload_id>/`のチャンク断片という別レイアウト）向けのコマンド本体が

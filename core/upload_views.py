@@ -29,7 +29,7 @@ UPLOAD_ID_PATTERN = re.compile(r"^[0-9a-zA-Z-]{1,64}$")
 class BaseChunkUploadAPIView(LoginRequiredMixin, View):
     """screen-storage1のチャンク分割アップロードAPI。選択されたファイルのサイズが
     settings.MAX_UPLOAD_SIZE_BYTESを超える場合にstatic/js/chunk_upload.jsが自動的に使用する
-    （ja_pj_old core/upload_views.py BaseChunkUploadAPIViewの移植・簡略化）。
+    （旧実装のBaseChunkUploadAPIViewの移植・簡略化）。
 
     結合が完了したファイルはcore.upload_services.combine_upload_chunksの中で
     `pending_session_key`のセッション保留ファイル一覧へ直接追記される。documents/contractsの

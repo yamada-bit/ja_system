@@ -3454,7 +3454,7 @@ class UploadStep2ImmediateExtractionTests(TestCase):
 
 class ChunkUploadAPITests(TestCase):
     """screen-storage1のチャンク分割アップロードAPI（documents:upload_chunk）。
-    ja_pj_oldから移植した、大容量ファイルをMAX_UPLOAD_SIZE_BYTES超過時に
+    旧実装から移植した、大容量ファイルをMAX_UPLOAD_SIZE_BYTES超過時に
     settings.CHUNK_UPLOAD_CHUNK_SIZE_BYTES（既定5MB）ずつ分割送信する機能。
     """
 

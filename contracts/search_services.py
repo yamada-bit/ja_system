@@ -121,9 +121,9 @@ def _apply_freeword_filter(qs, raw_value, match_mode):
 
 
 def _apply_notice_filter(qs, notice):
-    """screen-menuのお知らせリンクからの遷移（core.notice_services参照）。メイン画面お知らせ
-    「有効期限切れまでXヶ月以内」（表示文言は「文書」だが原本HTML実JS通り契約書検索へ遷移する。
-    documents.search_services._apply_notice_filter参照）はこちらの`expiring_soon`分岐で処理する。
+    """screen-menuのお知らせリンクからの遷移（core.notice_services参照）。is_deletedの絞り込み自体は
+    build_queryset側で既に行っているため、ここでは日付範囲のみ絞り込む
+    （documents.search_services._apply_notice_filterと同じ設計）。
     """
     from django.conf import settings
 

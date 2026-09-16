@@ -120,7 +120,8 @@ class Command(BaseCommand):
         戻り値：
         - None … スキャン文書だが OCR 無効のため未処理（次回に持ち越す）
         - (text, None) … テキスト層抽出成功、または OCR 成功だが textdata を保存しない
-          （privacy_flag=True / OCR_STORE_TEXTDATA=False / textdata が空）
+          （OCR_STORE_TEXTDATA=False / textdata が空。_should_store_textdata参照、
+          2026-09-11時点ではprivacy_flagの影響は無い）
         - (text, textdatas) … OCR 成功で textdata も保存する
         """
         try:

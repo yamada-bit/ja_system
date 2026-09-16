@@ -265,7 +265,7 @@ input[type="password"]::-ms-clear {
   margin-bottom: 10px;
 }
 /* お知らせの文書列／契約書列を左右に等幅で並べる（原本 index.html html5, style.css を移植。
-   簡易設計指示書 Rev1.2 の埋め込み画像モックが左右2ブロック構成だったのに対応。旧実装は
+   簡易設計指示書 Rev1.2 の埋め込み画像モックが左右2ブロック構成だったのに対応。従来は
    ul へインライン style で flex:1 を当てていたが、html5 に合わせ notice-columns>div に寄せた）。 */
 .notice-columns {
   display: flex;

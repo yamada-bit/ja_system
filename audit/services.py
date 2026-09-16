@@ -86,9 +86,9 @@ def filter_audit_log_queryset(form):
 def log(*, employee, action, event_message, personal_info_flag=False):
     """操作履歴ログを1件記録する（xlsx 操作履歴ログ!B63「画面名 ＋ 全角スペース ＋ ボタン名」）。
 
-    監査ログの記録失敗で本処理（アップロード・検索等）まで失敗させたくないため、例外は握りつぶし
-    ログにのみ残す（「本質的でない処理の失敗で本処理を巻き込まない」という設計判断。ただし完全な
-    無音失敗は障害調査を妨げるため、logger.exceptionで必ず記録する）。
+    監査ログの記録失敗で本処理（アップロード・検索等）まで失敗させたくないため、呼び出し先の
+    log_raw()側で例外を握りつぶしログにのみ残す（「本質的でない処理の失敗で本処理を巻き込まない」
+    という設計判断。ただし完全な無音失敗は障害調査を妨げるため、logger.exceptionで必ず記録する）。
     """
     log_raw(
         employee_no=employee.employee_no,
