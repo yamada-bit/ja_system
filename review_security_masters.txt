@@ -1,0 +1,22 @@
+レビュー対象: masters/（分類(Group)削除ブロック機能、コミット1406987 の masters/views.py, masters/tests.py 差分のみ）
+実施方法: /security-review の観点をmasters差分に絞って適用
+実施日: 2026-09-16
+
+注記: このブランチはmain比で他に5コミット（config/settings/prod.py・.env.example・各種ドキュメント等）
+先行しているが、今回の依頼「mastersアプリに対して」に従いmasters/の変更のみを対象とした。
+prod.py等の変更は別途フェーズ4/5で対象になった際にレビューする。
+
+## 確認した観点
+- SQLインジェクション: 新規コードは `Category.objects.filter(group=obj, is_deleted=False).count()`
+  のみで、すべてDjango ORM経由・パラメータはPython値（Groupインスタンス）であり注入余地なし。
+- 認可バイパス: blocking_count() の変更は既存の削除条件を「緩める」方向ではなく「厳しくする」
+  （文書/契約書0件でも配下カテゴリーがあればブロックを追加）方向のみ。既存の
+  scoped_lookup（自部署のみ）・SettingsMenuAccessMixin・LoginRequiredMixinの権限チェックには
+  変更なし。URL直打ちで新条件をバイパスする経路も見当たらない。
+- XSS: 新規コードはテンプレートへの新しい出力を追加していない（既存の汎用エラーメッセージ
+  「この{entity_label}には紐づくデータが存在するため削除できません」をそのまま流用）。
+- 機微情報のログ出力: 新規ログ出力は無し（既存のlogger.warningの文言のみ、code/countという
+  非機微値）。
+
+## 結論
+確度80%以上のセキュリティ上の脆弱性は検出されなかった（該当なし）。

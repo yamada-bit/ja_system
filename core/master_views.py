@@ -309,8 +309,11 @@ class BaseScopedMasterDeleteView(View):
 
         count = self.blocking_count(obj)
         if count > 0:
+            # count は文書/契約書件数（doc_count/contract_count）とは限らない。GroupDeleteView.
+            # blocking_countのように配下カテゴリー等の別要因も加算されうるため、「文書件数」と
+            # 決め打ちせず「紐づくデータ」という表現にする（品質チェック指摘、2026-09-16）。
             logger.warning(
-                "文書件数が0件でない%sの削除が試行されました: code=%s count=%s", self.entity_label, obj.code, count
+                "紐づくデータが残っている%sの削除が試行されました: code=%s count=%s", self.entity_label, obj.code, count
             )
             messages.error(request, f"この{self.entity_label}には紐づくデータが存在するため削除できません。")
             return redirect(self.list_url_name)

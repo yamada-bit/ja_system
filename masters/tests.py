@@ -697,6 +697,26 @@ class MasterDeleteViewTests(TestCase):
         group.refresh_from_db()
         self.assertTrue(group.is_deleted)
 
+    def test_class_list_delete_button_disabled_reflects_active_category_block(self):
+        """review_test_masters.txt 中指摘：一覧(class_list.html)の「削除」ボタンのdisabled表示が、
+        配下カテゴリー起因のブロック（GroupDeleteView.blocking_count、上記2テスト参照）にも
+        追随することを確認する。直接紐づく文書/契約書が0件の分類でも、配下に有効なカテゴリーが
+        残っていれば一覧の時点でボタンをdisabled化する（2026-09-16、修正前はdoc_count/
+        contract_countのみで判定しており、確認画面まで進んでから初めてブロックされていた）。"""
+        blocked_group = Group.objects.create(code="F", name="分類Ｆ", doc_kbn=DocKbn.DOCUMENT)
+        Category.objects.create(code="004", name="カテゴリーＦ", group=blocked_group, doc_kbn=DocKbn.DOCUMENT)
+
+        response = self.client.get("/masters/class/")
+        content = response.content.decode("utf-8")
+
+        blocked_row = content.split(f">{blocked_group.name}<", 1)[1].split("</tr>", 1)[0]
+        self.assertIn("disabled", blocked_row)
+
+        # 対比：文書・配下カテゴリーとも0件のgroup_emptyは引き続き削除可能（disabled化されない）。
+        empty_row = content.split(f">{self.group_empty.name}<", 1)[1].split("</tr>", 1)[0]
+        self.assertNotIn("disabled", empty_row)
+        self.assertIn("btn-danger", empty_row)
+
     def test_trashed_document_is_excluded_from_count_and_delete_block(self):
         """2026-09-10 No.2（ユーザー確認済み）：ゴミ箱保管中（is_deleted=True）の文書は
         「文書件数」列に数えず、削除ボタンのブロック条件（blocking_count）からも外す。"""

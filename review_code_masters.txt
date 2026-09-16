@@ -1,0 +1,56 @@
+レビュー対象: masters/（xlsx全行監査フェーズ2で追加した分類(Group)削除ブロック機能、コミット1406987 の masters/views.py, masters/tests.py 差分）
+実施方法: /code-review high（対象: `git diff 1406987^..1406987 -- masters/`）
+実施日: 2026-09-16
+
+## 指摘一覧
+
+### 高: 分類一覧の「削除」ボタン非活性条件が新しいブロック条件に追随していない
+- ファイル: templates/masters/class_list.html:83
+- 現状: `{% if group.doc_kbn == "document" and group.doc_count == 0 or group.doc_kbn == "contract" and group.contract_count == 0 %}` で
+  doc_count/contract_count のみを見て「削除」ボタンの活性/非活性を切り替えている。
+  masters/views.py の GroupDeleteView.blocking_count() には今回、配下の有効なカテゴリー件数
+  （active_category_count）を加算する分岐が追加されたが、一覧側のこの条件式は更新されていない。
+- あるべき姿: 直接の文書/契約書件数が0件でも配下に有効なカテゴリーが残っている分類は、一覧の時点で
+  「削除」ボタンを disabled + title 属性（既存の非表示パターン）にする。少なくとも
+  `_group_queryset_with_counts()` の annotate に active_category_count 相当を足すか、
+  item_count 相当の値をテンプレートに渡して判定に使う。
+- 影響: 実害はサーバー側で防がれている（POST 側の blocking_count で count>0 となりブロックされる）が、
+  利用者は一覧で活性表示された「削除」ボタンを押し、確認画面まで進んでから「この分類には紐づく
+  データが存在するため削除できません」というエラーで一覧へ差し戻される。CLAUDE.md
+  「クライアント側の表示/非表示とサーバー側権限チェックの一致確認」「同一注記の実装方式が
+  揃っているか」の観点に反する。HTML_REIMPL_CHECKLIST_ARCHIVE.md の当該追記には
+  「テンプレート・URLの変更は不要」と記載されているが、実際には一覧テンプレートの追随漏れがある。
+- 優先度判断: 高（ユーザー体験上の不整合。データ破損やセキュリティ上のバイパスではない）
+
+### 中: 削除ブロック時の警告ログ文言が実態と乖離しうる
+- ファイル: core/master_views.py:312-314
+- 現状: `BaseScopedMasterDeleteView.post` のブロック時 `logger.warning` が常に
+  「文書件数が0件でない%sの削除が試行されました」という固定文言。
+- あるべき姿: Group の場合、doc_count/contract_count が0でも配下カテゴリーの存在だけで
+  ブロックされるケースがあるため、ログ文言を「紐づくデータ（文書/契約書/カテゴリー等）が
+  存在する」のような実態に即した表現に見直すか、blocking_count の内訳をログに残す。
+- 影響: 運用時にこのログだけを見て原因調査すると「文書が残っている」と誤認し、実際にはカテゴリーの
+  棚卸しが必要なケースを見落とすおそれがある。機能上のバグではなく、ログ精度の問題。
+- 優先度判断: 中
+
+## 検証済みで問題なしと判断した点
+- blocking_count() の active_category_count は Category.objects.filter(group=obj, is_deleted=False)
+  のみで doc_kbn を指定していないが、CategoryForm.clean（masters/forms.py:246-251）で
+  カテゴリーの doc_kbn は必ず所属する分類(group)の doc_kbn と一致する制約があるため、
+  文書/契約書の分類を跨いだ誤カウントは発生しない。
+- 新規テスト2件（test_group_with_active_category_cannot_be_deleted_even_without_documents /
+  test_group_with_only_deleted_category_can_be_deleted）は blocking_count() のロジック自体は
+  正しく検証している。ただし上記「高」指摘（一覧テンプレートの非活性条件）を検証するテストは無い
+  （④テストカバレッジ棚卸しで別途扱う）。
+
+## 対応結果（2026-09-16）
+- 高（一覧の削除ボタン非活性条件）: 対応済み。`masters/views.py`の
+  `_group_queryset_with_counts()`に`active_category_count`をannotateし、
+  `templates/masters/class_list.html`の非活性条件へ追加。`GroupDeleteView.blocking_count()`側も
+  同じannotate値を再利用する形に修正（個別クエリを1本削減）。詳細は
+  HTML_REIMPL_CHECKLIST_ARCHIVE.mdの追記参照。
+- 中（警告ログ文言）: 対応済み。`core/master_views.py`のlogger.warning文言を
+  「文書件数が0件でない…」から「紐づくデータが残っている…」に変更。
+- テスト: `masters/tests.py`に一覧の非活性表示を検証する
+  `test_class_list_delete_button_disabled_reflects_active_category_block`を追加。
+  masters 135件・全体1016件ともPASS。

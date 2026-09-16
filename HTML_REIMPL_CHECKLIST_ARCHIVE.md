@@ -990,9 +990,21 @@ xlsx/原本HTMLに直接の記載が無い業務ロジックのため、CLAUDE.m
 ユーザーは(a)案（分類削除をブロック）を選択。
 
 **実装**：`GroupDeleteView.blocking_count()`に、配下の有効なカテゴリー件数
-（`Category.objects.filter(group=obj, is_deleted=False).count()`）を加算する分岐を追加。
+（`_group_queryset_with_counts()`にannotateした`active_category_count`）を加算する分岐を追加。
 既存の「紐づくデータが存在するため削除できません」という汎用メッセージ・ブロック条件
-（`count > 0`）の仕組みをそのまま流用でき、テンプレート・URLの変更は不要。
+（`count > 0`）の仕組みをそのまま流用でき、URLの変更は不要。
+
+**追記（2026-09-16 フェーズ4品質チェックで発見・同日修正）**：初版実装では一覧
+（`class_list.html`）の「削除」ボタンのdisabled判定がdoc_count/contract_countのみを見ており、
+上記のカテゴリー起因のブロックに追随していなかった（「テンプレートの変更は不要」との当初判断は
+誤りだった）。文書0件・配下に有効なカテゴリーが残っている分類は、一覧では「削除」が活性表示の
+まま確認画面まで進め、POST時に初めてブロックされる不整合があった。`_group_queryset_with_counts()`
+に`active_category_count`をannotateし、`class_list.html`の非活性条件へ追加、
+`GroupDeleteView.blocking_count()`側もこのannotate値を再利用する形に修正（個別クエリの重複を解消）。
+あわせて`core.master_views.BaseScopedMasterDeleteView.post`の警告ログ文言
+「文書件数が0件でない…」も、文書件数以外が原因のブロックを誤解させるため
+「紐づくデータが残っている…」に変更。一覧のdisabled表示を検証するテストが従来一切無かったため
+`masters/tests.py`に`test_class_list_delete_button_disabled_reflects_active_category_block`を追加。
 
 **テスト**：`masters/tests.py`に以下を追加・修正。
 - `test_group_with_active_category_cannot_be_deleted_even_without_documents`（新規）：文書0件でも

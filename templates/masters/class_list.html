@@ -80,11 +80,11 @@
                 <td style="text-align:right;">{% if group.doc_kbn == "document" %}{{ group.doc_count }}{% else %}{{ group.contract_count }}{% endif %}</td>
                 <td>
                   <button type="button" class="btn-sm" onclick="window.location.href='{% url 'masters:class_edit' group.pk %}'">編集</button>
-                  {% if group.doc_kbn == "document" and group.doc_count == 0 or group.doc_kbn == "contract" and group.contract_count == 0 %}
+                  {% if group.active_category_count == 0 and group.doc_kbn == "document" and group.doc_count == 0 or group.active_category_count == 0 and group.doc_kbn == "contract" and group.contract_count == 0 %}
                     <button type="button" class="btn-sm btn-danger" onclick="window.location.href='{% url 'masters:class_delete' group.pk %}'">削除</button>
                   {% else %}
                     <button type="button" class="btn-sm" disabled
-                            title="紐づく書類があるため削除できません（件数が0のときのみ削除可）">削除</button>
+                            title="紐づく書類または配下のカテゴリーがあるため削除できません（いずれも0件のときのみ削除可）">削除</button>
                   {% endif %}
                 </td>
               </tr>

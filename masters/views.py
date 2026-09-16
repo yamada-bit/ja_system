@@ -44,6 +44,10 @@ def _group_queryset_with_counts():
     return Group.objects.filter(is_deleted=False).select_related("department").annotate(
         doc_count=Count("documents", distinct=True, filter=Q(documents__is_deleted=False)),
         contract_count=Count("contracts", distinct=True, filter=Q(contracts__is_deleted=False)),
+        # 配下カテゴリーの削除ブロック判定（GroupDeleteView.blocking_count）と一覧の「削除」ボタン
+        # disabled判定（class_list.html）の両方で使う。同じ値を2箇所で個別に問い合わせないよう
+        # ここで一度だけannotateする（品質チェック指摘、2026-09-16）。
+        active_category_count=Count("categories", distinct=True, filter=Q(categories__is_deleted=False)),
     ).annotate(
         item_count=Case(
             When(doc_kbn=DocKbn.DOCUMENT, then=F("doc_count")),
@@ -199,6 +203,8 @@ class GroupEditView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.Ba
 class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.BaseScopedMasterDeleteView):
     """screen-class-delete。xlsx B204「分類マスタから論理削除とする」。文書件数0件のときのみ
     削除可（xlsx B68、一覧側でもボタンをdisabled化しているが、URL直叩き対策でサーバー側でも検証）。
+    加えて、配下に有効なカテゴリーが残っている場合も削除をブロックする（blocking_count参照、
+    xlsx全行監査フェーズ2-1 No.7・2026-09-16ユーザー確認）。
 
     共通実装はcore.master_views.BaseScopedMasterDeleteView参照（GroupListView docstring参照）。
     """
@@ -222,9 +228,11 @@ class GroupDeleteView(LoginRequiredMixin, SettingsMenuAccessMixin, master_views.
         # 削除済みの分類が選択肢に消え、当該カテゴリーの編集画面で「分類」欄がブラウザの暗黙選択
         # （先頭要素）にすり替わり、利用者が意図せず別の分類を選んだ状態で更新してしまう
         # （xlsx全行監査フェーズ2-1で発見・2026-09-16ユーザー確認、対応する=(a)案を採用）。
+        # active_category_countは_group_queryset_with_counts()でannotate済み（scoped_lookupが
+        # 常にこのqueryset経由でobjを取得するため、ここで個別に問い合わせない。品質チェック指摘、
+        # 2026-09-16）。
         doc_or_contract_count = obj.doc_count if obj.doc_kbn == DocKbn.DOCUMENT else obj.contract_count
-        active_category_count = Category.objects.filter(group=obj, is_deleted=False).count()
-        return doc_or_contract_count + active_category_count
+        return doc_or_contract_count + obj.active_category_count
 
 
 def _category_queryset_with_counts():

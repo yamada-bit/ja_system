@@ -1,0 +1,46 @@
+レビュー対象: masters/（分類(Group)削除ブロック機能、コミット1406987 の masters/views.py, masters/tests.py 差分）
+実施方法: coverage.py実測 + tests.py目視棚卸し（RELEASE_QUALITY_WORKFLOW.md ④・⑧）
+実施日: 2026-09-16
+
+## 実行結果
+"/c/Users/yamad/Claude/JA/ja_system/venv/Scripts/python.exe" -m coverage run manage.py test masters
+→ Ran 134 tests, OK（失敗0）
+
+"/c/Users/yamad/Claude/JA/ja_system/venv/Scripts/python.exe" -m coverage report --show-missing --include="*/masters/*"
+masters\views.py   299 stmts, 9 missing (97%)   missing: 183, 187, 375, 379, 381, 383, 532, 571, 583
+
+## 新規コード（GroupDeleteView.blocking_count、L219-227）の実測カバレッジ
+100%到達済み。新規テスト2件
+（test_group_with_active_category_cannot_be_deleted_even_without_documents /
+test_group_with_only_deleted_category_can_be_deleted）で
+- 配下に有効なカテゴリーが残っている→ブロックされる（doc_count/contract_countが0でも）
+- 配下カテゴリーが論理削除済み→ブロックされない
+の両分岐を検証済み。既存の文書/契約書由来のブロック（doc_count>0等）の分岐も既存テストで
+カバー済みのまま。
+
+## 不足観点（未カバー）
+
+### 中: 一覧画面（class_list.html）の「削除」ボタンdisabled表示に対するテストが無い
+review_code_masters.txtの「高」指摘の通り、class_list.htmlの削除ボタンのdisabled条件は
+doc_count/contract_countのみを見ており、今回追加された「配下カテゴリー起因のブロック」時に
+実際にボタンが非活性表示されるかを検証するテストが無い（そもそも既存の文書/契約書起因の
+ブロックについても、class_list.htmlのレンダリング結果でdisabled属性の有無をassertするテストは
+1件も存在しない＝今回に限らない既存の欠落）。
+- 追加すべきテスト例：GroupListViewのレスポンスに対し、
+  (a) 直接紐づく文書0件・配下カテゴリー0件 → 「削除」ボタンが有効（disabled属性なし）
+  (b) 直接紐づく文書0件・配下に有効なカテゴリーが残っている → 「削除」ボタンがdisabled
+  の2パターンをassertContains等で検証する。
+
+### 低: masters\views.py の既存未カバー行（183, 187, 375, 379, 381, 383, 532, 571, 583）
+今回の差分とは無関係の既存ギャップ（GroupEditView/CategoryEditViewのaudit_event_message内の
+未変更分岐、RetentionRegistView/EditViewの一部分岐）。過去の監査サイクルで既に把握・棚卸し
+済みの可能性があるため、今回は新規指摘としては扱わず記録のみに留める。
+
+## 対応結果（2026-09-16）
+中（一覧のdisabled表示テスト不足）: 対応済み。`test_class_list_delete_button_disabled_reflects_active_category_block`
+を追加し、(a)文書・配下カテゴリーとも0件→活性表示、(b)文書0件・配下に有効なカテゴリーあり→
+disabled表示、の両方をclass_list.htmlのレンダリング結果から検証。
+
+低（views.py既存未カバー行 183,187,375,379,381,383,532,571,583）: 今回は見送り。
+今回の差分（分類削除ブロック機能）とは無関係の既存ギャップであり、xlsx全行監査フェーズ2や
+本品質チェックのスコープ外。次回このあたりのファイルを触る機会に併せて棚卸しする。

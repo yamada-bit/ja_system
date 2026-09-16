@@ -1,0 +1,35 @@
+レビュー対象: masters/（分類(Group)削除ブロック機能、コミット1406987 の masters/views.py, masters/tests.py 差分）
+実施方法: CLAUDE.md「コーディング規約」との突合
+実施日: 2026-09-16
+
+## 指摘一覧
+
+### 低: GroupDeleteViewのクラスdocstringが新しいブロック条件を反映しておらず記述が古いまま
+- ファイル: masters/views.py:199-204
+- 現状: 「文書件数0件のときのみ削除可（xlsx B68、一覧側でもボタンをdisabled化しているが、
+  URL直叩き対策でサーバー側でも検証）」という記述のまま。今回blocking_count()に配下カテゴリー
+  件数の判定が追加されたが、docstringは更新されていない。
+- 該当規約: CLAUDE.md「クラス・非自明なメソッドにはdocstringを付ける」（内容が実装と乖離した
+  docstringは無いより悪い）。
+- あるべき姿: 「文書・契約書に加え、配下の有効なカテゴリーが残っている場合もブロックする」旨を
+  追記する。あわせて review_code_masters.txt の「高」指摘（一覧のdisabled化が実際には
+  追随していない）を先に直すか、直すまでは「一覧側でもボタンをdisabled化している」という
+  記述自体が事実と異なる点も是正する。
+- 優先度判断: 低（実害はドキュメント精度のみ。review_code_masters.txtの高指摘を修正すれば
+  自然に解消する）
+
+## 確認して問題なしと判断した点
+- bare except: なし。DBError等の具体的な例外型のみ捕捉（今回の差分に例外処理の変更は無い）。
+- logger: masters/views.py は既にモジュールレベルでlogger宣言済み。新規コードは
+  BaseScopedMasterDeleteView.post側の既存logger.warningをそのまま利用しており、
+  権限拒否ではなく業務ルールによる削除ブロックのため、CLAUDE.mdの方針
+  （権限不足の拒否はlogger.warning止まりでAuditLogに残さない）通りAuditLog記録は無く問題なし。
+- CBVのみ: GroupDeleteViewは既存のBaseScopedMasterDeleteView(View)を継承したCBVのまま。
+  関数ベースビューの追加は無い。
+- ページネーション: 変更対象外。
+- 日本語統一: 新規メッセージ・コメントはすべて日本語。
+
+## 対応結果（2026-09-16）
+低（GroupDeleteViewのdocstring）: 対応済み。配下カテゴリーもブロック対象になる旨を追記。
+review_code_masters.txtの「高」指摘（一覧のdisabled化追随漏れ）自体もあわせて修正済みのため、
+docstringの「一覧側でもボタンをdisabled化している」という記述も現状と一致する状態に戻った。
