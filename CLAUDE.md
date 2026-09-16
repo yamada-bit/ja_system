@@ -12,10 +12,11 @@ JAふくおか八女向け「クラウド文書管理システム」。**画面�
 チェック）まで完了済み。
 
 改訂履歴（原本HTML html1→html6、指示書 Rev1.0→Rev1.6）の各差分と反映経緯は
-[HTML_REIMPL_CHECKLIST.md](HTML_REIMPL_CHECKLIST.md)「実装状況サマリ」および
-`HTML_REIMPL_CHECKLIST_ARCHIVE.md`（Rev1.5=2026-09-04以降）／`HTML_REIMPL_CHECKLIST_ARCHIVE3.md`
-（Rev1.4期=2026-08-28〜2026-09-03頃）／`HTML_REIMPL_CHECKLIST_ARCHIVE2.md`（Phase 0〜8・
-Rev1.1〜1.3期、それより前）に反映節あり（2026-09-16、ARCHIVE.mdの肥大化に伴いARCHIVE3.mdへ再分割）。
+[docs/HTML_REIMPL_CHECKLIST.md](docs/HTML_REIMPL_CHECKLIST.md)「実装状況サマリ」および
+`docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md`（Rev1.5=2026-09-04以降）／`docs/HTML_REIMPL_CHECKLIST_ARCHIVE3.md`
+（Rev1.4期=2026-08-28〜2026-09-03頃）／`docs/HTML_REIMPL_CHECKLIST_ARCHIVE2.md`（Phase 0〜8・
+Rev1.1〜1.3期、それより前）に反映節あり（2026-09-16、ARCHIVE.mdの肥大化に伴いARCHIVE3.mdへ再分割。
+2026-09-16、レビュー・監査系の`*.md`/`review_*.txt`類をルート直下からdocs//reviews/へ整理）。
 新しい原本改訂を受け取ったら下記「原本改訂を受け取った時の手順」に従う（追記先は ARCHIVE.md）。
 
 旧実装（`../ja_pj_old/`）は参照専用。画面構成・機能範囲・命名は一切引きずらないこと。
@@ -87,7 +88,7 @@ Rev1.1〜1.3期、それより前）に反映節あり（2026-09-16、ARCHIVE.md
 - `/audit/`（操作履歴ログ）
 - `/`（メイン画面）, `/settings/`〜（設定メニュー・その他設定)
 - `/healthz/`（死活監視用、ログイン不要。原本HTML/xlsxには無い運用インフラ向けエンドポイント。
-  詳細はHTML_REIMPL_CHECKLIST_ARCHIVE2.md「運用面の未実装改善候補の棚卸し・実装（2026-08-12）」参照）
+  詳細はdocs/HTML_REIMPL_CHECKLIST_ARCHIVE2.md「運用面の未実装改善候補の棚卸し・実装（2026-08-12）」参照）
 
 ### 既知の未実装・保留事項
 
@@ -108,7 +109,7 @@ xlsx側の「要再確認（赤字）」箇所や資料不足、業務要件未�
 完全削除する手段は無い（Rev1.2で個別完全削除ボタンは廃止済み）。
 
 新たに要再確認事項の解消やユーザーからの仕様確定があった場合は、このセクションと
-`HTML_REIMPL_CHECKLIST.md`の該当箇所を更新すること。
+`docs/HTML_REIMPL_CHECKLIST.md`の該当箇所を更新すること。
 
 ## コーディング規約
 
@@ -126,7 +127,7 @@ xlsx側の「要再確認（赤字）」箇所や資料不足、業務要件未�
   （操作履歴ログ画面・CSV出力の対象）へ記録する。一方、権限不足の保存・削除操作の拒否や
   フォーム改ざんによる不正pk混入・pks改ざん検出は`logger.warning`止まりとし`AuditLog`には
   残さない（操作履歴ログはエンドユーザー向け画面のためノイズを避ける。2026-09-09ユーザー確定、
-  `review_rule_doc_contract.txt` No.1）。masters（分類・カテゴリー）の部署スコープ外直打ちは
+  `reviews/review_rule_doc_contract.txt` No.1）。masters（分類・カテゴリー）の部署スコープ外直打ちは
   管理者用画面のため`logger.warning`のみ。
 - 共通処理は `core` 相当の共通基底クラス・サービス関数に集約し、アプリ間で重複するロジックを
   増やさない。
@@ -188,11 +189,11 @@ xlsx側の「要再確認（赤字）」箇所や資料不足、業務要件未�
   更新前の対象部署名入り確認メッセージも追加）。
 - ユーザーが明示的に「原本にはないが」と前置きして機能追加を依頼した場合は、原本一致より
   ユーザー指示を優先する。実装の詳細経緯（対象ファイル・関数名・設計判断の理由）は
-  `HTML_REIMPL_CHECKLIST_ARCHIVE.md`の該当セクションに記録する（実プレビュー化・チャンク分割
+  `docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md`の該当セクションに記録する（実プレビュー化・チャンク分割
   アップロード・OCR全文検索抽出・保管画面２のファイルごと個別メタデータ入力・PDFプレビューの
   PDF.js化 など。詳細はアーカイブ内の各節を参照）。
 - ユーザー指示で意図的に見送った原本との差異（確認ダイアログの有無、文言の細かな違い等）は、
-  実装せず理由付きで`HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録する（例：Rev1.5/html6で原本が削除した
+  実装せず理由付きで`docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録する（例：Rev1.5/html6で原本が削除した
   職員マスタ編集の目玉アイコン👁️は入力確認UXを優先してja_pjでは保持。ARCHIVE「H-3」節・
   差異一覧xlsxシート4参照）。
 
@@ -201,11 +202,11 @@ xlsx側の「要再確認（赤字）」箇所や資料不足、業務要件未�
 2. 差分はテキスト文言だけとは限らない。xlsxのセルに**埋め込み画像のみ**で変更が示される
    ケースがあるため、画像もハッシュ突き合わせ＋目視確認する。
 3. 差分を画面固有／共通部分（`common.js`等）のどちらかに振り分け、該当箇所のみ確認する。
-4. 詳細な反映経緯は`HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録し、`HTML_REIMPL_CHECKLIST.md`の
+4. 詳細な反映経緯は`docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md`に記録し、`docs/HTML_REIMPL_CHECKLIST.md`の
    「実装状況サマリ」も1行で更新する。
 
 差分反映からxlsx全行監査・アプリごとの品質チェック・リリース最終ゲートまでの一連の実行順序と
-Claude Codeへの指示テンプレートは[REVISION_TO_RELEASE_WORKFLOW.md](REVISION_TO_RELEASE_WORKFLOW.md)
+Claude Codeへの指示テンプレートは[docs/REVISION_TO_RELEASE_WORKFLOW.md](docs/REVISION_TO_RELEASE_WORKFLOW.md)
 に集約している。
 
 ### 同一注記が複数箇所に繰り返し付いている場合
@@ -220,7 +221,7 @@ xlsx/HTML上で同一の注記（「※〜の場合、ボタンを非表示と�
   サーバー側権限チェックは別物**。「delete_urlがNoneになる」ことは「DeleteView.post等が
   権限を検証している」ことを保証しない。URL直打ちを想定してサーバー側も確認する。
 
-詳細な経緯は`HTML_REIMPL_CHECKLIST_ARCHIVE2.md`「検索結果詳細ポップアップ：ダウンロードボタンの
+詳細な経緯は`docs/HTML_REIMPL_CHECKLIST_ARCHIVE2.md`「検索結果詳細ポップアップ：ダウンロードボタンの
 削除済み非表示漏れを修正」以降の3つの追記セクション参照。
 
 ### 技術的な既知の落とし穴

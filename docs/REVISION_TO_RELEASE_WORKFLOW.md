@@ -2,8 +2,8 @@
 
 原本改訂（RevX.X）を受け取ってから本番リリース判断に至るまでの一連の流れを、フェーズに分けて
 Claude Codeへそのまま渡せる指示文としてまとめたもの。個別の運用ルールの一次情報源は
-CLAUDE.md／RELEASE_QUALITY_WORKFLOW.md／MODEL_AUDIT_INSTRUCTION_TEMPLATE.md／
-RELEASE_PREP_CHECKLIST_RUN.md（release_baseline.txt取得のP0手順の一次情報源）であり、
+CLAUDE.md／docs/RELEASE_QUALITY_WORKFLOW.md／docs/MODEL_AUDIT_INSTRUCTION_TEMPLATE.md／
+docs/RELEASE_PREP_CHECKLIST_RUN.md（reviews/release_baseline.txt取得のP0手順の一次情報源）であり、
 本ファイルはそれらの**実行順序と呼び出し方をオーケストレーションする位置づけ**（内容の重複記述
 はしない。各フェーズの詳細ルールは参照先を必ず読む）。
 
@@ -16,7 +16,7 @@ RELEASE_PREP_CHECKLIST_RUN.md（release_baseline.txt取得のP0手順の一次�
   フェーズを設ける。
 - **コミットは依頼時のみ**。作業が一区切りしても自動でコミットしない。
 - **セッションの`/clear`はフェーズの区切り、および「洗い出し」→「修正」の間に挟む**
-  （RELEASE_QUALITY_WORKFLOW.md ⑤）。修正フェーズ内では1件ごとに`/clear`しない。
+  （docs/RELEASE_QUALITY_WORKFLOW.md ⑤）。修正フェーズ内では1件ごとに`/clear`しない。
 - 各フェーズ開始前に、CLAUDE.md冒頭の「プロジェクト概要」で**現在の一次情報源（原本HTMLの版・
   簡易設計指示書のRev）**を確認してから、以下テンプレート中の `htmlN` / `RevX.X` を実際の値に
   置き換えて使う。
@@ -94,8 +94,8 @@ CLAUDE.md「原本改訂を受け取った時の手順」に従って反映す�
   全体も実行する。
 - 反映が終わったら、以下のドキュメント更新まで一連の作業として行う（別途確認不要）：
   - CLAUDE.md「改訂履歴」冒頭の版表記、「既知の未実装・保留事項」（該当があれば）
-  - HTML_REIMPL_CHECKLIST.md「実装状況サマリ」に1行程度で追記
-  - 詳細な反映経緯はHTML_REIMPL_CHECKLIST_ARCHIVE.mdの末尾に追記（1000行超で肥大化していたら
+  - docs/HTML_REIMPL_CHECKLIST.md「実装状況サマリ」に1行程度で追記
+  - 詳細な反映経緯はdocs/HTML_REIMPL_CHECKLIST_ARCHIVE.mdの末尾に追記（1000行超で肥大化していたら
     先に古い区間をARCHIVE2.md相当へ切り出す）
   - doc/文書管理システム_テストチェックリスト.xlsx（第一陣/第二陣/第三陣、doc/はgitリポジトリ
     外）を同じ3ファイル構成のままインプレース改訂。doc/backup_YYYYMMDD/へ退避してから上書き、
@@ -109,7 +109,7 @@ CLAUDE.md「原本改訂を受け取った時の手順」に従って反映す�
 
 ## フェーズ2：xlsxの全行監査（実装漏れの網羅チェック）
 
-過去実績：HTML_REIMPL_CHECKLIST_ARCHIVE2.md「実装とxlsx Rev1.1全文の突合監査・実装漏れ修正
+過去実績：docs/HTML_REIMPL_CHECKLIST_ARCHIVE2.md「実装とxlsx Rev1.1全文の突合監査・実装漏れ修正
 （2026-08-19）」と同じ方式。差分反映（フェーズ1）が「変更点」だけを追うのに対し、こちらは
 xlsx全体を実装と1行ずつ突き合わせて**改訂の有無に関わらない実装漏れ**を洗い出す。
 
@@ -139,45 +139,46 @@ xlsx全体を実装と1行ずつ突き合わせて**改訂の有無に関わら�
    - 低優先度（軽微・見送り候補）
 5. 出力はこの3群分類の一覧のみ（シート名・セル番地・現状・あるべき姿・分類根拠）。
    まだ修正はしない。
-6. この3群分類の一覧を`xlsx_audit_RevX.X.txt`としてプロジェクトルート直下に保存する
-   （review_*.txtと同じ扱い。次工程で`/clear`する前提のため、一覧をセッションの記憶ではなく
-   ファイルに残す）。
+6. この3群分類の一覧を`reviews/xlsx_audit_RevX.X.txt`として保存する
+   （review_*.txtと同じ扱いでreviews/直下。次工程で`/clear`する前提のため、一覧をセッションの
+   記憶ではなくファイルに残す）。
 ```
 
 ### 2-2. 判断が必要な項目の確認
 
 ```
-xlsx_audit_RevX.X.txtの「判断が必要な項目」について、AskUserQuestionで1件ずつ方針を確認する。
-確認後、「対応する」「現状維持」「見送り」のいずれかを確定し、xlsx_audit_RevX.X.txtに
+reviews/xlsx_audit_RevX.X.txtの「判断が必要な項目」について、AskUserQuestionで1件ずつ方針を確認する。
+確認後、「対応する」「現状維持」「見送り」のいずれかを確定し、reviews/xlsx_audit_RevX.X.txtに
 確定結果を反映（追記）する。
 ```
 
 2-1・2-2はここまで同一セッションで進めてよい。2-3（実装）に移る前に、洗い出しの探索ログを
-引きずらないよう**`/clear`を挟む**（`xlsx_audit_RevX.X.txt`に一覧を保存済みなので情報は失われない）。
+引きずらないよう**`/clear`を挟む**（`reviews/xlsx_audit_RevX.X.txt`に一覧を保存済みなので情報は
+失われない）。
 
 ### 2-3. 実装漏れの反映
 
 ```
-xlsx_audit_RevX.X.txtを読んで、「確度の高い実装漏れ」と「判断が必要な項目」のうち
+reviews/xlsx_audit_RevX.X.txtを読んで、「確度の高い実装漏れ」と「判断が必要な項目」のうち
 「対応する」と確定した項目を、1件ずつ実装する。
 フェーズ1の実装ルール（原本フィデリティ運用方針、テスト追加、ドキュメント更新の一連化）に従う。
-「低優先度」に分類した項目は、対応不要と判断した理由をHTML_REIMPL_CHECKLIST_ARCHIVE.mdに
+「低優先度」に分類した項目は、対応不要と判断した理由をdocs/HTML_REIMPL_CHECKLIST_ARCHIVE.mdに
 記録するだけにとどめ、後述フェーズ4の棚卸しで最終判断する。
-対応が終わった項目はxlsx_audit_RevX.X.txtに完了マークを付ける。
+対応が終わった項目はreviews/xlsx_audit_RevX.X.txtに完了マークを付ける。
 ```
 
 ---
 
 ## フェーズ3：models定義の妥当性監査（原本改訂でmodels.pyに影響が出た場合のみ・任意）
 
-詳細テンプレート：MODEL_AUDIT_INSTRUCTION_TEMPLATE.md（既存）。フェーズ1でフィールド追加・
+詳細テンプレート：docs/MODEL_AUDIT_INSTRUCTION_TEMPLATE.md（既存）。フェーズ1でフィールド追加・
 choices変更・制約変更等モデル定義に影響する改訂があった場合、フェーズ4に進む前に軸A（原本
 フィデリティ）だけを対象範囲を絞って再実行すると効率的。全項目の初回実行は完了済み
-（HTML_REIMPL_CHECKLIST.md「models定義 妥当性監査 フェーズ2」参照）ため、通常はここをスキップ
+（docs/HTML_REIMPL_CHECKLIST.md「models定義 妥当性監査 フェーズ2」参照）ため、通常はここをスキップ
 して差分部分だけ見れば足りる。
 
 ```
-MODEL_AUDIT_INSTRUCTION_TEMPLATE.mdの軸A（原本フィデリティ）のテンプレートを、
+docs/MODEL_AUDIT_INSTRUCTION_TEMPLATE.mdの軸A（原本フィデリティ）のテンプレートを、
 今回のRevX.X改訂でフィールド定義に影響した<対象アプリ>のみに絞って実行して。
 出力形式・修正しない旨はテンプレート記載のとおり。
 ```
@@ -186,20 +187,20 @@ MODEL_AUDIT_INSTRUCTION_TEMPLATE.mdの軸A（原本フィデリティ）のテ�
 
 ## フェーズ4：アプリごとの品質チェック
 
-詳細テンプレート：RELEASE_QUALITY_WORKFLOW.md ①〜⑥・⑧（既存、コピー不要でそのまま使う）。
+詳細テンプレート：docs/RELEASE_QUALITY_WORKFLOW.md ①〜⑥・⑧（既存、コピー不要でそのまま使う）。
 
 ```
-RELEASE_QUALITY_WORKFLOW.mdの①〜④テンプレートを対象アプリに対して実行する。
+docs/RELEASE_QUALITY_WORKFLOW.mdの①〜④テンプレートを対象アプリに対して実行する。
 対象は今回のRevX.X改訂・フェーズ1〜2の修正で変更が入ったアプリを優先し、余力があれば
 8アプリ全体（accounts/organizations/masters/documents/contracts/permissions/audit/core）へ
 広げる。
 
 運用は同ファイル⑤の/clearの挟み方（軸ごとに/clear、レポート/修正の間に1回、修正フェーズ内は
 1件ずつ、core等の共通コード変更時のみその回に限りテスト全体実行）に従う。
-レビュー結果はreview_<code/rule/test/security>_<アプリ群>.txtとしてプロジェクトルート直下に
+レビュー結果はreviews/review_<code/rule/test/security>_<アプリ群>.txtとして
 保存しgit管理する（⑥）。④のテストカバレッジ棚卸しはcoverage.pyの実測を併用する（⑧）。
 
-低優先度は「記録のみ」で終わらせず、最後にreview_pending.txtへ集約し1件ずつ
+低優先度は「記録のみ」で終わらせず、最後にreviews/review_pending.txtへ集約し1件ずつ
 「今回は見送り」か「直す」かを判断する棚卸しを行う。
 ```
 
@@ -207,21 +208,21 @@ RELEASE_QUALITY_WORKFLOW.mdの①〜④テンプレートを対象アプリに�
 
 ## フェーズ5：リリースに向けた最終ゲート
 
-詳細テンプレート：RELEASE_QUALITY_WORKFLOW.md ⑦（既存、コピー不要でそのまま使う）。
-release_baseline.txtが無い場合のP0手順（作業ツリーをクリーンにしてから全体テスト・環境情報を
-取得し保存する）は、RELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」を参照する
+詳細テンプレート：docs/RELEASE_QUALITY_WORKFLOW.md ⑦（既存、コピー不要でそのまま使う）。
+reviews/release_baseline.txtが無い場合のP0手順（作業ツリーをクリーンにしてから全体テスト・環境情報を
+取得し保存する）は、docs/RELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」を参照する
 （2026-09-16にP0を実行しrelease_baseline.txtを取得・コミット済み＝コミット62962ea。
 その後にコードへ変更が入った場合はP0からの再取得が必要）。
 フェーズ1〜4の修正がすべてコミットされた状態で、別セッション（`/clear`後）で実行する。
 
 ```
-RELEASE_QUALITY_WORKFLOW.mdの⑦最終ゲートを実行して。対象はmain...HEAD。
-release_baseline.txtが無ければ、先にRELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」の
+docs/RELEASE_QUALITY_WORKFLOW.mdの⑦最終ゲートを実行して。対象はmain...HEAD。
+reviews/release_baseline.txtが無ければ、先にdocs/RELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」の
 手順で取得し、生成後に必ずファイルの存在を確認してから⑦へ進めて。
-結果はRELEASE_PREP_NOTES.mdに追記して。
+結果はdocs/RELEASE_PREP_NOTES.mdに追記して。
 ```
 
-最終ゲートでブロッカーなしと判断できたら、RELEASE_PREP_NOTES.md「1〜6」に記録済みの
+最終ゲートでブロッカーなしと判断できたら、docs/RELEASE_PREP_NOTES.md「1〜6」に記録済みの
 コード側未整備事項（static/js minify・本番初期マスタ投入手段・定期バッチのsettings module
 未指定・SECURE_PROXY_SSL_HEADER未設定・CSV初期パスワードの初回強制変更・監査ログ表記ゆれ）を
 リリース直前に1件ずつ消化する（原本HTML/xlsx起因ではないため、フェーズ0〜4のどこにも含まれない
@@ -231,19 +232,19 @@ release_baseline.txtが無ければ、先にRELEASE_PREP_CHECKLIST_RUN.md「P0. 
 
 ## 補足
 
-- `xlsx_audit_RevX.X.txt`・`review_*.txt`はいずれもプロジェクトルート直下に置きgitで追跡する
+- `xlsx_audit_RevX.X.txt`・`review_*.txt`はいずれも`reviews/`直下に置きgitで追跡する
   （`.gitignore`に加えない）。`/clear`をまたいで参照するための一時ファイルであると同時に、
   「なぜ対応した/見送ったか」の根拠を後から追跡できる記録にもなる。
 
 - フェーズ0〜5は毎回全部を律儀に通す必要はない。原本改訂を伴わない軽微な修正（コード側バグ
   修正等）の場合は、テストチェックリストへの反映をコミット差分から直接起こす形で対応してよい
-  （RELEASE_PREP_NOTES.md「7. P9最終ゲート実行結果」の実例参照）。
+  （docs/RELEASE_PREP_NOTES.md「7. P9最終ゲート実行結果」の実例参照）。
 - フェーズ2（xlsx全行監査）は原本改訂が無い周期でも、リリース前の総仕上げとして単独で依頼して
   よい。
 - **リリース前に全体を完全にチェックしたい場合**は、フェーズ3・4の縮小条件を外してフルスコープ
   で通す：
-  - フェーズ3は「該当時のみ・任意」をやめ、MODEL_AUDIT_INSTRUCTION_TEMPLATE.mdのフェーズ1
-    （1-1〜1-5、5軸×3範囲グループ）を全項目再実行する（前回全項目実行はHTML_REIMPL_CHECKLIST.md
+  - フェーズ3は「該当時のみ・任意」をやめ、docs/MODEL_AUDIT_INSTRUCTION_TEMPLATE.mdのフェーズ1
+    （1-1〜1-5、5軸×3範囲グループ）を全項目再実行する（前回全項目実行はdocs/HTML_REIMPL_CHECKLIST.md
     「models定義 妥当性監査 フェーズ2」時点のスナップショットのため、それ以降の累積変更を拾い
     直す位置づけ）。
   - フェーズ4は「変更が入ったアプリを優先、余力があれば8アプリ全体」ではなく、最初から8アプリ

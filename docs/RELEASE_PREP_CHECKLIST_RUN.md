@@ -1,7 +1,13 @@
 # 本番リリース前チェック：改善版 指示シーケンス
 
+（2026-09-16注記：本ファイルはP1以降の実行当時の指示文をそのまま記録した過去ログのため、
+「プロジェクトルートに保存して」という指示文言はそのまま残している。実際の置き場所は
+2026-09-16以降 `reviews/`（review_*.txt・release_baseline.txt・xlsx_audit_*.txt）と
+`docs/`（*.mdの文書類）に変更済み。次回以降このテンプレートを流用する場合は保存先を
+読み替えること。詳細はdocs/RELEASE_QUALITY_WORKFLOW.md ⑥参照。）
+
 前回実行した指示列（アプリ群ごとに code-review → 規約準拠 → テストカバレッジ、最後に
-security）をベースに、壁打ちで洗い出した穴を埋めた版。RELEASE_QUALITY_WORKFLOW.md の
+security）をベースに、壁打ちで洗い出した穴を埋めた版。docs/RELEASE_QUALITY_WORKFLOW.md の
 軸分離・レポート/修正分離・`/clear` の挟み方の原則はそのまま踏襲する。
 
 追加・変更した点（前回との差分）：
@@ -15,7 +21,7 @@ security）をベースに、壁打ちで洗い出した穴を埋めた版。REL
 共通の前提：
 - venv の python は `C:\Users\yamad\Claude\JA\ja_system\venv\Scripts\python.exe`。
 - テスト実行の cwd は `C:\Users\yamad\Claude\JA\ja_system\ja_pj`。
-- レポートはプロジェクトルート直下に `review_*.txt` で保存し、git 追跡する。
+- レポートは `reviews/` 直下に `review_*.txt` で保存し、git 追跡する。
 - 「レポート生成」と「修正」の間で必ず `/clear`。修正フェーズ内は 1 件ずつ・同一セッション。
 - 各コミットは日本語メッセージ＋末尾 `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`。
 
@@ -35,7 +41,7 @@ security）をベースに、壁打ちで洗い出した穴を埋めた版。REL
 4. 併せて環境情報を記録して：python --version / Django のバージョン /
    python -m pip freeze の出力 / git HEAD のハッシュとブランチ /
    python manage.py makemigrations --check --dry-run の結果。
-5. 上記すべてを release_baseline.txt としてプロジェクトルートに保存して。
+5. 上記すべてを reviews/release_baseline.txt として保存して。
    実行日時・実行コマンド・実行環境・結果サマリ・失敗一覧・環境情報の順で。
 ```
 

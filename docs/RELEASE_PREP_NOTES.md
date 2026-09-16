@@ -12,6 +12,11 @@
 （本番方式が Waitress+NSSM → IIS+httpPlatformHandler+Waitress に変わっている 等）。
 このファイルはその xlsx が扱わない「コード側の未整備・要検討項目」だけを持つ。
 
+（2026-09-16注記：本文中の過去エントリで`review_*.txt`等を「プロジェクトルート直下」と
+記述している箇所は実行当時の状態の記録であり、そのまま残している。2026-09-16以降の
+置き場所は`reviews/`（review_*.txt・release_baseline.txt・xlsx_audit_*.txt）と
+`docs/`（*.mdの文書類）。今後の追記もこの新しい置き場所を前提に書くこと。）
+
 ---
 
 ## 1. static/js の minify（未実装・リリース時に対応）
