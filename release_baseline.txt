@@ -1,0 +1,115 @@
+# リリース前チェック P0：ベースライン
+
+RELEASE_PREP_CHECKLIST_RUN.md「P0. ベースライン確認」に基づき取得。
+以降のフェーズ4〜5（品質チェック・最終ゲート）の全体テスト結果はこのベースラインと突き合わせる。
+
+## 実行日時
+
+2026-09-16 10:19 +0900
+
+## 実行コマンド
+
+```
+（venv: C:\Users\yamad\Claude\JA\ja_system\venv\Scripts\python.exe）
+（cwd: C:\Users\yamad\Claude\JA\ja_system\ja_pj）
+
+python manage.py test --verbosity=2
+python manage.py makemigrations --check --dry-run
+python --version
+python -c "import django; print(django.get_version())"
+python -m pip freeze
+git rev-parse HEAD
+git rev-parse --abbrev-ref HEAD
+```
+
+作業ツリーはクリーンな状態（未コミット変更なし）で実行した。
+
+## 実行環境
+
+- Python: 3.13.11
+- Django: 5.2.9
+- git HEAD: 387572741982f7ea10b62d957413aa9eb89295e4
+- git branch: main
+- `makemigrations --check --dry-run`: `No changes detected`（モデルとマイグレーションの乖離なし）
+
+## 結果サマリ
+
+```
+Ran 1013 tests in 122.104s
+
+OK
+```
+
+- 実行件数: 1013
+- 失敗（failures）: 0
+- エラー（errors）: 0
+
+## 失敗一覧
+
+なし（0件）。
+
+## 環境情報（pip freeze）
+
+```
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
+asgiref==3.11.1
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.0
+charset-normalizer==3.4.9
+click==8.4.2
+colorama==0.4.6
+coloredlogs==15.0.1
+cryptography==49.0.0
+defusedxml==0.7.1
+Django==5.2.9
+django-debug-toolbar==4.4.6
+django-environ==0.11.2
+et_xmlfile==2.0.0
+flatbuffers==25.12.19
+google-api-core==2.33.0
+google-auth==2.56.2
+google-cloud-vision==3.15.0
+googleapis-common-protos==1.75.0
+grpcio==1.83.0
+grpcio-status==1.83.0
+humanfriendly==10.0
+idna==3.18
+magika==0.6.3
+markdownify==1.2.3
+mpmath==1.3.0
+numpy==2.5.2
+onnxruntime==1.20.1
+openpyxl==3.1.5
+packaging==26.3
+pdf2image==1.17.0
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==12.3.0
+proto-plus==1.28.2
+protobuf==7.35.1
+psycopg==3.2.3
+psycopg-binary==3.2.3
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+pyflakes==3.4.0
+pypdf==6.14.2
+pypdfium2==5.12.1
+pyreadline3==3.5.6
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+pywin32==312
+reportlab==5.0.0
+requests==2.34.2
+six==1.17.0
+soupsieve==2.9.2
+sqlparse==0.5.5
+sympy==1.14.0
+typing_extensions==4.16.0
+tzdata==2026.2
+urllib3==2.7.0
+waitress==3.0.2
+whitenoise==6.7.0
+```
