@@ -2,6 +2,7 @@ import io
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import CommandError, call_command
 from django.test import TestCase
 
 from accounts.csv_import_services import CsvImportError, import_staff_csv
@@ -1611,3 +1612,80 @@ class UnauthenticatedAccessRedirectTests(TestCase):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 302)
                 self.assertIn("/accounts/login/", response["Location"])
+
+
+class BootstrapAdminCommandTests(TestCase):
+    """RELEASE_PREP_NOTES.md「2.」：createsuperuserはaccounts.Employee.department（null=False、
+    デフォルト無し）を設定できずNOT NULL制約違反になるため、部署・最初の管理者職員・
+    PermissionProfile(role=ADMIN)を対話式にまとめて作る
+    accounts.management.commands.bootstrap_admin。"""
+
+    def _run(self, inputs, passwords):
+        out, err = io.StringIO(), io.StringIO()
+        with patch("builtins.input", side_effect=inputs), patch("getpass.getpass", side_effect=passwords):
+            call_command("bootstrap_admin", stdout=out, stderr=err)
+        return out.getvalue(), err.getvalue()
+
+    def test_creates_department_employee_and_admin_profile(self):
+        inputs = ["000", "本店", "01", "総務部", "1", "菅理太郎", Rank.KOSAYAKU.value, Position.KACHO.value]
+        passwords = ["Str0ng!Passw0rd-XyZ", "Str0ng!Passw0rd-XyZ"]
+        self._run(inputs, passwords)
+
+        employee = Employee.objects.get(employee_no="1")
+        self.assertTrue(employee.is_staff)
+        self.assertTrue(employee.is_superuser)
+        self.assertEqual(employee.department.branch_code, "000")
+        self.assertEqual(employee.department.section_code, "01")
+        self.assertTrue(employee.check_password("Str0ng!Passw0rd-XyZ"))
+        self.assertEqual(employee.permission_profile.role, PermissionRole.ADMIN)
+
+    def test_refuses_when_employee_already_exists(self):
+        department = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        Employee.objects.create_user(
+            employee_no="9",
+            name="既存太郎",
+            password="x",
+            department=department,
+            rank=Rank.KOSAYAKU,
+            position=Position.KACHO,
+        )
+        with self.assertRaises(CommandError):
+            self._run([], [])
+
+    def test_rejects_mismatched_password_confirmation_and_retries(self):
+        inputs = ["000", "本店", "01", "総務部", "1", "菅理太郎", Rank.KOSAYAKU.value, Position.KACHO.value]
+        passwords = [
+            "Str0ng!Passw0rd-XyZ",
+            "different-value",
+            "Str0ng!Passw0rd-XyZ",
+            "Str0ng!Passw0rd-XyZ",
+        ]
+        self._run(inputs, passwords)
+        self.assertTrue(Employee.objects.filter(employee_no="1").exists())
+
+    def test_rejects_common_password_and_retries(self):
+        inputs = ["000", "本店", "01", "総務部", "1", "菅理太郎", Rank.KOSAYAKU.value, Position.KACHO.value]
+        passwords = ["password", "password", "Str0ng!Passw0rd-XyZ", "Str0ng!Passw0rd-XyZ"]
+        self._run(inputs, passwords)
+        self.assertTrue(Employee.objects.filter(employee_no="1").exists())
+
+    def test_reuses_existing_department_when_branch_and_section_match(self):
+        Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        inputs = [
+            "000",
+            "本店（無視される）",
+            "01",
+            "総務部（無視される）",
+            "1",
+            "菅理太郎",
+            Rank.KOSAYAKU.value,
+            Position.KACHO.value,
+        ]
+        passwords = ["Str0ng!Passw0rd-XyZ", "Str0ng!Passw0rd-XyZ"]
+        self._run(inputs, passwords)
+        self.assertEqual(Department.objects.count(), 1)
+        self.assertEqual(Department.objects.get().branch_name, "本店")

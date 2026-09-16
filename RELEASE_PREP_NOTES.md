@@ -106,6 +106,45 @@
 文書・契約書のダミーは作らない）。どれで行くか決めてから本番構築手順を確定する。旧実装 README の
 `seed_demo` は現行に存在しない。
 
+### 対応済み（2026-09-16）
+
+ユーザー判断：(c) 専用シードコマンドを新設。実装中に、この項目の範囲を超える**本番構築手順
+そのものを止めるバグ**を発見したため、あわせて対応した。
+
+**新規発見：`createsuperuser`が本番手順として実行不能**——`accounts.Employee.department`は
+`null=False`・デフォルト無しの必須外部キーだが、`EmployeeManager.create_superuser`
+（`accounts/models.py`）は`department`・`rank`・`position`のいずれも設定しない。これらは
+`USERNAME_FIELD`/`REQUIRED_FIELDS`（`employee_no`/`name`のみ）に含まれないため、Django標準の
+`createsuperuser`は対話プロンプトで`department`を聞かず、`department_id=NULL`のままINSERTしようと
+して**NOT NULL制約違反で失敗する**。部署が1件も無いフレッシュDBでは、部署管理・権限管理画面への
+アクセス自体に管理者権限が必要という循環依存があり、`organizations.Department`のDjango管理サイト
+登録も閲覧専用（`ReadOnlyModelAdmin`）、`accounts.Employee`は管理サイト未登録のため、他の経路でも
+回避できない。旧`環境構築・実装手順書.xlsx`のシート2手順10・シート5手順7が案内していた
+「`migrate` → `createsuperuser`」は、この2手順の通りには実行できなかった。
+
+**対応**：
+- `accounts/management/commands/bootstrap_admin.py`を新設。`createsuperuser`の代わりに、
+  部署・最初の管理者職員（`is_staff`/`is_superuser=True`）・権限プロファイル
+  （`PermissionProfile(role=ADMIN)`）を1回のトランザクションでまとめて対話作成する。
+  職員が1件でも既に存在する場合は`CommandError`で中断（2人目以降は通常の職員マスタ画面
+  `/accounts/staff/regist/`を使う）。パスワードは`django.contrib.auth.password_validation.
+  validate_password`（`AUTH_PASSWORD_VALIDATORS`）で検証し、不一致・弱いパスワードは再入力を促す。
+- `core/management/commands/seed_initial_masters.py`を新設。保存期間設定マスタ
+  （文書用：1ヵ月/1年/3年/5年/10年/永年、`kbn=DOCUMENT`のみ）を`get_or_create`でべき等に投入する。
+  契約書は選択式ではなく`settings.CONTRACT_RETENTION_YEARS`で固定年数、電子決裁は恒久的に
+  スコープ外のため、いずれも投入対象に含めない。`accounts.Rank`/`Position`はDjangoの
+  `TextChoices`としてコードに保持するのみでDBマスタではないため、投入対象そのものが存在しない
+  （item2原文の「部署・職位・職階の初期データ」のうち、DBシードが実際に必要なのは部署のみで、
+  それは`bootstrap_admin`が最初の1件を、以降は通常の部署管理画面が担う）。
+- `環境構築・実装手順書.xlsx`（`doc/文書管理システム_環境構築・実装手順書.xlsx`）シート2手順10
+  （開発PC）・シート5手順7（本番）とも`createsuperuser`を`seed_initial_masters`＋
+  `bootstrap_admin`の実行に置き換えた（編集前に`doc/backup_20260916/`へバックアップ済み）。
+- テスト：`accounts.tests.BootstrapAdminCommandTests`（部署・職員・権限プロファイルの作成、
+  既存職員がいる場合の拒否、パスワード不一致・弱いパスワードでの再入力、既存部署の再利用）・
+  `core.tests.SeedInitialMastersCommandTests`（投入内容・べき等性・契約書/電子決裁を触らないこと）
+  を追加。実DB（開発環境、既存職員5件）で`bootstrap_admin`実行時に想定通り`CommandError`で
+  拒否されることも確認。全体1031件PASS。
+
 ---
 
 ## 3. 定期実行バッチ4本が dev settings で実行される
@@ -193,6 +232,13 @@ accounts/csv_import_services.py の新規職員は初期パスワード `ja` ＋
 簡易設計指示書の当該箇所（職員マスタ B117-119）が「要再確認（赤字）」でないか、
 業務要件の最終確認とあわせてチェックする。
 
+### 対応方針確定（2026-09-16）
+
+ユーザー判断：(a) 運用で対応。初回ログイン強制変更機能は実装せず、**リリース直後に全職員へ
+「初期パスワードの一括変更依頼」を通知する運用ルール**とする。原本HTML/xlsxに存在しない画面を
+追加しない、という原本フィデリティ方針とも整合する。運用手順書（リリース手順書側）への
+通知タスク追記は本ファイルのスコープ外（xlsx側で管理）。
+
 ---
 
 ## 6. 監査 action 文言の半角→全角スペース統一による既存 AuditLog の表記ゆれ
@@ -210,6 +256,12 @@ accounts/csv_import_services.py の新規職員は初期パスワード `ja` ＋
 - 既にリリース済みの環境へ後追い適用する場合のみ、既存 AuditLog の action を一括 UPDATE で
   旧表記→新表記へ揃えるか、表記ゆれを許容するかを決める（RunPython マイグレーション or
   管理コマンドを用意）。
+
+### 対応方針確定（2026-09-16）
+
+ユーザー確認：本システムは新規リリース（既存本番のAuditLogを引き継がない）。統一済みの表記だけが
+入るため**対応不要で確定**。既存本番環境からの移行が発生するケースが将来出た場合のみ、上記の
+一括UPDATE要否を改めて判断する。
 
 ---
 

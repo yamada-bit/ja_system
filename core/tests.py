@@ -2557,3 +2557,43 @@ class MinifyStaticJsCommandTests(TestCase):
             with override_settings(BASE_DIR=Path(tmp)):
                 with self.assertRaises(CommandError):
                     call_command("minify_static_js")
+
+
+class SeedInitialMastersCommandTests(TestCase):
+    """RELEASE_PREP_NOTES.md「2.」本番の初期マスタデータ投入。
+    core.management.commands.seed_initial_masters。"""
+
+    def test_creates_document_retention_periods(self):
+        call_command("seed_initial_masters")
+
+        periods = list(
+            RetentionPeriod.objects.filter(kbn=RetentionKbn.DOCUMENT, doc_name="", is_deleted=False).order_by(
+                "display_order"
+            )
+        )
+        self.assertEqual(
+            [(p.period_value, p.period_unit) for p in periods],
+            [
+                (1, RetentionPeriodUnit.MONTH),
+                (1, RetentionPeriodUnit.YEAR),
+                (3, RetentionPeriodUnit.YEAR),
+                (5, RetentionPeriodUnit.YEAR),
+                (10, RetentionPeriodUnit.YEAR),
+                (None, RetentionPeriodUnit.PERMANENT),
+            ],
+        )
+
+    def test_rerun_is_idempotent(self):
+        call_command("seed_initial_masters")
+        call_command("seed_initial_masters")
+
+        self.assertEqual(
+            RetentionPeriod.objects.filter(kbn=RetentionKbn.DOCUMENT, doc_name="", is_deleted=False).count(),
+            6,
+        )
+
+    def test_does_not_touch_eapproval_or_contract_scope(self):
+        """電子決裁（kbn=EAPPROVAL）は恒久的にスコープ外、契約書は選択式ではなく固定年数
+        （settings.CONTRACT_RETENTION_YEARS）のため、このコマンドはdocument以外を一切作らない。"""
+        call_command("seed_initial_masters")
+        self.assertFalse(RetentionPeriod.objects.exclude(kbn=RetentionKbn.DOCUMENT).exists())
