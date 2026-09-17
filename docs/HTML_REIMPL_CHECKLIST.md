@@ -328,6 +328,13 @@ Rev1.1〜1.3期、それより前）の3ファイルに切り出した（2026-08
   （`masters.views.GroupDeleteView.blocking_count()`に配下カテゴリー件数を追加）。`manage.py test
   masters`134件PASS。詳細はARCHIVE.md「簡易設計指示書 Rev1.6 全行監査（xlsx全行監査フェーズ2）」節、
   一覧は`xlsx_audit_Rev1.6.txt`参照。
+- ソースコード規模の棚卸し（2026-09-17、ユーザー確認依頼）：Python（8アプリ＋config、migrations・
+  tests.py除く）約14,600行／tests.py約17,700行の計約32,300行（133ファイル）。アプリ別行数は
+  core（共通基盤）7,845／contracts 6,710／documents 5,923／masters 3,611／accounts 3,047／
+  permissions 2,234／organizations 1,592／config 460。フロントエンドは自前実装分のみで
+  テンプレート約4,830行（41ファイル）／自前JS約1,730行（`common.js`が1,054行）／自前CSS約1,380行
+  （`collectstatic`出力の`staticfiles/`とDjango管理サイト同梱JS/CSSは規模外）。migrations
+  16ファイル449行（本番リリース前運用のため`0001_initial`集約）。git管理下の総ファイル数245。
 
 ## 継続タスク
 - [ ] 新機能追加のたびにユニットテスト追加
