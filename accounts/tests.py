@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import CommandError, call_command
+from django.db import IntegrityError
 from django.test import TestCase
 
 from accounts.csv_import_services import CsvImportError, import_staff_csv
@@ -243,9 +244,6 @@ class ResetPermissionProfileTests(TestCase):
     def setUp(self):
         self.dept1 = Department.objects.create(
             branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
-        )
-        self.dept2 = Department.objects.create(
-            branch_code="777", branch_name="テスト支店", section_code="", section_name=""
         )
         self.employee = Employee.objects.create_user(
             employee_no="4444", name="権限太郎", password="x",
@@ -1670,6 +1668,21 @@ class BootstrapAdminCommandTests(TestCase):
         passwords = ["password", "password", "Str0ng!Passw0rd-XyZ", "Str0ng!Passw0rd-XyZ"]
         self._run(inputs, passwords)
         self.assertTrue(Employee.objects.filter(employee_no="1").exists())
+
+    def test_rolls_back_and_reports_command_error_on_db_error_during_creation(self):
+        """トランザクション内（PermissionProfile作成時点）でdjango.db.Errorが起きた場合、
+        部署・職員も含めて全てロールバックされ、利用者にはCommandErrorとして伝わること
+        （bootstrap_admin.py の except DjangoDbError 節）。"""
+        inputs = ["000", "本店", "01", "総務部", "1", "菅理太郎", Rank.KOSAYAKU.value, Position.KACHO.value]
+        passwords = ["Str0ng!Passw0rd-XyZ", "Str0ng!Passw0rd-XyZ"]
+        with patch(
+            "permissions.models.PermissionProfile.objects.create",
+            side_effect=IntegrityError("duplicate key value violates unique constraint"),
+        ):
+            with self.assertRaises(CommandError):
+                self._run(inputs, passwords)
+        self.assertFalse(Employee.objects.exists())
+        self.assertFalse(Department.objects.exists())
 
     def test_reuses_existing_department_when_branch_and_section_match(self):
         Department.objects.create(

@@ -2784,10 +2784,6 @@ class UploadStep2FormGroupCategoryScopeTests(TestCase):
         self.own_group = Group.objects.create(
             code="A", name="自部署の分類", doc_kbn=DocKbn.CONTRACT, department=self.department
         )
-        self.own_category = Category.objects.create(
-            code="001", name="自部署のカテゴリー", group=self.own_group, doc_kbn=DocKbn.CONTRACT,
-            department=self.department,
-        )
         self.other_group = Group.objects.create(
             code="B", name="他部署の分類", doc_kbn=DocKbn.CONTRACT, department=self.other_department
         )
