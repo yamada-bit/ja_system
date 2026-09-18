@@ -485,12 +485,23 @@ review_pending.txt を「全61項目を一律見送り」の2026-08-26スナッ�
     見せる。docstringに「移行前データの退行防止のための意図的な暫定措置」と明記済み。既存データの
     部署バックフィルが完了しているか確認の上、完了後はこの分岐を外す想定。（★要追跡）
     (出典: review_code_organizations_masters.txt)
+    → 2026-09-18確認・対応済み：開発DBのdepartment未設定行（Group4件・Category4件、いずれも
+      Rev1.2以前のレガシーテストデータ）をdepartment=1（本店/総務部）へバックフィルし0件化した。
+      加えて`doc/文書管理システム_残項目_本番リリース手順書.xlsx`③本番リリース手順チェックリスト
+      D16に「本番未リリース（既存データ無し）」と明記されており、旧システムからのデータ移行手順も
+      存在しないため、本番は空DBから開始しレガシーNULL行自体が発生しない見込み。コード側の
+      「NULLも含める」分岐（scope_queryset_by_department）は実害が無くなったため据え置きで良いが、
+      分岐自体の削除は今回は行わない（★要追跡から解除、対応不要で確定）。
 
 20. masters/services.py:9-22（department_scope_ids）がemployee.department_id未設定（None）時に
     {None}を返し、上記19と組み合わさると「department未設定行のみ見える」状態になり得る
     （エラー・警告なく静かに発生）。accounts.Employee側のdepartment必須制約が保証されているか
     確認できれば実害は無い。（★要追跡）
     (出典: review_code_organizations_masters.txt)
+    → 2026-09-18確認・対応不要で確定：accounts/models.py:84-89のEmployee.departmentは
+      `null=True`を付けない必須ForeignKey（on_delete=PROTECT）であり、フォーム・ORMいずれの経路
+      でもdepartment未設定のEmployeeを作成できない。開発DBでも0/5件がNULLであることを確認済み。
+      モデル制約により保証されているため実害無し、★要追跡を解除。
 
 21. masters/views.py:33-47,303-312（_group_queryset_with_counts / _category_queryset_with_counts）
     がdoc_count/contract_countを全行で毎回両方集計し、doc_kbnに応じて片方だけ採用（もう片方は
@@ -993,7 +1004,7 @@ review_security）の見送り注記を1件ずつ確認し、「見送り」に�
   ・U-33〜U-37 は2026-09-10の所感レビューで見送り→直すへ格上げした5件（実装済み）
    （U-33=#82／U-34=#46+#98+#107+S2(b)／U-35=#113／U-36=#106／U-37=#63+#64）。
 
-★要追跡: #19・#20（部署バックフィル完了後に分岐を外す想定）
+★要追跡: なし（#19・#20は2026-09-18に開発DBバックフィル・モデル制約確認の上、対応不要で確定・解除）
 
 本ファイルは2026-09-10の判断セッション反映版。将来これらの経路を直接使う変更が入る場合は、
 その時点で出典の review_*.txt を再確認し、テスト追加・修正の要否を再検討すること。
