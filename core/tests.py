@@ -20,7 +20,7 @@ from pypdf import PdfReader, PdfWriter
 
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
-from core import ocr_layout_services, pdf_text_embed_services
+from core import ocr_layout_services, pdf_text_embed_services, searchable_pdf_services
 from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from core.file_type_services import is_image_filename
 from core.upload_validation import blocked_upload_message
@@ -2027,6 +2027,29 @@ class PdfTextEmbedServicesTests(TestCase):
         result_bytes = pdf_text_embed_services.embed_textdatas_into_pdf(original_bytes, textdatas)
         reader = PdfReader(BytesIO(result_bytes))
         self.assertEqual(len(reader.pages), 1)
+
+
+class SearchablePdfServicesTests(TestCase):
+    """core.searchable_pdf_services.build_searchable_pdf（監査 案3）の直接呼び出しテスト。
+    documents/contracts側のビューテスト（SearchablePdfViewTests等）はこの関数自体をモック化して
+    権限・404・監査ログだけを見ているため、ocr_textdata読み出し→埋め込みの実処理を通しで
+    検証するテストがここに無いとカバレッジの穴になる。ocr_textdata・fileの2属性しか使わないため
+    Document/Contractモデルは使わずSimpleNamespaceで代用する。"""
+
+    def test_embeds_textdata_from_real_object_attributes(self):
+        original_bytes = PdfTextEmbedServicesTests._make_blank_pdf_bytes(1)
+        obj = SimpleNamespace(
+            ocr_textdata=[{"page": 1, "w": 1000, "h": 1000, "lines": [[10, 10, 100, 40, "テスト"]]}],
+            file=SimpleNamespace(open=lambda mode: BytesIO(original_bytes)),
+        )
+        result_bytes = searchable_pdf_services.build_searchable_pdf(obj)
+        reader = PdfReader(BytesIO(result_bytes))
+        self.assertEqual(len(reader.pages), 1)
+
+    def test_raises_when_ocr_textdata_empty(self):
+        obj = SimpleNamespace(ocr_textdata=None, file=None)
+        with self.assertRaises(searchable_pdf_services.SearchablePdfUnavailable):
+            searchable_pdf_services.build_searchable_pdf(obj)
 
 
 class ExtractPendingPdfTextCommandTests(TestCase):
