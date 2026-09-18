@@ -1031,3 +1031,43 @@ xlsx/原本HTMLに直接の記載が無い業務ロジックのため、CLAUDE.m
 - 契約金額欄の下限バリデーション欠如は`review_pending.txt`での追跡を継続（対応せず）。
 
 いずれも詳細な検討根拠は`xlsx_audit_Rev1.6.txt`（プロジェクトルート直下、gitで追跡）参照。
+
+## アプリ全体CSP・MEDIA別オリジン配信の再検討（2026-09-18、ユーザー依頼）
+
+H-3対応（2026-08-28、`docs/HTML_REIMPL_CHECKLIST_ARCHIVE3.md`参照）で「中期対応」として見送っていた
+2項目を`review_pending.txt`の未確認事項棚卸しの一環で再検討した。
+
+### MEDIA別オリジン配信 → 対応不要で確定
+
+`config/urls.py`を確認したところ、`static(settings.MEDIA_URL, ...)`のようなMEDIA直配信の仕組み自体が
+存在しない。文書・契約書ファイルへのアクセスは全て認証・権限チェック付きのDjangoビュー
+（`core/record_views.py BaseFileServeView`等）経由でのみ行われ、そこで既にH-3対応により：
+- 安全な種別（PDF・ラスター画像）以外は`resolve_as_attachment()`で強制的に`attachment`扱い（inline表示させない）
+- 全レスポンスに`apply_file_response_security_headers()`で`X-Content-Type-Options: nosniff`＋
+  `Content-Security-Policy: script-src 'none'; object-src 'none'`を付与
+- アップロード側で`core/upload_validation.py BLOCKED_UPLOAD_EXTENSIONS`によりHTML/SVG/JS等の
+  危険拡張子を拒否
+
+という多層防御が入っている。「MEDIA別オリジン配信」が本来防ぎたかった「静的ファイルサーバーが
+認証なしでアップロードファイルをそのまま生配信し、悪意あるファイルが同一オリジンで実行される」
+というシナリオ自体が、現状のアーキテクチャ（生配信の経路が無く、全経路がハードニング済み
+ビュー経由）で構造的に発生し得ないと判断し、対応不要で確定した。
+
+**前提条件（再検討が必要になる場合）**：将来、性能上の理由でnginx等がMEDIA_ROOTを直接静的配信する
+ようになった場合はこの判断を見直すこと。
+
+### アプリ全体CSP → 中期対応のまま維持、リリース後の技術的負債として明示
+
+テンプレート全体を`grep`で調べたところ、`onclick`だけで194件、`onchange`/`onkeydown`/`oninput`等を
+含めると約250件のインラインイベントハンドラが40テンプレートに分散している（原本HTMLの構造を
+そのまま引き継いだもの）。厳格なCSP（`script-src`に`unsafe-inline`を含めない）を導入するには
+この250件全てを`addEventListener`方式（`common.js`のイベント委譲パターン等）へ移行する必要があり、
+リリース前に着手するには規模・リグレッションリスクが大きすぎると判断した。
+
+一方、実際に見つかっていたXSS脆弱性（H-1/H-2：検索結果詳細・行クリックプレビューの格納型XSS）は
+既に根本原因（`innerHTML`直代入）を`escapeHtml`／DOM API化で修正済み（2026-09-04反映、上記参照）。
+CSPはその上に重ねる多層防御であり、「今アプリ全体CSPが無いと防げない具体的な脆弱性」が
+残っているわけではないため、リリースをブロックする理由はないと判断した。
+
+**結論**：中期対応のまま維持するが、「リリース後の技術的負債」として明示的にスケジュール化する
+（インラインハンドラのイベントリスナー移行は独立した別プロジェクトとして扱う）。コード変更なし。
