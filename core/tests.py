@@ -21,6 +21,7 @@ from pypdf import PdfReader, PdfWriter
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
 from core import ocr_layout_services, pdf_text_embed_services, searchable_pdf_services
+from core.double_submit import consume_token, issue_token
 from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from core.file_type_services import is_image_filename
 from core.upload_validation import blocked_upload_message
@@ -1114,6 +1115,33 @@ class OtherMainEditViewTests(TestCase):
         self.assertTrue(AuditLog.objects.filter(action="自動ログアウト時間設定　更新").exists())
 
 
+class DoubleSubmitServicesTests(TestCase):
+    """core.double_submit（二重送信対策トークン）の単体テスト。各アプリのtests.pyには
+    不正トークン時の失敗分岐（consume_tokenがFalseを返すケース）は多数あるが、本来の目的
+    である「正当なトークンの単回使用」（同じトークンでの2回目のconsume_tokenは失敗する＝
+    ブラウザの戻る+再送信・二度押しを弾く）自体を検証するテストがどこにも無かった
+    （review_test_permissions_accounts.txt X-3、2026-09-18追加）。"""
+
+    def setUp(self):
+        self.session = SessionStore()
+        self.session.create()
+
+    def test_valid_token_can_only_be_consumed_once(self):
+        token = issue_token(self.session, "test_form")
+        self.assertTrue(consume_token(self.session, "test_form", token))
+        # 同じトークンでの2回目のconsume_token（＝ブラウザの戻る+再送信や二度押し）は失敗する。
+        self.assertFalse(consume_token(self.session, "test_form", token))
+
+    def test_reissuing_token_invalidates_the_previous_one(self):
+        """同じform_idでissue_tokenを再度呼ぶと（フォームの再表示等）、古いトークンは
+        もう使えなくなる（tokens[form_id]が上書きされるため）。"""
+        old_token = issue_token(self.session, "test_form")
+        new_token = issue_token(self.session, "test_form")
+        self.assertNotEqual(old_token, new_token)
+        self.assertFalse(consume_token(self.session, "test_form", old_token))
+        self.assertTrue(consume_token(self.session, "test_form", new_token))
+
+
 class OtherViewsDoubleSubmitTokenTests(TestCase):
     """organizations/masters/permissions/accountsの各Viewは二重送信対策トークン不正時分岐
     （core.double_submit.consume_tokenがFalseを返すケース）を自アプリのtests.pyで検証済みだが、
@@ -1165,6 +1193,27 @@ class OtherViewsDoubleSubmitTokenTests(TestCase):
         messages_list = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("二重に送信された可能性" in m for m in messages_list))
         self.assertFalse(AuditLog.objects.filter(action="自動ログアウト時間設定　更新").exists())
+
+    def test_other_logout_edit_rejects_resubmission_of_the_same_valid_token(self):
+        """X-3：不正トークンではなく「正当なトークンの2回目送信」（ブラウザの戻る+再送信・
+        二度押し）自体を実際のビュー経由（E2E）で拒否できることを検証する。"""
+        PermissionProfile.objects.create(employee=self.employee, role=PermissionRole.ADMIN)
+        token = self.client.get("/settings/other/logout/edit/").context["token"]
+
+        self.client.post(
+            "/settings/other/logout/edit/",
+            {"token": token, "session_idle_timeout_minutes": "45"},
+        )
+        self.assertEqual(SystemSetting.load().session_idle_timeout_minutes, 45)
+
+        response = self.client.post(
+            "/settings/other/logout/edit/",
+            {"token": token, "session_idle_timeout_minutes": "90"},
+            follow=True,
+        )
+        messages_list = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("二重に送信された可能性" in m for m in messages_list))
+        self.assertEqual(SystemSetting.load().session_idle_timeout_minutes, 45)
 
 
 class OtherViewsDatabaseWriteFailureTests(TestCase):
