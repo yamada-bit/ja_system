@@ -281,11 +281,17 @@ U-31. [S3／review_security.txt 参考 I-1] コード修正対象外。RELEASE_P
       新規登録される職員の初期パスワード」に、リリース時の確認事項（(a)一括変更依頼 / (b)初回強制
       変更の実装）として記載。review_security.txt I-1 も更新。
       対応済み（リリース前に P8 で対応）
+      → 2026-09-16対応方針確定済み（RELEASE_PREP_NOTES.md「5.」）：ユーザー判断は(a)。初回ログイン
+        強制変更は実装せず、リリース直後に全職員へ「初期パスワードの一括変更依頼」を通知する運用
+        ルールとする。原本HTML/xlsxに無い画面を追加しない方針とも整合。コード変更なし。
 
 U-32. [C13／review_code_permissions_accounts No.4] コード修正対象外。RELEASE_PREP_NOTES.md「6. 監査
       action 文言の半角→全角スペース統一による既存 AuditLog の表記ゆれ」に、リリース時の判断
       （初回投入なら作業不要／後追い適用時のみ既存 AuditLog の一括 UPDATE か表記ゆれ許容）として記載。
       対応済み（リリース前に P8 で対応）
+      → 2026-09-16対応方針確定済み（RELEASE_PREP_NOTES.md「6.」）：本システムは新規リリース
+        （既存本番のAuditLogを引き継がない）ため統一済み表記のみが入る。対応不要で確定。既存
+        本番環境からの移行が将来発生する場合のみ一括UPDATE要否を改めて判断する。
 
 
 ================================================================================
@@ -720,6 +726,8 @@ review_security）の見送り注記を1件ずつ確認し、「見送り」に�
 50. [review_code_documents_contracts.txt No.8] contracts/api.py:25 RELATED_SEARCH_LIMIT = 50 が
     .env 未経由のモジュール定数。SearchView.PAGE_SIZE=100 / DELETE_WINDOW_DAYS と同じ
     「容易に変更しない内部定数」の前例あり。env 化するかはユーザー確認事項。
+    → 2026-09-18ユーザー確認・現状維持で確定。SearchView.PAGE_SIZE等と同じ内部定数として
+      .env化しない。コード変更なし（詳細は review_code_documents_contracts.txt No.8参照）。
 51. [review_rule_doc_contract.txt No.2] contracts/views.py の再描画ヘルパー
     （_resolve_related_rows・_related_rows_for_contract・_merge_related_into_field_sets・
     _remap_related_ids_after_remove）が DB 引き当てを含むのに services.py 未分離。保存側検証
