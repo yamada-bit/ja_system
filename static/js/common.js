@@ -851,10 +851,19 @@ function renderDetailPopup(data, kind) {
       mockBody.style.display = "none";
     }
   } else if (data.preview_kind === "image" || data.preview_kind === "pdf") {
-    // 画像／PDFだが権限不足でpreview_urlが渡っていない（documents/contracts.api.DetailAPIView
-    // 参照）。documents/edit.html・storage2.htmlと同じ理由（2026-08-13ユーザー報告対応）。
-    const permissionLabel = kind === "contract" ? "契約書-ダウンロード" : "文書-ダウンロード";
-    previewDenied.textContent = `プレビューを表示するには「${permissionLabel}」権限が必要です。権限管理画面でご確認ください。`;
+    // 画像／PDFだがpreview_urlが渡っていない（documents/contracts.api.DetailAPIView参照）。
+    // preview_urlは「can_download権限がある」かつ「is_deletedでない」の両方を満たす時だけ
+    // 埋まるため、原因が権限不足なのか削除済みなのかで文言を分ける。メイン画面お知らせ
+    // 「直近Xヵ月以内で削除された文書/契約書」一覧から開いた詳細ポップアップだと、
+    // ダウンロード権限を持つ利用者でもis_deleted=Trueによりpreview_urlがNoneになるため、
+    // 分けずに固定文言のままだと権限不足と誤解させてしまう（showSearchPreview()の
+    // isDeleted分岐と同じ考え方。2026-09-25ユーザー報告対応）。
+    if (data.is_deleted) {
+      previewDenied.textContent = `本${label}は削除されているため、プレビューを表示できません。`;
+    } else {
+      const permissionLabel = kind === "contract" ? "契約書-ダウンロード" : "文書-ダウンロード";
+      previewDenied.textContent = `プレビューを表示するには「${permissionLabel}」権限が必要です。権限管理画面でご確認ください。`;
+    }
     previewDenied.style.display = "block";
     mockBody.style.display = "none";
   }
