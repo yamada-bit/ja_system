@@ -184,16 +184,28 @@ def document_edit_is_dirty(doc, cleaned_data, employee) -> bool:
     )
 
 
-def expiry_date_previews(retention_periods) -> dict[str, str]:
+def expiry_date_previews(retention_periods) -> dict[str, dict]:
     """保管画面２・編集画面の保存満了日プレビュー（JS `calculateExpiryDate()`）用。
     基準日は「保存した日」で、実際の登録/更新時に使う`save_date`/`timezone.localdate()`と
     同じく常に今日の日付（2026-08-20ユーザー確認：保存満了日＝保存した日+保存期間。
     保管画面２の「年」欄は文書の業務上の年を表すだけで、保存満了日の計算には使わない）。
     calculate_expiry_date()をそのまま再利用することで、JS側に同じ日付計算ロジックを
     二重実装せずに済ませる。
+
+    `permanent`（原本index.html:851 `if (period === 99) { span.textContent = "（有効期限：永年）"; }`）
+    をpkごとに含める。`iso`自体はDB保存用に`calculate_expiry_date()`が返す実日付
+    （`settings.RETENTION_PERMANENT_YEARS`年後）のままだが、UIプレビューはこの実装都合の
+    日付を利用者に見せず原本通り「永年」の文字列表示に固定する（2026-09-28ユーザー報告で
+    保管画面２のプレビューが計算後の日付になっていた不具合を修正）。
     """
     today = timezone.localdate()
-    return {str(rp.pk): calculate_expiry_date(today, rp).isoformat() for rp in retention_periods}
+    return {
+        str(rp.pk): {
+            "iso": calculate_expiry_date(today, rp).isoformat(),
+            "permanent": rp.period_unit == RetentionPeriodUnit.PERMANENT,
+        }
+        for rp in retention_periods
+    }
 
 
 def calculate_expiry_date(save_date: datetime.date, retention_period) -> datetime.date:

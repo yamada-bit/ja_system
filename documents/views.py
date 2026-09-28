@@ -508,8 +508,8 @@ def _strip_ext(filename):
 
 def _expiry_preview_context(form):
     """storage2.html・edit.htmlの保存満了日プレビュー用。formの`retention_period`選択肢に
-    対する{pk: ISO日付文字列}を渡し、JS側はこれを引くだけで済むようにする（documents.services.
-    expiry_date_previews docstring参照）。
+    対する{pk: {"iso": ISO日付文字列, "permanent": bool}}を渡し、JS側はこれを引くだけで
+    済むようにする（documents.services.expiry_date_previews docstring参照）。
 
     保管画面２（新規保管）はメタデータがファイルごと（`retention_period_0`,…）になるため
     無添字フィールドが無い。選択肢（queryset）は全ファイル共通なので`retention_period_0`を

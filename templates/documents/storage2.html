@@ -286,12 +286,18 @@
     const span = document.getElementById('expiry-date-calc-' + idx);
     if (!periodSelect || !span) return;
     const previews = JSON.parse(document.getElementById('expiry-previews').textContent);
-    const iso = previews[periodSelect.value];
-    if (!iso) {
+    const preview = previews[periodSelect.value];
+    if (!preview) {
       span.textContent = '';
       return;
     }
-    const [y, m, d] = iso.split('-').map((s) => parseInt(s, 10));
+    // 原本index.html:851 相当。「永年」は実際の満了日（+RETENTION_PERMANENT_YEARS年）を
+    // 利用者に見せず、原本通り固定文言にする。
+    if (preview.permanent) {
+      span.textContent = '（有効期限：永年）';
+      return;
+    }
+    const [y, m, d] = preview.iso.split('-').map((s) => parseInt(s, 10));
     span.textContent = `（有効期限：${y}年${m}月${d}日）`;
   };
 

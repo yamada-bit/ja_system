@@ -198,9 +198,16 @@
     const periodSelect = document.getElementById('storage-period');
     const span = document.getElementById('expiry-date-calc');
     const previews = JSON.parse(document.getElementById('expiry-previews').textContent);
+    const preview = previews[periodSelect.value];
+    // 原本index.html:851 相当。「永年」は変更前後・実際の満了日（+RETENTION_PERMANENT_YEARS年）に
+    // 関わらず、原本通り固定文言を優先する（storage2.htmlのcalculateExpiryDate参照）。
+    if (preview && preview.permanent) {
+      span.textContent = '（有効期限：永年）';
+      return;
+    }
     const cfg = document.getElementById('expiry-edit-config');
     const unchanged = cfg && String(periodSelect.value) === cfg.dataset.originalRetention;
-    const iso = unchanged ? cfg.dataset.currentExpiry : previews[periodSelect.value];
+    const iso = unchanged ? cfg.dataset.currentExpiry : (preview && preview.iso);
     if (!iso) {
       span.textContent = '';
       return;
