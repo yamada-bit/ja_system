@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.env.prod
 web.config
 db.sqlite3
 /media/

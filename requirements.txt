@@ -3,6 +3,11 @@ psycopg[binary]==3.2.3
 django-environ==0.11.2
 whitenoise==6.7.0
 argon2-cffi==25.1.0
+# waitress: 本番のWSGIサーバー（web.configのhttpPlatformが`-m waitress`で直接起動。開発は
+# manage.py runserverを使うためrequirements.txtへの記載漏れに気付きにくかった。本番サーバー
+# 構築時に実機で「No module named waitress」が発生し判明。--trusted-proxy系オプション
+# （X-Forwarded-Proto等の信頼設定、web.config参照）に対応する3.0系を指定）。
+waitress==3.0.2
 # 全文検索基盤（core.management.commands.extract_pending_pdf_text）。
 # pdfplumber: テキスト層のあるPDFからの本文抽出。
 # google-cloud-vision: スキャンPDF（画像PDF）のOCR。
