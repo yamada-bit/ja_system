@@ -2,7 +2,10 @@ import logging
 import uuid
 
 from django.contrib import messages
+from django.db import IntegrityError, transaction
 from django.shortcuts import redirect
+
+from core.models import ConsumedFormToken
 
 logger = logging.getLogger(__name__)
 
@@ -31,18 +34,30 @@ def consume_token(session, form_id, submitted_token):
     戻る+再送信や二度押しを弾く）。検証失敗時はFalseを返すのみで例外は投げない
     （呼び出し側でユーザーにわかるエラーメッセージを出す）。
 
-    既知の制約（未対応・低優先度）: 同一セッションから同一フォームへの同時並行リクエスト
-    （例: 同じ画面を2タブで開いて起こる稀なケース、あるいは1タブでの多重クリックが
-    ネットワーク層でほぼ同時に2リクエストとして届く場合）は、Djangoのセッション読み書きが
-    リクエスト単位でアトミックではないため、理論上は両方が同じトークンの検証を通過しうる
-    （典型的なTOCTOU）。本アプリのセッションバックエンド・アクセスパターン上、実害は小さいと
-    判断し現状は対策していないが、将来的にDB行ロック（`select_for_update`）等でセッションを
-    扱うようになった場合はこの前提を見直すこと。
+    セッション辞書との比較（下記`expected != submitted_token`）だけでは、同一セッションから
+    同一フォームへの同時並行リクエスト（2タブでの同時送信、1タブでの多重クリックがネットワーク
+    層でほぼ同時に2リクエストとして届く場合等）が両方とも「トークンはまだ有効」と判定しうる
+    （Djangoのセッション読み書きはリクエスト単位でアトミックではないため。典型的なTOCTOU）。
+    ユーザー報告（2026-09-28、保管画面２「登録」ボタン連打で500エラー）により実際に発生することが
+    判明したため、実際に処理を継続してよいリクエストを1つに絞る「消費」の部分を
+    `core.models.ConsumedFormToken`（token列にユニーク制約）へのINSERTに置き換えた。
+    2つのリクエストが両方とも上のセッション比較を通過しても、実際にINSERTへ成功できるのは
+    どちらか一方だけに限定される（DBのユニーク制約はプロセス・スレッドをまたいでDB自体が
+    保証するため、セッションバックエンドの種類に依存しない）。詳細経緯は
+    `docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md`参照。
     """
     tokens = session.get(SESSION_KEY, {})
     expected = tokens.get(form_id)
     if not expected or expected != submitted_token:
         logger.warning("二重送信を検知またはトークン不正: form_id=%s", form_id)
+        return False
+    try:
+        with transaction.atomic():
+            ConsumedFormToken.objects.create(token=submitted_token, form_id=form_id)
+    except IntegrityError:
+        # 上のセッション比較は通過したが、ほぼ同時に届いた別リクエストが先にこのtokenを
+        # 消費済み（INSERT成功）にしていた場合。DBのユニーク制約違反として確実に検知できる。
+        logger.warning("二重送信を検知（DB側で消費済み・TOCTOU対策）: form_id=%s", form_id)
         return False
     del tokens[form_id]
     session.modified = True

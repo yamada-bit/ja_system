@@ -210,11 +210,19 @@ class UploadStep2View(LoginRequiredMixin, View):
                         personal_info_flag=document.privacy_flag,
                     )
                     created.append(document)
-        except (OSError, DBError):
+        except (OSError, upload_services.PendingFileStorageError, DBError):
             # open_pending_file()／file.save()でのファイルI/O失敗（一時ファイル欠損・ディスク
             # 容量不足等）に加え、document.save()でのDB制約違反等（IntegrityError/
             # OperationalError等のDBError）も対象にする（品質レビューで発見：以前はOSErrorしか
             # 捕捉しておらずDBErrorは未捕捉のまま生の500エラーになっていた）。
+            # upload_services.open_pending_file()は一時ファイル欠損時にOSErrorではなく
+            # PendingFileStorageError（同モジュールのdocstring参照）を送出するため、これも
+            # 併せて捕捉する。保管画面２の「登録」ボタンを連打（二重送信）すると、1回目の
+            # リクエストがtransaction.atomic()のコミット後にclear_pending_files()で一時ファイルを
+            # 削除し、その直後に2回目のリクエストが同じ一時ファイルをopen_pending_file()で
+            # 開こうとして欠損を検出する、という経路で実際に発生しうる（consume_token()の
+            # TOCTOU、core.double_submit.consume_token docstring参照。ユーザー報告で発見、
+            # 2026-09-28。以前はここで捕捉されず生の500エラーになっていた）。
             # transaction.atomic()によりDBへの登録はロールバックされ、DBには一部だけ登録された
             # 不整合な状態は残らないが、ロールバック対象の文書について既にストレージへ書き込み
             # 済みだったファイル実体はDBトランザクションの対象外のため孤児化する（品質レビューで

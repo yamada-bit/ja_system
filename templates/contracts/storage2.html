@@ -169,7 +169,12 @@
           </div>
 
           <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
-            <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
+            {% comment %}
+              documents/storage2.htmlと同じ理由（ユーザー報告2026-09-28。
+              docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md参照）で二重送信対策のdisabled化を追加。
+              原本にconfirm()が無いためconfirmは付けず、reportValidity＋disabled化のみ。
+            {% endcomment %}
+            <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn" onclick="if (!this.form.reportValidity()) return false; setTimeout(() => { this.disabled = true; });">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
             <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'contracts:upload_step1' %}'">キャンセル</button>
           </div>
         </form>

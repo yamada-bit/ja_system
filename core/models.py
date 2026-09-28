@@ -61,3 +61,33 @@ class NormalizedTextFieldsMixin(models.Model):
         if targets is not None:
             kwargs["update_fields"] = targets
         super().save(*args, **kwargs)
+
+
+class ConsumedFormToken(models.Model):
+    """core.double_submit.consume_token()が二重送信対策トークンを一度きり消費させるための記録。
+
+    セッション辞書だけで「読み取り→比較→削除」を行うと、ほぼ同時に届いた2つのリクエスト
+    （多重クリック・2タブでの同時送信・ネットワーク層での再送等）が両方とも「トークンはまだ有効」
+    と判定してしまう（Djangoのセッション読み書きはリクエスト単位でアトミックではないため。典型的な
+    TOCTOU）。ユーザー報告（2026-09-28、保管画面２「登録」ボタン連打）で実際に発生することが
+    判明し、`docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md`に経緯を記録している。
+
+    このテーブルの`token`列にユニーク制約を持たせ、「消費」をこの行へのINSERTとして扱うことで、
+    2つのリクエストが両方ともセッション側の比較を通過しても、実際にINSERTに成功できるのは
+    どちらか一方だけに限定する（DBのユニーク制約はDB自体がプロセス・スレッドをまたいで保証する
+    ため、セッションバックエンドの種類に依存しない）。
+
+    `token`はuuid4().hex（`issue_token`参照）で衝突確率が無視できるほど低いため、`form_id`を
+    含めずtoken単体にユニーク制約を持たせれば足りる。行は実際に送信（consume_token呼び出し）が
+    あった分だけ増える（発行しただけで送信されなかったトークンは行を作らない）ため無限に肥大化は
+    しないが、自動掃除の仕組みとして`core.management.commands.purge_expired_double_submit_tokens`
+    （日次バッチ想定）を用意している。
+    """
+
+    token = models.CharField("トークン", max_length=32, unique=True)
+    form_id = models.CharField("フォームID", max_length=100)
+    consumed_at = models.DateTimeField("消費日時", auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "二重送信対策トークン消費記録"
+        verbose_name_plural = verbose_name

@@ -1072,7 +1072,7 @@ CSPはその上に重ねる多層防御であり、「今アプリ全体CSPが�
 **結論**：中期対応のまま維持するが、「リリース後の技術的負債」として明示的にスケジュール化する
 （インラインハンドラのイベントリスナー移行は独立した別プロジェクトとして扱う）。コード変更なし。
 
-## 保管画面１：PDF以外の選択時にクライアント側でalertエラー（2026-09-18、ユーザー依頼）
+## 保管画面１：PDF以外の選択時にクライアント側でalertエラー（2026-09-28、ユーザー依頼）
 
 原本HTML/xlsxは保管画面１（`templates/documents/storage1.html`／`templates/contracts/storage1.html`）の
 ファイル選択にPDF以外の制限を設けていない（サーバー側も`core/upload_validation.py`の拒否リスト
@@ -1091,3 +1091,104 @@ CSPはその上に重ねる多層防御であり、「今アプリ全体CSPが�
 サーバー側は変更していないため、開発者ツール等でファイル種別チェックを回避してPOSTした場合は
 従来通り画像・Office文書等も登録できる（意図的な非対称性。ユーザーが「クライアント側のみで良い」
 と明示的に選択したため）。
+
+## 保管画面２「登録」ボタン連打で500エラー（2026-09-28、ユーザー報告）
+
+### 症状と原因
+保管画面２（`documents:upload_step2`／`contracts:upload_step2`）の「登録」ボタンを連打（二重送信）
+すると、2回目のリクエストで生の500エラーになっていた。
+
+`UploadStep2View.post`（`documents/views.py`・`contracts/views.py`とも同型）は二重送信対策トークン
+（`core.double_submit.consume_token`）を持つが、同トークンのdocstringに明記の通り
+「同一セッションから同一フォームへの同時並行リクエスト…は、Djangoのセッション読み書きがリクエスト
+単位でアトミックではないため、理論上は両方が同じトークンの検証を通過しうる（典型的なTOCTOU）」
+という既知の制約が実際に発生し、2つのリクエストがどちらも本登録処理へ進んでいた。
+
+1回目のリクエストが`transaction.atomic()`のコミット後に`upload_services.clear_pending_files()`で
+一時ファイル（`tmp_uploads/`）を削除した直後、2回目のリクエストが同じ一時ファイルを
+`upload_services.open_pending_file()`で開こうとして欠損を検出する。ここまでは想定内の異常系だが、
+`open_pending_file()`は一時ファイル欠損時に`OSError`ではなく`PendingFileStorageError`
+（`core/upload_services.py`が明示的にラップして送出。同モジュールのdocstring参照）を送出するのに対し、
+`UploadStep2View.post`のtry/exceptは`except (OSError, DBError):`しか捕捉していなかった。
+`PendingFileStorageError`は`OSError`のサブクラスではない単純な`Exception`サブクラスのため、
+この節を素通りして生の500エラーになっていた。
+
+同種の「複数ファイル一括登録の途中失敗」を検証する既存テスト
+（`documents.tests.UploadStep2PartialFailureCleanupTests.
+test_second_file_failure_rolls_back_db_and_cleans_first_files_orphan_blob`／contracts側も同型）は、
+`open_pending_file`自体をモックし`side_effect=OSError(...)`という**実装が実際には送出しない例外型**を
+直接指定していたため、この食い違いに気付けなかった（回帰防止のテスト自体は正しく機能していたが、
+モックが実装の挙動を正しく模していなかった＝テストの前提が誤っていた）。
+
+### 対応
+- `documents/views.py`・`contracts/views.py`とも`except (OSError, DBError):`を
+  `except (OSError, upload_services.PendingFileStorageError, DBError):`に拡張。
+  （`core.bulk_edit_views`／`core.upload_views`の同種処理では元々`PendingFileStorageError`を
+  個別に捕捉済みで、`UploadStep2View.post`だけが取り残されていた形。）
+- 両テストファイルに`test_pending_file_storage_error_is_caught_not_bubbled_as_500`を追加。
+  `open_pending_file`のモックに実装が実際に送出する`PendingFileStorageError`を使い、今回の
+  食い違いを再発させない（既存のOSErrorテストは残置。`OSError`自体も他の呼び出し元
+  ―`save_pending_files`・`combine_upload_chunks`等―が投げうるため、引き続き捕捉対象として妥当）。
+- クライアント側の対策（二重送信防止のボタン無効化）は初回対応時点では見送っていたが、ユーザーの
+  追加依頼（2026-09-28）を受けて`templates/documents/storage2.html`・`templates/contracts/storage2.html`
+  の「登録／更新」ボタンにも他画面と同じ`reportValidity＋disabled化`パターンを追加した。
+  ただし`confirm()`は付けていない：原本index.html `startRegisterMock()`にconfirmダイアログは
+  無く（他画面の"更新してよろしいですか？"等は別のJS関数`confirmXxx()`系で個別に確認ダイアログを
+  出している箇所であり、保管画面２の登録フローには元々確認ダイアログという概念自体が無い）、
+  原本にない確認ダイアログを新規に追加するのは今回のユーザー依頼（ボタンの無効化のみ）の範囲を
+  超えるため。`reportValidity()`を先頭に置く理由は2026-09-01の16ファイル一括修正と同じ（必須項目
+  未入力でボタンが無効化されたまま詰まる不具合の防止）。部署／分類／カテゴリー
+  （`core.widgets.PopupSelectWidget`）はhidden type固定のフィールドのため、そもそも
+  `reportValidity()`の対象外（HTML仕様上hidden inputは制約検証の対象外）で、これは既存の他画面
+  （マスタ登録画面等）でも同じ前提。ブラウザの`javascript_tool`でsubmitイベントをフックし、
+  (a) タイトル未入力時はreportValidity()がブロックしボタンも無効化されないこと、
+  (b) タイトル入力済みで送信するとボタンが直後にdisabled化されること、の両方を確認済み。
+  なお、このクライアント側ガードはTOCTOU自体（理論上の同時並行リクエスト）を完全には塞がない
+  （通常の連打はブラウザ側でほぼ防げるようになるが、`core.double_submit.consume_token`の
+  docstring記載の制約自体は残る）。
+
+`python manage.py test documents contracts`（452件）で全件成功を確認。
+
+### 追補：TOCTOU自体をDBのユニーク制約でアトミックに解消（2026-09-28、ユーザー依頼）
+
+上記のクライアント側disabled化はブラウザ側の「連打」を防ぐが、`core.double_submit.
+consume_token()`のセッション辞書だけを使った「読み取り→比較→削除」自体は依然としてTOCTOUの
+余地を残していた（2タブでの同時送信、ネットワーク層での再送等、ボタンのdisabled状態が
+効かない経路）。ユーザーからDBのユニーク制約を使ったアトミックな解消の実装依頼を受け、対応した。
+
+- `core/models.py`に`ConsumedFormToken`（`token`列にユニーク制約、`form_id`・`consumed_at`を
+  併せて保持）を追加。
+- `core.double_submit.consume_token()`は、セッション側の比較を通過した後に
+  `transaction.atomic()`で`ConsumedFormToken.objects.create(token=..., form_id=...)`を実行する
+  ように変更。2つのリクエストが両方ともセッション側の比較を通過しても、実際にINSERTに成功
+  できるのはどちらか一方だけに限定される（`IntegrityError`は`False`扱いに変換）。DBのユニーク
+  制約はプロセス・スレッドをまたいでDB自体が保証するため、セッションバックエンドの種類
+  （DB/キャッシュ/Cookie）に依存しない。
+- マイグレーション：本番リリース前のため`makemigrations`で生成された`core/migrations/
+  0002_initial.py`は使わず、`CreateModel`操作を`core/migrations/0001_enable_pg_trgm.py`
+  （core唯一の初期マイグレーション）へ手動で合流させ、生成ファイルは削除した
+  （[[project_migrations_squash_into_0001]]）。`makemigrations --check --dry-run`で
+  差分なしを確認済み。
+- `settings.DOUBLE_SUBMIT_TOKEN_RETENTION_HOURS`（`.env`、既定24時間）と
+  `core.management.commands.purge_expired_double_submit_tokens`（日次バッチ想定、
+  `purge_expired_audit_logs`と同型）を追加し、消費記録テーブルが無限に肥大化しないようにした。
+  既存の`ja_system/bat/`配下4本（`cleanup_temp_uploads`／`extract_pending_pdf_text`／
+  `purge_expired_audit_logs`／`purge_expired_deleted_records`）と同様の`.bat`＋タスクスケジューラ
+  登録を追加した（ユーザー承認後、`ja_pj`のgit管理外にある`ja_system/bat/`配下へ実施）：
+  `purge_expired_double_submit_tokens.bat`（`purge_expired_audit_logs.bat`と同型、ログ
+  ローテーション・prod設定固定込み）と、`register_scheduled_tasks.ps1`への
+  `JaDocSys_PurgeExpiredDoubleSubmitTokens`タスク追加（毎日04:30、既存4本の04:00〜04:20に続く枠）。
+  `doc/文書管理システム_環境構築・実装手順書.xlsx`「10.定期実行バッチ運用」シート（編集前に
+  `doc/backup_20260928/`へバックアップ済み）にも反映した：表題を「4バッチ」→「5バッチ」に、
+  空いていた7行目に`purge_expired_double_submit_tokens.bat`の行（目的・スケジュール・備考、
+  既存行と同じ書式）を追加、動作確認欄・DJANGO_SETTINGS_MODULE欄の「4本／4バッチ」表記も
+  「5本／5バッチ」へ更新。「9.定期バックアップ運用」シートはdaily_backup.ps1専用で今回の追加とは
+  無関係のため変更なし。「5.本番サーバー構築手順」手順14（C19）にも「4種の定期バッチ」という
+  古い本数の言及が残っていたため、テストサーバーへの反映手順を検討する過程で発見し「5種」へ
+  合わせて修正した。
+- `core.tests.DoubleSubmitServicesTests.test_concurrent_requests_can_consume_valid_token_only_once`
+  を追加：同じセッションキーを2つの独立した`SessionStore`インスタンスとして読み込み直すことで
+  「2リクエストがそれぞれ独立したセッションスナップショットを持ち、両方とも一見有効と判定する」
+  という実際のTOCTOU状況を再現し、それでも一方しか処理を継続できないことを検証。
+
+`python manage.py test`（全アプリ、1041件）で全件成功を確認。

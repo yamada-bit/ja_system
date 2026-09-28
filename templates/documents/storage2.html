@@ -158,7 +158,16 @@
           </div>
 
           <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
-            <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
+            {% comment %}
+              二重送信（連打）対策。原本index.html startRegisterMock()にconfirm()は無いため、
+              他画面の登録・更新ボタン共通パターン（reportValidity＋confirm＋disabled化）から
+              confirmは外し、reportValidity＋disabled化のみ適用する（ユーザー報告2026-09-28：
+              連打でcore.double_submit.consume_token側のトークン検証がTOCTOUにより両リクエスト
+              とも通過し得ることが判明。docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md参照。reportValidity
+              を先頭に置くのは必須項目未入力でボタンが無効化されたまま詰まる不具合を防ぐため
+              ―2026-09-01、16ファイル一括修正時と同じ理由）。
+            {% endcomment %}
+            <button type="submit" class="btn-primary" style="padding:8px 30px;" id="storage-submit-btn" onclick="if (!this.form.reportValidity()) return false; setTimeout(() => { this.disabled = true; });">{% if mode == "create" %}登録{% else %}更新{% endif %}</button>
             <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:upload_step1' %}'">キャンセル</button>
           </div>
         </form>

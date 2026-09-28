@@ -1149,6 +1149,30 @@ class DoubleSubmitServicesTests(TestCase):
         self.assertFalse(consume_token(self.session, "test_form", old_token))
         self.assertTrue(consume_token(self.session, "test_form", new_token))
 
+    def test_concurrent_requests_can_consume_valid_token_only_once(self):
+        """TOCTOU対策の検証（ユーザー報告2026-09-28：保管画面２「登録」ボタン連打で500エラー、
+        docs/HTML_REIMPL_CHECKLIST_ARCHIVE.md参照）。上のtest_valid_token_can_only_be_consumed_once
+        は同じSessionStoreインスタンスへの2回呼び出しのため、1回目のconsume_tokenが
+        `del tokens[form_id]`でそのインスタンスのローカル辞書を書き換えた時点で2回目は
+        セッション側の比較だけで弾かれてしまい、DB側のユニーク制約（今回追加した
+        core.models.ConsumedFormToken）は経由しない。ここでは同じセッションキーを別々の
+        SessionStoreインスタンスとして読み込み直す（＝ほぼ同時に届いた2リクエストが、それぞれ
+        独立したセッションのスナップショットを持つ状況を模す）ことで、セッション側の比較だけでは
+        両方とも「トークンはまだ有効」と判定してしまうケースを再現し、それでも実際に処理を
+        継続できるのはどちらか一方だけであることを検証する。"""
+        token = issue_token(self.session, "test_form")
+        self.session.save()
+
+        session_a = SessionStore(session_key=self.session.session_key)
+        session_b = SessionStore(session_key=self.session.session_key)
+        # 2つのインスタンスとも、保存済みの同じセッションから独立してトークンを読み込める
+        # （＝どちらも「トークンはまだ有効」と判定する前提が成り立つ）ことを確認しておく。
+        self.assertEqual(session_a.get("double_submit_tokens", {}).get("test_form"), token)
+        self.assertEqual(session_b.get("double_submit_tokens", {}).get("test_form"), token)
+
+        self.assertTrue(consume_token(session_a, "test_form", token))
+        self.assertFalse(consume_token(session_b, "test_form", token))
+
 
 class OtherViewsDoubleSubmitTokenTests(TestCase):
     """organizations/masters/permissions/accountsの各Viewは二重送信対策トークン不正時分岐

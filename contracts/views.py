@@ -289,11 +289,15 @@ class UploadStep2View(RequiresContractEditMixin, View):
                         event_message=f"ファイル名：{contract.display_name}",
                     )
                     created.append(contract)
-        except (OSError, DBError):
+        except (OSError, upload_services.PendingFileStorageError, DBError):
             # open_pending_file()／file.save()でのファイルI/O失敗に加え、contract.save()／
             # ContractRelationのDB制約違反等（DBError）も対象にする（documents.views.
             # UploadStep2Viewと同じ理由。品質レビューで発見：以前はOSErrorしか捕捉しておらず
-            # DBErrorは未捕捉のまま生の500エラーになっていた）。transaction.atomic()によりDBへの
+            # DBErrorは未捕捉のまま生の500エラーになっていた）。
+            # PendingFileStorageErrorの追加理由もdocuments.views.UploadStep2Viewと同じ
+            # （open_pending_file()は一時ファイル欠損時にOSErrorではなくPendingFileStorageErrorを
+            # 送出するため。保管画面２「登録」ボタンの連打で実際に発生したユーザー報告により発見、
+            # 2026-09-28）。transaction.atomic()によりDBへの
             # 登録はロールバックされるが、ロールバック対象の契約書について既にストレージへ書き込み
             # 済みだったファイル実体はDBトランザクションの対象外のため孤児化する。createdに積まれた
             # （=save()まで成功していた）ファイル実体をここで明示的に削除して孤児ファイルを防ぐ

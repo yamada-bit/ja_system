@@ -176,6 +176,13 @@ CHUNK_UPLOAD_CHUNK_SIZE_BYTES = env.int("CHUNK_UPLOAD_CHUNK_SIZE_BYTES", default
 # ja_system/bat/cleanup_temp_uploads.batが既に前提としている名前に合わせている）。
 STALE_TMP_UPLOAD_THRESHOLD_HOURS = env.int("STALE_TMP_UPLOAD_THRESHOLD_HOURS", default=24)
 
+# core.models.ConsumedFormToken（core.double_submit.consume_token()が二重送信対策トークンを
+# DBのユニーク制約でアトミックに消費するための記録テーブル、TOCTOU対策）の保持期間（時間単位）。
+# トークンはセッション側で既に無効化・上書きされるため、この時間より古い消費記録は再送信検知の
+# 役目を終えており安全に削除できる（core.management.commands.purge_expired_double_submit_tokens、
+# 定期バッチ想定。STALE_TMP_UPLOAD_THRESHOLD_HOURSと同じ既定値・同じ理由）。
+DOUBLE_SUBMIT_TOKEN_RETENTION_HOURS = env.int("DOUBLE_SUBMIT_TOKEN_RETENTION_HOURS", default=24)
+
 # 自動ログアウト時間（分）の既定値。screen-other-logout-editではmasters.SystemSetting（DB）を
 # 正とし管理者が随時変更する。ここでの値はSystemSetting読み込みに失敗した場合のみ使うフォールバック。
 SESSION_IDLE_TIMEOUT_MINUTES = env.int("SESSION_IDLE_TIMEOUT_MINUTES", default=60)

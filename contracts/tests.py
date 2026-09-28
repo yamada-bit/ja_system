@@ -4488,6 +4488,31 @@ class UploadStep2PartialFailureCleanupTests(TestCase):
         texts = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("ファイルの保存に失敗しました" in t for t in texts))
 
+    def test_pending_file_storage_error_is_caught_not_bubbled_as_500(self):
+        """documents.tests.UploadStep2PartialFailureCleanupTests.
+        test_pending_file_storage_error_is_caught_not_bubbled_as_500と同じ理由（ユーザー報告
+        2026-09-28）。open_pending_file()が一時ファイル欠損時に実際に送出する例外型
+        （PendingFileStorageError、core/upload_services.py）で検証する。"""
+        from django.contrib.messages import get_messages
+
+        from contracts.models import Contract
+        from core.upload_services import PendingFileStorageError
+
+        token = self._start_two_files()
+        before = set(Contract.objects.values_list("pk", flat=True))
+        blobs_before = self._contract_blob_count()
+        with mock.patch(
+            "contracts.views.upload_services.open_pending_file",
+            side_effect=[ContentFile(b"AAAA"), PendingFileStorageError("temp file missing")],
+        ):
+            response = self.client.post("/contracts/upload/step2/", self._two_file_payload(token))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/contracts/upload/step2/")
+        self.assertEqual(set(Contract.objects.values_list("pk", flat=True)), before)
+        self.assertEqual(self._contract_blob_count(), blobs_before)
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("ファイルの保存に失敗しました" in t for t in texts))
+
     def test_dberror_on_contract_save_is_caught_not_bubbled_as_500(self):
         from contracts.models import Contract
 

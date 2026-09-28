@@ -4069,6 +4069,34 @@ class UploadStep2PartialFailureCleanupTests(TestCase):
         texts = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("ファイルの保存に失敗しました" in t for t in texts))
 
+    def test_pending_file_storage_error_is_caught_not_bubbled_as_500(self):
+        """ユーザー報告（2026-09-28）：保管画面２の「登録」ボタンを連打（二重送信）すると500に
+        なっていた。実際の原因はopen_pending_file()（core/upload_services.py）が一時ファイル
+        欠損時にOSErrorではなくPendingFileStorageErrorを送出するのに対し、UploadStep2View.post
+        のexcept節がOSErrorしか捕捉していなかったこと（テストがopen_pending_file自体をモックし
+        生のOSErrorを直接side_effectにしていたため、この食い違いに気付けなかった。上の
+        test_second_file_failure_rolls_back_db_and_cleans_first_files_orphan_blobとは異なり、
+        ここでは実装が実際に送出する例外型で検証する）。"""
+        from django.contrib.messages import get_messages
+
+        from core.upload_services import PendingFileStorageError
+        from documents.models import Document
+
+        token = self._start_two_files()
+        before = set(Document.objects.values_list("pk", flat=True))
+        blobs_before = self._document_blob_count()
+        with mock.patch(
+            "documents.views.upload_services.open_pending_file",
+            side_effect=[ContentFile(b"AAAA"), PendingFileStorageError("temp file missing")],
+        ):
+            response = self.client.post("/documents/upload/step2/", self._two_file_payload(token))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/documents/upload/step2/")
+        self.assertEqual(set(Document.objects.values_list("pk", flat=True)), before)
+        self.assertEqual(self._document_blob_count(), blobs_before)
+        texts = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("ファイルの保存に失敗しました" in t for t in texts))
+
     def test_dberror_on_document_save_is_caught_not_bubbled_as_500(self):
         from documents.models import Document
 
