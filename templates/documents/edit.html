@@ -11,7 +11,10 @@
           {% if bulk %}
             {# 一括編集中の「戻る」は、ステージした内容（関連書類の一時ファイル含む）を破棄して #}
             {# 検索画面へ戻る＝キャンセルと同義。メインフォーム外なので form= 属性で紐付ける。 #}
-            <button type="submit" form="meta-input-form" name="bulk_action" value="cancel">＜ 戻る</button>
+            {# formnovalidate必須：サーバー側(BulkEditPostMixin.post)はbulk_action=cancelを他の #}
+            {# 検証より先に処理し必須項目チェックを一切行わないが、これが無いと必須項目が #}
+            {# 空のままではブラウザの標準検証が送信をブロックし、キャンセルすらできなくなる。 #}
+            <button type="submit" form="meta-input-form" name="bulk_action" value="cancel" formnovalidate>＜ 戻る</button>
           {% else %}
             <button type="button" onclick="window.location.href='{% url 'documents:search' %}'">＜ 戻る</button>
           {% endif %}
@@ -81,9 +84,12 @@
           <input type="hidden" name="token" value="{{ token }}">
 
           <div class="pager-top" style="flex-shrink:0;">
-            <button type="submit" name="bulk_nav" value="prev" id="btn-prev-doc" {% if not bulk or not bulk.has_prev %}disabled{% endif %}>＜</button>
+            {# formnovalidate必須：ページ移動時のステージ(stage_page)は入力値をそのまま保存する #}
+            {# だけで必須項目検証を行わないため、ブラウザ標準検証で塞いではいけない（更新ボタンで #}
+            {# のみ検証したい＝documents/edit.htmlの他のformnovalidate注記と同じ理由）。 #}
+            <button type="submit" name="bulk_nav" value="prev" id="btn-prev-doc" formnovalidate {% if not bulk or not bulk.has_prev %}disabled{% endif %}>＜</button>
             <span id="doc-pager-text" style="font-weight:bold;">{% if bulk %}{{ bulk.index }} / {{ bulk.total }}{% else %}1 / 1{% endif %}</span>
-            <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
+            <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" formnovalidate {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
           </div>
           {% if bulk %}
             <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">
@@ -141,7 +147,9 @@
               {% if can_delete %}
                 <div style="text-align: right; margin-top: 10px;">
                   {% if bulk %}
-                    <button type="submit" name="bulk_action" value="toggle_delete"
+                    {# formnovalidate必須：削除予定マークの付け外しも必須項目検証の対象ではない #}
+                    {# （bulk_edit_views.BulkEditPostMixin.post のtoggle_delete分岐参照）。 #}
+                    <button type="submit" name="bulk_action" value="toggle_delete" formnovalidate
                             style="background-color:{% if marked_delete %}#7f8c8d{% else %}#e74c3c{% endif %}; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;">
                       {% if marked_delete %}削除取消{% else %}削除{% endif %}
                     </button>
@@ -160,7 +168,8 @@
               {# 一括編集：レコード間の移動はページャー ＜ ＞、「更新」で全ページ一括確定（変更が #}
               {# あった文書だけ更新・削除予定を確定）、「キャンセル」でステージ内容を全破棄。 #}
               <button type="submit" name="bulk_action" value="update" class="btn-primary" style="padding:8px 30px;">更新</button>
-              <button type="submit" name="bulk_action" value="cancel" class="btn-cancel">キャンセル</button>
+              {# formnovalidate必須：上の「戻る」ボタンと同じ理由（キャンセルは必須項目検証の対象外）。 #}
+              <button type="submit" name="bulk_action" value="cancel" class="btn-cancel" formnovalidate>キャンセル</button>
             {% else %}
               <button type="submit" class="btn-primary" style="padding:8px 30px;">更新</button>
               <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'documents:search' %}'">キャンセル</button>

@@ -9,7 +9,9 @@
         <div class="system-sub">クラウド文書管理システム -契約書管理-</div>
         <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
           {% if bulk %}
-            <button type="submit" form="meta-input-form" name="bulk_action" value="cancel">＜ 戻る</button>
+            {# formnovalidate必須：documents/edit.html「戻る」ボタンの注記と同じ理由 #}
+            {# （BulkEditPostMixin.postはbulk_action=cancelを必須項目検証より先に処理する）。 #}
+            <button type="submit" form="meta-input-form" name="bulk_action" value="cancel" formnovalidate>＜ 戻る</button>
           {% else %}
             <button type="button" onclick="window.location.href='{% url 'contracts:search' %}'">＜ 戻る</button>
           {% endif %}
@@ -70,9 +72,10 @@
           <input type="hidden" name="token" value="{{ token }}">
 
           <div class="pager-top" style="flex-shrink:0;">
-            <button type="submit" name="bulk_nav" value="prev" id="btn-prev-doc" {% if not bulk or not bulk.has_prev %}disabled{% endif %}>＜</button>
+            {# formnovalidate必須：documents/edit.htmlページャーの注記と同じ理由。 #}
+            <button type="submit" name="bulk_nav" value="prev" id="btn-prev-doc" formnovalidate {% if not bulk or not bulk.has_prev %}disabled{% endif %}>＜</button>
             <span id="doc-pager-text" style="font-weight:bold;">{% if bulk %}{{ bulk.index }} / {{ bulk.total }}{% else %}1 / 1{% endif %}</span>
-            <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
+            <button type="submit" name="bulk_nav" value="next" id="btn-next-doc" formnovalidate {% if not bulk or not bulk.has_next %}disabled{% endif %}>＞</button>
           </div>
           {% if bulk %}
             <div style="font-size:12px; color:#7f8c8d; flex-shrink:0; margin-top:2px;">
@@ -150,7 +153,8 @@
               {% if can_delete %}
                 <div style="text-align: right; margin-top: 10px;">
                   {% if bulk %}
-                    <button type="submit" name="bulk_action" value="toggle_delete"
+                    {# formnovalidate必須：documents/edit.html削除トグルボタンの注記と同じ理由。 #}
+                    <button type="submit" name="bulk_action" value="toggle_delete" formnovalidate
                             style="background-color:{% if marked_delete %}#7f8c8d{% else %}#e74c3c{% endif %}; color:white; border:none; padding: 6px 15px; border-radius: 4px; cursor: pointer;">
                       {% if marked_delete %}削除取消{% else %}削除{% endif %}
                     </button>
@@ -167,7 +171,8 @@
           <div class="storage-outer-actions" style="display:flex; justify-content:flex-end; gap:10px; padding-top:10px; border-top:1px solid #eee; margin-top:10px; flex-shrink:0;">
             {% if bulk %}
               <button type="submit" name="bulk_action" value="update" class="btn-primary" style="padding:8px 30px;">更新</button>
-              <button type="submit" name="bulk_action" value="cancel" class="btn-cancel">キャンセル</button>
+              {# formnovalidate必須：documents/edit.htmlキャンセルボタンの注記と同じ理由。 #}
+              <button type="submit" name="bulk_action" value="cancel" class="btn-cancel" formnovalidate>キャンセル</button>
             {% else %}
               <button type="submit" class="btn-primary" style="padding:8px 30px;">更新</button>
               <button type="button" class="btn-cancel" onclick="window.location.href='{% url 'contracts:search' %}'">キャンセル</button>
