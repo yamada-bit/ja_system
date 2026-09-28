@@ -43,6 +43,10 @@ class MenuView(LoginRequiredMixin, TemplateView):
         menu_item_setting = getattr(self.request.user.department, "menu_item_setting", None)
         context["show_search_document"] = bool(menu_item_setting and menu_item_setting.show_search_document)
         context["show_search_contract"] = bool(menu_item_setting and menu_item_setting.show_search_contract)
+        # 電子決裁は検索・閲覧・保管の実画面自体が無く恒久的にスコープ外だが（CLAUDE.md参照）、
+        # ボタンの表示/非表示自体はxlsx メイン画面!B55の対象に文書・契約書と並んで含まれるため、
+        # 押下可否（=disabled固定）とは別にshow_search_eapprovalで連動させる。
+        context["show_search_eapproval"] = bool(menu_item_setting and menu_item_setting.show_search_eapproval)
         context["show_storage_document"] = bool(menu_item_setting and menu_item_setting.show_storage_document)
         context["show_storage_contract"] = bool(menu_item_setting and menu_item_setting.show_storage_contract)
         # 原本index.html:121-122の「X ヶ月」は実際にはJSでも一度も置換されない静的モック文言

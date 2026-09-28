@@ -33,13 +33,17 @@
           {% if show_search_contract %}
           <button type="button" onclick="window.location.href='{% url 'contracts:search' %}'">契約書</button>
           {% endif %}
-    {% comment "下記の部分はコメントアウト" %}
-          {# 電子決裁の検索・閲覧・変更画面自体が原本HTML/xlsxのいずれにも存在しない
-             （権限管理・保存期間設定マスタにのみ電子決裁関連の項目があるのみ）。将来陣で
-             実装予定という位置づけではなく恒久的にスコープ外のため、その旨を明示する。 #}
+          {% comment %}
+            電子決裁の検索・閲覧・変更画面自体が原本HTML/xlsxのいずれにも存在しない
+            （権限管理・保存期間設定マスタにのみ電子決裁関連の項目があるのみ）ため実画面には
+            遷移できずdisabled固定だが、ボタンの表示/非表示自体は文書・契約書と同じく
+            show_search_eapproval（その他設定・メイン画面項目編集の「電子決裁」チェック）に
+            従う。以前は連動が漏れており部署設定に関わらず常時表示されていた
+            （2026-09-28ユーザー指摘で修正）。
+          {% endcomment %}
+          {% if show_search_eapproval %}
           <button type="button" disabled title="電子決裁の検索・閲覧・変更画面はスコープ外です">電子決裁</button>
-    {% endcomment%}
-          <button type="button" disabled>電子決裁</button>
+          {% endif %}
         </div>
       </div>
       <div class="menu-box storage-zone">

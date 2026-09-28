@@ -225,6 +225,14 @@ class MenuButtonVisibilityTests(TestCase):
         self.assertNotContains(response, f"window.location.href='{reverse('contracts:search')}'")
         self.assertNotContains(response, f"window.location.href='{reverse('documents:upload_step1')}'")
         self.assertNotContains(response, f"window.location.href='{reverse('contracts:upload_step1')}'")
+        self.assertNotContains(response, "電子決裁の検索・閲覧・変更画面はスコープ外です")
+
+    def test_search_eapproval_button_shown_when_department_setting_on(self):
+        """電子決裁は実画面が無くdisabled固定だが、ボタンの表示/非表示自体は文書・契約書と
+        同じくshow_search_eapprovalに連動する（以前は連動が漏れて常時表示されていた）。"""
+        MenuItemSetting.objects.create(department=self.department, show_search_eapproval=True)
+        response = self.client.get("/")
+        self.assertContains(response, "電子決裁の検索・閲覧・変更画面はスコープ外です")
 
     def test_search_document_button_shown_when_department_setting_on(self):
         from django.urls import reverse
