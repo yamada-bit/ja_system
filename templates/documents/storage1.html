@@ -63,7 +63,29 @@
     fileList.innerHTML = `選択されたファイル (${files.length}個):<br>` + names.join('<br>');
   }
 
-  fileInput.addEventListener('change', renderSelectedFiles);
+  // 原本HTML/xlsxにはファイル種別の制限は無いが、保管画面１は文書登録の入口として
+  // PDF以外を弾いてほしいというユーザー依頼（2026-09-28）。サーバー側の拒否リスト方式
+  // （core/upload_validation.py）は変更せず、ここではクライアント側の入力ミス防止のみ行う。
+  function isPdfFile(file) {
+    return /\.pdf$/i.test(file.name);
+  }
+
+  function enforcePdfOnlySelection(files) {
+    const allFiles = Array.from(files);
+    const rejected = allFiles.filter((f) => !isPdfFile(f));
+    if (rejected.length > 0) {
+      alert('PDFファイル以外は選択できません:\n' + rejected.map((f) => f.name).join('\n'));
+    }
+    // fileInput.filesは読み取り専用のため、DataTransfer経由でPDFのみに詰め替える。
+    const dt = new DataTransfer();
+    allFiles.filter(isPdfFile).forEach((f) => dt.items.add(f));
+    fileInput.files = dt.files;
+  }
+
+  fileInput.addEventListener('change', () => {
+    enforcePdfOnlySelection(fileInput.files);
+    renderSelectedFiles();
+  });
 
   dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -75,7 +97,7 @@
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('dragover');
-    fileInput.files = e.dataTransfer.files;
+    enforcePdfOnlySelection(e.dataTransfer.files);
     renderSelectedFiles();
   });
 
