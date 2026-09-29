@@ -5,6 +5,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.paginator import Paginator
 from django.http import StreamingHttpResponse
 from django.shortcuts import render
+from django.utils import timezone
 from django.views import View
 
 from audit import services as audit_services
@@ -71,7 +72,10 @@ class AuditLogCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
                 yield writer.writerow(
                     sanitize_csv_row(
                         [
-                            log.timestamp.strftime("%Y/%m/%d %H:%M"),
+                            # USE_TZ=Trueでは timestamp がUTCで返る。テンプレートの`date`フィルタは
+                            # TIME_ZONE(Asia/Tokyo)へ変換するため、CSVも localtime を通さないと
+                            # 画面表示と9時間ずれる。
+                            timezone.localtime(log.timestamp).strftime("%Y/%m/%d %H:%M"),
                             log.employee_no,
                             log.department_name,
                             log.employee_name,

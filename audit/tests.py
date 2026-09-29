@@ -399,6 +399,25 @@ class AuditLogCsvExportViewTests(TestCase):
         self.assertIn("山田花子", content)  # 直近のレコードは出る
         self.assertNotIn("ログイン,ログイン", content)  # 200日前のログイン行は出ない
 
+    def test_csv_export_timestamp_matches_list_display_in_local_timezone(self):
+        """CSVの操作日時は画面表示（TIME_ZONE=Asia/Tokyo）と一致すること。
+        USE_TZ=TrueでtimestampはUTCで返るため、localtimeを通さないと9時間ずれる回帰防止。"""
+        # 直近（保存期間内）の固定時刻: UTC 15:30 = JST 翌日 00:30（日付またぎも同時に検証）
+        base = timezone.now().astimezone(datetime.timezone.utc).replace(
+            hour=15, minute=30, second=0, microsecond=0
+        ) - datetime.timedelta(days=1)
+        entry = AuditLog.objects.get(action="ログイン")
+        AuditLog.objects.filter(pk=entry.pk).update(timestamp=base)
+        jst = base.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
+        expected = jst.strftime("%Y/%m/%d %H:%M")
+
+        csv_content = self._csv_text(self.client.get("/audit/csv/", {"employee_name": "テスト太郎"}))
+        self.assertIn(expected, csv_content)
+        self.assertNotIn(base.strftime("%Y/%m/%d %H:%M"), csv_content)
+        # 画面の一覧表示とも一致する
+        list_html = self.client.get("/audit/", {"employee_name": "テスト太郎"}).content.decode()
+        self.assertIn(expected, list_html)
+
     def test_csv_export_records_audit_log(self):
         """CSV出力自体も職員名等の個人情報を含む一覧のファイル出力のため、監査ログに記録する
         （StreamingHttpResponse のため、ストリーム消費完了時に1件記録される）。"""
