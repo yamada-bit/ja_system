@@ -2,7 +2,9 @@ import datetime
 import logging
 
 from django.core.files.base import ContentFile
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
+from django.db.models import ProtectedError
 from django.utils import timezone
 
 from accounts.models import Employee, Position, Rank
@@ -42,11 +44,23 @@ MINIMAL_PDF_BYTES = (
 class Command(BaseCommand):
     help = "一覧・検索画面の動作確認用にダミーの部署・職員・分類・文書・契約書データを登録する"
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--purge-legacy",
+            action="store_true",
+            help=(
+                "Rev1.2以前のシードが作成した部署なしの分類・カテゴリーと、それを参照する"
+                "【テストデータ】文書・契約書を物理削除してから投入する（構築済みテストサーバ向け）"
+            ),
+        )
+
     def handle(self, *args, **options):
+        if options["purge_legacy"]:
+            self._purge_legacy()
         departments = self._seed_departments()
         self._seed_menu_item_settings(departments)
         employees = self._seed_employees(departments)
-        groups, categories = self._seed_masters()
+        groups, categories = self._seed_masters(departments)
         self._seed_retention_periods()
         retention_periods = list(RetentionPeriod.objects.filter(kbn="document").order_by("display_order"))
 
@@ -61,6 +75,34 @@ class Command(BaseCommand):
             self._seed_contracts(departments, employees, groups, categories)
 
         self.stdout.write(self.style.SUCCESS("テストデータ登録が完了しました"))
+
+    @transaction.atomic
+    def _purge_legacy(self):
+        """部署なし（department IS NULL）の旧シード由来データを削除する。
+
+        文書・契約書は分類・カテゴリーをPROTECTで参照するため、先に【テストデータ】行を消す。
+        それ以外の行（テストサーバで手入力した文書等）が旧分類を参照していれば
+        ProtectedErrorになるので、握りつぶさず中断して利用者に判断を委ねる（atomicなので
+        途中まで消えた状態は残らない）。ファイル本体はDB行の削除では消えないため個別に消す。
+        """
+        for model, label in ((Document, "文書"), (Contract, "契約書")):
+            targets = model.objects.filter(title__startswith=TEST_DATA_TITLE_PREFIX)
+            count = 0
+            for obj in targets:
+                if obj.file:
+                    obj.file.delete(save=False)
+                obj.delete()
+                count += 1
+            self.stdout.write(f"{label}テストデータを{count}件削除しました")
+        try:
+            cat_count = Category.objects.filter(department__isnull=True).delete()[0]
+            grp_count = Group.objects.filter(department__isnull=True).delete()[0]
+        except ProtectedError as exc:
+            logger.exception("部署なし分類・カテゴリーの削除に失敗しました")
+            raise CommandError(
+                "旧分類・カテゴリーを参照する【テストデータ】以外のデータが残っているため削除できません: %s" % exc
+            ) from exc
+        self.stdout.write(f"部署なしのカテゴリー{cat_count}件・分類{grp_count}件を削除しました")
 
     def _seed_departments(self):
         specs = [
@@ -159,38 +201,46 @@ class Command(BaseCommand):
             if created:
                 logger.info("保存期間設定を作成しました: %s%s", period_value or "", period_unit)
 
-    def _seed_masters(self):
+    def _seed_masters(self, departments):
+        """分類・カテゴリーを部署ごとに作成する。
+
+        Rev1.2以降、分類・カテゴリーは部署単位で管理される（`unique_group_code`等も
+        department＋codeで一意）ため、全部署に同じコード体系で作成する。コードはモデルの
+        RegexValidator（半角数字のみ）に合わせる。get_or_createはfull_cleanを通らないので、
+        ここで英字を入れても検証されずに登録できてしまう点に注意。
+        戻り値のdictは (部署pk, コード) をキーにする。
+        """
         group_specs = [
-            ("A", "分類Ａ", DocKbn.DOCUMENT),
-            ("B", "分類Ｂ", DocKbn.DOCUMENT),
-            ("CA", "契約分類Ａ", DocKbn.CONTRACT),
-            ("CB", "契約分類Ｂ", DocKbn.CONTRACT),
+            ("001", "分類Ａ", DocKbn.DOCUMENT),
+            ("002", "分類Ｂ", DocKbn.DOCUMENT),
+            ("101", "契約分類Ａ", DocKbn.CONTRACT),
+            ("102", "契約分類Ｂ", DocKbn.CONTRACT),
+        ]
+        category_specs = [
+            ("001", "一般文書", "001", DocKbn.DOCUMENT),
+            ("002", "予算関係文書", "002", DocKbn.DOCUMENT),
+            ("101", "一般契約", "101", DocKbn.CONTRACT),
+            ("102", "業務委託契約", "102", DocKbn.CONTRACT),
         ]
         groups = {}
-        for code, name, doc_kbn in group_specs:
-            group, created = Group.objects.get_or_create(
-                code=code, is_deleted=False, defaults={"name": name, "doc_kbn": doc_kbn}
-            )
-            groups[code] = group
-            if created:
-                logger.info("分類を作成しました: %s", group)
-
-        category_specs = [
-            ("001", "一般文書", "A", DocKbn.DOCUMENT),
-            ("002", "予算関係文書", "B", DocKbn.DOCUMENT),
-            ("C001", "一般契約", "CA", DocKbn.CONTRACT),
-            ("C002", "業務委託契約", "CB", DocKbn.CONTRACT),
-        ]
         categories = {}
-        for code, name, group_code, doc_kbn in category_specs:
-            category, created = Category.objects.get_or_create(
-                code=code,
-                is_deleted=False,
-                defaults={"name": name, "group": groups[group_code], "doc_kbn": doc_kbn},
-            )
-            categories[code] = category
-            if created:
-                logger.info("カテゴリーを作成しました: %s", category)
+        for dept in departments.values():
+            for code, name, doc_kbn in group_specs:
+                group, created = Group.objects.get_or_create(
+                    department=dept, code=code, is_deleted=False,
+                    defaults={"name": name, "doc_kbn": doc_kbn},
+                )
+                groups[(dept.pk, code)] = group
+                if created:
+                    logger.info("分類を作成しました: %s", group)
+            for code, name, group_code, doc_kbn in category_specs:
+                category, created = Category.objects.get_or_create(
+                    department=dept, code=code, is_deleted=False,
+                    defaults={"name": name, "group": groups[(dept.pk, group_code)], "doc_kbn": doc_kbn},
+                )
+                categories[(dept.pk, code)] = category
+                if created:
+                    logger.info("カテゴリーを作成しました: %s", category)
         return groups, categories
 
     def _dummy_file(self, name):
@@ -204,21 +254,21 @@ class Command(BaseCommand):
 
         # (件名サフィックス, 部署, 分類コード, カテゴリーコード, 年, 保存期間, 保存満了日, 個人情報フラグ, メモ, 削除済み, 担当職員)
         specs = [
-            ("予算計画書2024", honten_somu, "A", "001", 2024, "3", today - datetime.timedelta(days=10), True,
+            ("予算計画書2024", honten_somu, "001", "001", 2024, "3", today - datetime.timedelta(days=10), True,
              "2024年度予算計画に関する資料。予算という単語でのフリーワード検索確認用。", False, "1"),
-            ("予算実績報告2025", honten_eigyo, "B", "002", 2025, "1", today + datetime.timedelta(days=20), True,
+            ("予算実績報告2025", honten_eigyo, "002", "002", 2025, "1", today + datetime.timedelta(days=20), True,
              "2025年度予算実績の報告書。有効期限切れまで1ヶ月以内の通知確認用。", False, "9002"),
-            ("総会議事録2023", honten_somu, "A", "001", 2023, "5", today - datetime.timedelta(days=400), False,
+            ("総会議事録2023", honten_somu, "001", "001", 2023, "5", today - datetime.timedelta(days=400), False,
              "定時総会の議事録。保存満了日が過去の「有効期限切れ」表示確認用。", False, "1"),
-            ("業務マニュアル2026", yame_gyomu, "B", "002", 2026, "10", today + datetime.timedelta(days=3650), False,
+            ("業務マニュアル2026", yame_gyomu, "002", "002", 2026, "10", today + datetime.timedelta(days=3650), False,
              "業務手順をまとめたマニュアル。個人情報フラグOFFの表示確認用。", False, "9003"),
-            ("永年保存規程集", honten_somu, "A", "001", 2020, "6", today + datetime.timedelta(days=18250), True,
+            ("永年保存規程集", honten_somu, "001", "001", 2020, "6", today + datetime.timedelta(days=18250), True,
              "社内規程集（永年保存）。", False, "1"),
-            ("廃棄予定文書2019", honten_eigyo, "B", "002", 2019, "1", today - datetime.timedelta(days=5), True,
+            ("廃棄予定文書2019", honten_eigyo, "002", "002", 2019, "1", today - datetime.timedelta(days=5), True,
              "保存期間満了済みの文書サンプル。", False, "9002"),
-            ("削除済み旧年度資料", honten_somu, "A", "001", 2022, "3", today - datetime.timedelta(days=200), False,
+            ("削除済み旧年度資料", honten_somu, "001", "001", 2022, "3", today - datetime.timedelta(days=200), False,
              "論理削除済み文書。「直近削除された」通知の確認用。", True, "1"),
-            ("八女支店定例資料2026", yame_gyomu, "A", "001", 2026, "1", today + datetime.timedelta(days=15), True,
+            ("八女支店定例資料2026", yame_gyomu, "001", "001", 2026, "1", today + datetime.timedelta(days=15), True,
              "支店の定例会資料。部署フィルタ（部門間閲覧設定）確認用。", False, "9003"),
         ]
 
@@ -230,8 +280,8 @@ class Command(BaseCommand):
             doc = Document(
                 title=f"{TEST_DATA_TITLE_PREFIX}{suffix}",
                 department=department,
-                group=groups[group_code],
-                category=categories[category_code],
+                group=groups[(department.pk, group_code)],
+                category=categories[(department.pk, category_code)],
                 year=year,
                 retention_period=retention_period,
                 expiry_date=expiry_date,
@@ -256,19 +306,19 @@ class Command(BaseCommand):
 
         # (件名サフィックス, 部署, 分類コード, カテゴリーコード, 年, 契約日, 開始, 終了, 更新日, 金額, 契約先, 保存満了日, 削除済み, 担当職員)
         specs = [
-            ("業務委託契約2024", honten_somu, "CA", "C001", 2024,
+            ("業務委託契約2024", honten_somu, "101", "101", 2024,
              today - datetime.timedelta(days=300), today - datetime.timedelta(days=300),
              today + datetime.timedelta(days=65), today + datetime.timedelta(days=65),
              1200000, "株式会社サンプル商事", today + datetime.timedelta(days=3285), False, "1"),
-            ("保守契約2025", honten_eigyo, "CB", "C002", 2025,
+            ("保守契約2025", honten_eigyo, "102", "102", 2025,
              today - datetime.timedelta(days=100), today - datetime.timedelta(days=100),
              today + datetime.timedelta(days=25), today + datetime.timedelta(days=25),
              580000, "テストシステムズ株式会社", today + datetime.timedelta(days=3550), False, "9002"),
-            ("賃貸借契約2019", yame_gyomu, "CA", "C001", 2019,
+            ("賃貸借契約2019", yame_gyomu, "101", "101", 2019,
              today - datetime.timedelta(days=2500), today - datetime.timedelta(days=2500),
              today - datetime.timedelta(days=10), None,
              3000000, "八女不動産株式会社", today - datetime.timedelta(days=10), False, "9003"),
-            ("削除済み旧契約2020", honten_somu, "CB", "C002", 2020,
+            ("削除済み旧契約2020", honten_somu, "102", "102", 2020,
              today - datetime.timedelta(days=2000), today - datetime.timedelta(days=2000),
              today - datetime.timedelta(days=1600), None,
              450000, "旧取引先株式会社", today - datetime.timedelta(days=1600), True, "1"),
@@ -280,8 +330,8 @@ class Command(BaseCommand):
             contract = Contract(
                 title=f"{TEST_DATA_TITLE_PREFIX}{suffix}",
                 department=department,
-                group=groups[group_code],
-                category=categories[category_code],
+                group=groups[(department.pk, group_code)],
+                category=categories[(department.pk, category_code)],
                 year=year,
                 contract_date=contract_date,
                 contract_period_start=period_start,
