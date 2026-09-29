@@ -521,7 +521,7 @@ class StaffCsvExportViewTests(TestCase):
         修正後はファイル先頭に1個だけBOMが付くこと（＝再取込可能なこと）を確認する。
         """
         response = self.client.get("/accounts/staff/csv/")
-        self.assertEqual(response.content.count("﻿".encode("utf-8")), 1)
+        self.assertEqual(response.content.count("\ufeff".encode("utf-8")), 1)
         self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
 
     def test_export_respects_search_filter(self):

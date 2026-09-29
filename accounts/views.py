@@ -135,7 +135,7 @@ class StaffCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         # str.encode("utf-8-sig")が実行され、utf-8-sigはステートレスなため呼び出しごとに
         # BOMを付与してしまい行ごとにBOMが混入する不具合があった（audit.views.
         # AuditLogCsvExportViewと同じ理由でBOMを明示的に1回だけ書く方式に揃える）。
-        response.write("﻿")
+        response.write("\ufeff")
         writer = csv.writer(response)
         # xlsx 職員マスタ!B91（Rev1.5で削除）：以前は「・パスワードはセキュリティ上、空欄で
         # 出力すること」という指示に沿ってパスワード列を空値で出力していたが、Rev1.5で一覧画面から

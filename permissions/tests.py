@@ -870,7 +870,7 @@ class AuthorityCsvExportViewTests(TestCase):
             rank=Rank.SHUJI, position=Position.IPPAN,
         )
         response = self.client.get("/permissions/csv/")
-        self.assertEqual(response.content.count("﻿".encode("utf-8")), 1)
+        self.assertEqual(response.content.count("\ufeff".encode("utf-8")), 1)
         self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
 
     def test_export_row_for_employee_without_profile(self):

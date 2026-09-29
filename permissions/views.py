@@ -78,7 +78,7 @@ class AuthorityCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         response["Content-Disposition"] = 'attachment; filename="authority_list.csv"'
         # accounts.views.StaffCsvExportViewと同じ理由でBOMを明示的に1回だけ書く
         # （charset=utf-8-sigのままだとwriterow()の都度BOMが混入する不具合があった）。
-        response.write("﻿")
+        response.write("\ufeff")
         writer = csv.writer(response)
         writer.writerow(
             ["職員番号", "部署", "氏名", "役職", "権限"]

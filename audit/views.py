@@ -63,7 +63,7 @@ class AuditLogCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
             # 保存期間の絞り込み後でも全期間分のログは大きくなり得るため、HttpResponse に全量を
             # 積まず StreamingHttpResponse + qs.iterator() で1行ずつ返す（コードレビュー
             # audit/core No.4。CSVヘッダ行の直前に BOM を1回だけ付けて Excel の文字化けを防ぐ）。
-            yield "﻿" + writer.writerow(self.HEADER)
+            yield "\ufeff" + writer.writerow(self.HEADER)
             count = 0
             for log in qs.iterator(chunk_size=2000):
                 # employee_name/action/event_messageは職員の自由入力（文書タイトル等）に由来しうる
