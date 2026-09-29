@@ -508,11 +508,21 @@ class StaffCsvExportViewTests(TestCase):
     def test_export_contains_header_and_row_without_password_column(self):
         response = self.client.get("/accounts/staff/csv/")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8-sig")
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
         content = response.content.decode("utf-8-sig")
         self.assertIn("職員番号,氏名,本支所コード", content)
         self.assertNotIn("パスワード", content)
         self.assertIn("1111,農協 太郎,000,本店,01,総務部", content)
+
+    def test_export_bom_appears_only_once(self):
+        """コード監査で発見：content_type=utf-8-sigのままだとwriterow()の都度BOM
+        （\\ufeff）が混入し、出力CSVの全行が「CSVの列構成が想定と異なります」
+        「職員番号が不正です」等でCSV取込に失敗する不具合があった（2026-09-29）。
+        修正後はファイル先頭に1個だけBOMが付くこと（＝再取込可能なこと）を確認する。
+        """
+        response = self.client.get("/accounts/staff/csv/")
+        self.assertEqual(response.content.count("﻿".encode("utf-8")), 1)
+        self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
 
     def test_export_respects_search_filter(self):
         Employee.objects.create_user(

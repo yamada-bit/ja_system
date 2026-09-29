@@ -854,10 +854,24 @@ class AuthorityCsvExportViewTests(TestCase):
     def test_export_contains_header_and_flag_row(self):
         response = self.client.get("/permissions/csv/")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8-sig")
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
         content = response.content.decode("utf-8-sig")
         self.assertIn("職員番号,部署,氏名,役職,権限", content)
         self.assertIn("1,総務部,管理者太郎,課長,管理者", content)
+
+    def test_export_bom_appears_only_once(self):
+        """コード監査で発見：accounts.views.StaffCsvExportViewと同じ理由
+        （content_type=utf-8-sigのままcsv.writerが行ごとにresponse.write()するため
+        writerow()の都度BOMが混入していた）不具合がこちらにもあった。修正後はファイル先頭に
+        1個だけBOMが付くこと（＝出力CSVを再取込可能な状態にすること）を確認する（2026-09-29）。
+        """
+        Employee.objects.create_user(
+            employee_no="2", name="二人目太郎", password="x", department=self.department,
+            rank=Rank.SHUJI, position=Position.IPPAN,
+        )
+        response = self.client.get("/permissions/csv/")
+        self.assertEqual(response.content.count("﻿".encode("utf-8")), 1)
+        self.assertTrue(response.content.startswith(b"\xef\xbb\xbf"))
 
     def test_export_row_for_employee_without_profile(self):
         """P-1: PermissionProfile 未設定の職員を CSV 出力すると role 列 "未設定" ＋

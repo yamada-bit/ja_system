@@ -128,8 +128,14 @@ class StaffCsvExportView(LoginRequiredMixin, SettingsMenuAccessMixin, View):
         sort_dir = request.GET.get("dir", "asc")
         qs = filter_staff_queryset(form, sort_key=sort_key, sort_dir=sort_dir)
 
-        response = HttpResponse(content_type="text/csv; charset=utf-8-sig")
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = 'attachment; filename="staff_list.csv"'
+        # BOMをファイル先頭に1回だけ手動出力する（Excelの文字化け防止）。charset=utf-8-sigに
+        # すると、csv.writerがwriterow()の都度response.write()を呼ぶたびに
+        # str.encode("utf-8-sig")が実行され、utf-8-sigはステートレスなため呼び出しごとに
+        # BOMを付与してしまい行ごとにBOMが混入する不具合があった（audit.views.
+        # AuditLogCsvExportViewと同じ理由でBOMを明示的に1回だけ書く方式に揃える）。
+        response.write("﻿")
         writer = csv.writer(response)
         # xlsx 職員マスタ!B91（Rev1.5で削除）：以前は「・パスワードはセキュリティ上、空欄で
         # 出力すること」という指示に沿ってパスワード列を空値で出力していたが、Rev1.5で一覧画面から
