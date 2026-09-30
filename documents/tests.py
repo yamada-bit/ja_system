@@ -2028,10 +2028,19 @@ class ImagePreviewTests(TestCase):
         self.client.login(username="1", password="pass1234")
 
     def _upload_pending(self, filename, content, content_type):
-        self.client.post(
-            "/documents/upload/step1/",
-            {"files": [SimpleUploadedFile(filename, content, content_type=content_type)]},
-        )
+        # 保管画面１はPDF限定（core.upload_validation.non_pdf_upload_message、2026-09-30）のため、
+        # 画像等のプレビュー挙動（PendingPreviewView自体はPDF限定ではない）を検証するここでは
+        # step1を経由せず保留ファイルをセッションへ直接仕込む。
+        import uuid
+        from pathlib import Path
+        from django.conf import settings
+        tmp_dir = Path(settings.MEDIA_ROOT) / "tmp_uploads"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        temp_name = f"{uuid.uuid4().hex}_{filename}"
+        (tmp_dir / temp_name).write_bytes(content)
+        session = self.client.session
+        session["documents_pending_upload"] = [{"temp_name": temp_name, "original_name": filename}]
+        session.save()
 
     def test_pending_preview_without_permission_denied(self):
         self._upload_pending("a.png", b"PNGDATA", "image/png")

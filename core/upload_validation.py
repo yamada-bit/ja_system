@@ -52,3 +52,19 @@ def blocked_upload_message(names) -> str | None:
         "セキュリティ上の理由により、次のファイルは保管できません（HTML・SVG・スクリプト等の"
         "形式は登録できません）: " + "、".join(blocked)
     )
+
+
+def non_pdf_upload_message(names) -> str | None:
+    """保管画面１は文書・契約書の登録入口としてPDFのみ受け付ける（2026-09-30ユーザー依頼）。
+
+    従来はクライアントJS（storage1.html）だけがPDF限定で、サーバーは能動的コンテンツの拒否リスト
+    （`blocked_upload_message`）のみだったため、JSを迂回したPOST・チャンクAPI直叩きでPDF以外が
+    登録できてしまい、本文抽出（pdfplumber/OCR）が毎回失敗してバッチが再試行し続ける恐れがあった。
+    拒否リスト（上記）はHTML等に対する具体的なメッセージ用として残し、こちらは許可リスト側の判定。
+    モデルのFileFieldバリデータは変更しない（ORM経由の保存・migrationに影響させないため）。
+    `names` にPDF以外が含まれていれば利用者向けメッセージ、無ければ None。
+    """
+    rejected = sorted({n for n in names if os.path.splitext((n or "").lower())[1] != ".pdf"})
+    if not rejected:
+        return None
+    return "PDFファイル以外は保管できません: " + "、".join(rejected)

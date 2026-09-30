@@ -14,7 +14,7 @@ from core import upload_services
 from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from core.file_type_services import get_preview_kind
 from core.upload_services import ChunkUploadError, PendingFileStorageError, combine_upload_chunks, save_upload_chunk
-from core.upload_validation import blocked_upload_message
+from core.upload_validation import blocked_upload_message, non_pdf_upload_message
 from permissions.services import can_download
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class BaseChunkUploadAPIView(LoginRequiredMixin, View):
 
         # セキュリティレビュー H-3: 能動的コンテンツ（HTML/SVG/スクリプト）は保管対象外。
         # 通常アップロード（BaseUploadStep1View.post）と同じ拒否判定を分割アップロードにも適用する。
-        blocked = blocked_upload_message([file_name])
+        blocked = blocked_upload_message([file_name]) or non_pdf_upload_message([file_name])
         if blocked is not None:
             logger.warning(
                 "チャンクアップロードで拒否対象の形式が送られました: employee_no=%s file=%r",
@@ -133,7 +133,8 @@ class BaseUploadStep1View(View):
             return render(request, self.template_name, self._context())
         # セキュリティレビュー H-3: HTML/SVG/スクリプト等の能動的コンテンツはアップロード時点で拒否する
         # （配信側の core.file_serving と二重の防御。core.upload_validation のモジュール docstring 参照）。
-        blocked = blocked_upload_message([f.name for f in files])
+        names = [f.name for f in files]
+        blocked = blocked_upload_message(names) or non_pdf_upload_message(names)
         if blocked is not None:
             logger.warning(
                 "保管画面１で拒否対象の形式がアップロードされました: employee_no=%s", request.user.employee_no

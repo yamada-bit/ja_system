@@ -24,7 +24,7 @@ from core import ocr_layout_services, pdf_text_embed_services, searchable_pdf_se
 from core.double_submit import consume_token, issue_token
 from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from core.file_type_services import is_image_filename
-from core.upload_validation import blocked_upload_message
+from core.upload_validation import blocked_upload_message, non_pdf_upload_message
 from core.csv_services import sanitize_csv_cell, sanitize_csv_row
 from core.forms import search_year_choices
 from core.middleware import SESSION_LAST_ACTIVITY_KEY
@@ -2589,6 +2589,72 @@ class BlockedUploadValidationTests(TestCase):
         self.assertIn("bad.html", msg)
         self.assertIn("also.svg", msg)
         self.assertNotIn("ok.pdf", msg)
+
+
+class NonPdfUploadValidationTests(TestCase):
+    """保管画面１のサーバー側PDF限定（2026-09-30）。JSを迂回したPOST・チャンクAPIでも拒否する。"""
+
+    def test_pdf_only_allowed_case_insensitive(self):
+        self.assertIsNone(non_pdf_upload_message(["a.pdf", "B.PDF"]))
+
+    def test_non_pdf_rejected_and_only_those_listed(self):
+        msg = non_pdf_upload_message(["ok.pdf", "a.png", "b.docx", "noext"])
+        self.assertIn("a.png", msg)
+        self.assertIn("b.docx", msg)
+        self.assertIn("noext", msg)
+        self.assertNotIn("ok.pdf", msg)
+
+    def test_step1_post_rejects_non_pdf_for_documents(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        from accounts.models import Employee, Position, Rank
+        from organizations.models import Department
+
+        dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+        resp = self.client.post(
+            "/documents/upload/step1/",
+            {"files": [SimpleUploadedFile("a.png", b"x", content_type="image/png")]},
+        )
+        self.assertEqual(resp.status_code, 200)  # redirectせず画面1を再描画
+        self.assertContains(resp, "PDFファイル以外は保管できません")
+        self.assertEqual(self.client.session.get("documents_pending_upload", []), [])
+
+        ok = self.client.post(
+            "/documents/upload/step1/",
+            {"files": [SimpleUploadedFile("a.pdf", b"%PDF-1.4", content_type="application/pdf")]},
+        )
+        self.assertEqual(ok.status_code, 302)
+
+    def test_chunk_api_rejects_non_pdf(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        from accounts.models import Employee, Position, Rank
+        from organizations.models import Department
+
+        dept = Department.objects.create(
+            branch_code="000", branch_name="本店", section_code="01", section_name="総務部"
+        )
+        Employee.objects.create_user(
+            employee_no="1", name="テスト太郎", password="pass1234",
+            department=dept, rank=Rank.KOSAYAKU, position=Position.KACHO,
+        )
+        self.client.login(username="1", password="pass1234")
+        resp = self.client.post(
+            "/documents/upload/chunk/",
+            {
+                "upload_id": "abc-123", "file_name": "a.png", "chunk_index": "0",
+                "total_chunks": "1", "file": SimpleUploadedFile("blob", b"x"),
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("PDF", resp.json()["message"])
 
 
 class HealthCheckViewTests(TestCase):
