@@ -1192,3 +1192,15 @@ consume_token()`のセッション辞書だけを使った「読み取り→比�
   という実際のTOCTOU状況を再現し、それでも一方しか処理を継続できないことを検証。
 
 `python manage.py test`（全アプリ、1041件）で全件成功を確認。
+
+## 文書編集時の保存満了日の引き直し基準日を「今日」から「保存日」へ変更（2026-09-30、ユーザー依頼）
+
+- 背景：C-1（2026-08-28）で「保存期間を変更した時だけ引き直す」と確定していたが、基準日は今日のままだった。
+  5年→7年に変えた文書だけ「今日+7年」となり、最初から7年で登録した文書（保存日+7年）と満了日が食い違うため、
+  登録時と同じ「保存日+保存期間」に統一した。
+- `documents/services.py apply_document_edit`：`calculate_expiry_date(timezone.localtime(doc.save_date).date(), …)`。
+  `save_date`はUTC保存のDateTimeFieldのためJST日付へ直してから渡す（登録時の`timezone.localdate()`と揃える）。
+- `expiry_date_previews(base_date=None)`／`documents.views._expiry_preview_context(form, obj=None)`：編集画面・
+  一括編集は`obj`の保存日を基準にプレビューを生成（新規保管画面２は従来どおり今日基準）。edit.htmlのJSは変更なし（コメントのみ）。
+- 契約書：編集で満了日を触らないため変更なし。
+- テスト：`DocumentEditExpiryDateRecalcTests`を保存日基準に更新＋プレビュー一致テストを追加。documents・core 386件成功。

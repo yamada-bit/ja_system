@@ -312,7 +312,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="document"),
                 **_edit_delete_context(self.object),
-                **_expiry_preview_context(form),
+                **_expiry_preview_context(form, self.object),
             },
         )
 
@@ -337,7 +337,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
                     "preview_kind": get_preview_kind(self.object.display_name),
                     "can_download": can_download(request.user, kind="document"),
                     **_edit_delete_context(self.object),
-                    **_expiry_preview_context(form),
+                    **_expiry_preview_context(form, self.object),
                 },
             )
 
@@ -375,7 +375,7 @@ class DocumentEditView(LoginRequiredMixin, UpdateView):
                 "preview_kind": get_preview_kind(self.object.display_name),
                 "can_download": can_download(request.user, kind="document"),
                 **_edit_delete_context(self.object),
-                **_expiry_preview_context(form),
+                **_expiry_preview_context(form, self.object),
             },
         )
 
@@ -496,17 +496,17 @@ class BulkEditView(LoginRequiredMixin, bulk_edit_views.BaseBulkEditView):
         return False
 
     def render_context_extra(self, request, form, state):
-        return _expiry_preview_context(form)
+        return _expiry_preview_context(form, self.object)
 
     def complete_context_extra(self, request, form):
-        return _expiry_preview_context(form)
+        return _expiry_preview_context(form, self.object)
 
 
 def _strip_ext(filename):
     return filename.rsplit(".", 1)[0] if "." in filename else filename
 
 
-def _expiry_preview_context(form):
+def _expiry_preview_context(form, obj=None):
     """storage2.html・edit.htmlの保存満了日プレビュー用。formの`retention_period`選択肢に
     対する{pk: {"iso": ISO日付文字列, "permanent": bool}}を渡し、JS側はこれを引くだけで
     済むようにする（documents.services.expiry_date_previews docstring参照）。
@@ -514,9 +514,14 @@ def _expiry_preview_context(form):
     保管画面２（新規保管）はメタデータがファイルごと（`retention_period_0`,…）になるため
     無添字フィールドが無い。選択肢（queryset）は全ファイル共通なので`retention_period_0`を
     代表に使う（UploadStep2Form.per_file_mode）。編集モードは従来どおり`retention_period`。
+
+    `obj`（編集対象の既存文書）を渡すと、プレビューの基準日を今日ではなくその文書の保存日
+    （`save_date`）にする（編集時の満了日＝保存日＋保存期間、2026-09-30ユーザー確定。
+    documents.services.apply_document_edit参照）。新規保管画面２は`obj=None`で今日基準のまま。
     """
     field = form.fields.get("retention_period") or form.fields.get("retention_period_0")
-    return {"expiry_previews": expiry_date_previews(field.queryset)}
+    base_date = timezone.localtime(obj.save_date).date() if obj is not None else None
+    return {"expiry_previews": expiry_date_previews(field.queryset, base_date=base_date)}
 
 
 def _pending_preview_context(request, pending):

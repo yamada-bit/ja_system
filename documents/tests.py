@@ -2388,7 +2388,7 @@ class EditScreenRetentionPermissionTests(TestCase):
 class DocumentEditExpiryDateRecalcTests(TestCase):
     """テストカバレッジ棚卸し（review_test_doc_contract.txt 指摘 H-1）で発見：
     memory expiry_date_edit_recalc_spec（2026-08-28ユーザー確定）の業務ルール
-    「編集時に expiry_date を今日基準で引き直すのは保存期間(retention_period)を
+    「編集時に expiry_date を引き直すのは（基準日は2026-09-30に今日から保存日へ変更）保存期間(retention_period)を
     変更した時だけ」が単体編集経路で1件も検証されていなかった。従来はどの項目を
     編集しても毎回「今日+保存期間」で上書きしていたため、共通ヘルパー
     documents.services.apply_document_edit の retention_changed 分岐が将来戻っても
@@ -2451,14 +2451,28 @@ class DocumentEditExpiryDateRecalcTests(TestCase):
         self.assertEqual(self.document.title, "タイトルだけ変更")
         self.assertEqual(self.document.expiry_date, self.original_expiry)
 
-    def test_changing_retention_period_recalculates_expiry_from_today(self):
+    def test_changing_retention_period_recalculates_expiry_from_save_date(self):
+        """2026-09-30ユーザー確定：引き直しの基準日は今日ではなく文書の保存日(save_date)。
+        auto_now_addのsave_dateは作成時刻固定なので、queryset.updateで過去日にずらして
+        「今日基準」と「保存日基準」が区別できる状態にする。"""
+        from documents.models import Document
+
+        past = timezone.make_aware(datetime.datetime(2024, 3, 15, 12, 0))
+        Document.objects.filter(pk=self.document.pk).update(save_date=past)
         self._post_edit(retention_period=self.retention_3y)
         self.document.refresh_from_db()
         self.assertEqual(self.document.retention_period, self.retention_3y)
-        self.assertEqual(
-            self.document.expiry_date,
-            calculate_expiry_date(timezone.localdate(), self.retention_3y),
-        )
+        self.assertEqual(self.document.expiry_date, datetime.date(2027, 3, 15))
+
+    def test_edit_screen_preview_uses_save_date_as_base(self):
+        """編集画面のプレビュー(expiry_previews)も保存日基準で、実際の再計算結果と一致する。"""
+        from documents.models import Document
+
+        past = timezone.make_aware(datetime.datetime(2024, 3, 15, 12, 0))
+        Document.objects.filter(pk=self.document.pk).update(save_date=past)
+        response = self.client.get(f"/documents/{self.document.pk}/edit/")
+        previews = response.context["expiry_previews"]
+        self.assertEqual(previews[str(self.retention_3y.pk)]["iso"], "2027-03-15")
 
 
 class DocumentEditIsDirtyServiceTests(TestCase):

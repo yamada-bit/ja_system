@@ -132,11 +132,14 @@ def apply_document_edit(doc, cleaned_data, employee):
     呼び出し側の責務として残す（既存の各ビューの慣習に合わせ、audit_services.logの呼び出しは
     ここでは行わない）。
 
-    `expiry_date`（保存満了日）は「保存期間(retention_period)を変更した時だけ」今日基準で
-    引き直す（2026-08-28ユーザー確定、レビュー指摘C-1）。以前はどの項目を編集しても毎回
+    `expiry_date`（保存満了日）は「保存期間(retention_period)を変更した時だけ」引き直す
+    （2026-08-28ユーザー確定、レビュー指摘C-1）。以前はどの項目を編集しても毎回
     `今日 + 保存期間`で上書きしていたため、登録から日が経った文書のタイトル誤字を直しただけでも
     満了日が経過日数ぶん先送りされ、契約書(`apply_contract_edit`、そもそも満了日を触らない)や
     一括編集の未変更ページ(据え置き)と挙動が食い違っていた。保存期間が変わらなければ満了日も不変。
+    引き直しの基準日は今日ではなく文書の保存日(`save_date`)（2026-09-30ユーザー確定）。
+    今日基準だと5年→7年に変えた文書だけ「今日+7年」となり、最初から7年で登録した文書
+    （保存日+7年）と満了日が食い違うため、登録時と同じ「保存日+保存期間」に揃えた。
     """
     department = cleaned_data["department"]
     if not can_select_department(employee):
@@ -153,7 +156,12 @@ def apply_document_edit(doc, cleaned_data, employee):
     doc.privacy_flag = cleaned_data["privacy_flag"]
     doc.memo = cleaned_data["memo"]
     if retention_changed:
-        doc.expiry_date = calculate_expiry_date(timezone.localdate(), cleaned_data["retention_period"])
+        # save_dateはauto_now_addのDateTimeField(UTC)。登録時（views）はtimezone.localdate()＝JST日付で
+        # 満了日を出しているため、ここもlocaltimeでJST日付に直してから渡す（UTC日付だとJST 0〜9時の
+        # 登録分で1日手前にずれる）。
+        doc.expiry_date = calculate_expiry_date(
+            timezone.localtime(doc.save_date).date(), cleaned_data["retention_period"]
+        )
     doc.save()
     return doc
 
@@ -164,7 +172,7 @@ def document_edit_is_dirty(doc, cleaned_data, employee) -> bool:
     「更新なし」として保存も監査ログ記録もしない）。`apply_document_edit`と同じ
     `department`正規化を行った上でコピー対象フィールドを1つずつ比較する。
 
-    `expiry_date`は`apply_document_edit`が「保存期間を変更した時だけ」今日基準で引き直す派生値
+    `expiry_date`は`apply_document_edit`が「保存期間を変更した時だけ」保存日基準で引き直す派生値
     （2026-08-28ユーザー確定、レビュー指摘C-1）。保存期間が変われば下の`retention_period_id`の
     差として検出され、変わらなければ満了日も不変なので、`expiry_date`自体を比較対象に含める
     必要はない。
@@ -184,10 +192,12 @@ def document_edit_is_dirty(doc, cleaned_data, employee) -> bool:
     )
 
 
-def expiry_date_previews(retention_periods) -> dict[str, dict]:
+def expiry_date_previews(retention_periods, base_date=None) -> dict[str, dict]:
     """保管画面２・編集画面の保存満了日プレビュー（JS `calculateExpiryDate()`）用。
-    基準日は「保存した日」で、実際の登録/更新時に使う`save_date`/`timezone.localdate()`と
-    同じく常に今日の日付（2026-08-20ユーザー確認：保存満了日＝保存した日+保存期間。
+    基準日は「保存した日」。新規保管（`base_date=None`）は実際の登録時に使う
+    `timezone.localdate()`と同じく今日の日付。編集画面は既存文書の保存日を`base_date`で渡し、
+    保存期間変更時の実際の再計算（`apply_document_edit`、保存日基準）と表示を一致させる
+    （2026-09-30ユーザー確定）。（2026-08-20ユーザー確認：保存満了日＝保存した日+保存期間。
     保管画面２の「年」欄は文書の業務上の年を表すだけで、保存満了日の計算には使わない）。
     calculate_expiry_date()をそのまま再利用することで、JS側に同じ日付計算ロジックを
     二重実装せずに済ませる。
@@ -198,10 +208,10 @@ def expiry_date_previews(retention_periods) -> dict[str, dict]:
     日付を利用者に見せず原本通り「永年」の文字列表示に固定する（2026-09-28ユーザー報告で
     保管画面２のプレビューが計算後の日付になっていた不具合を修正）。
     """
-    today = timezone.localdate()
+    base = base_date or timezone.localdate()
     return {
         str(rp.pk): {
-            "iso": calculate_expiry_date(today, rp).isoformat(),
+            "iso": calculate_expiry_date(base, rp).isoformat(),
             "permanent": rp.period_unit == RetentionPeriodUnit.PERMANENT,
         }
         for rp in retention_periods
