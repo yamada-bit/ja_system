@@ -63,6 +63,90 @@ function splitFilesBySizeBudget(files, threshold) {
   return { withinBudget, overBudget };
 }
 
+// 1チャンクのPOSTに付けるタイムアウトとリトライ。fetch()は既定でタイムアウトせず、回線が
+// 途中で止まると進捗バーが止まったまま待ち続ける。500MBのPDFは50〜100回のリクエストになるため、
+// 一時的な通信断・IISの502/503/504で1回失敗しただけで最初からやり直しにならないよう、
+// 途中のチャンクは間隔を空けて再送する（サーバー側save_upload_chunkは同じ番号のチャンクを
+// 上書きするだけなので、再送は安全）。
+const CHUNK_TIMEOUT_MS = 120 * 1000; // 途中のチャンク（5〜10MB）1回あたり。約0.5Mbps以上を想定。
+const CHUNK_RETRY_DELAYS_MS = [1000, 3000, 8000]; // 再送の待ち時間（＝最大3回再送）
+
+// 最終チャンクは再送しない。サーバー側で結合まで終わった後に応答だけが失われた場合、再送すると
+// チャンク断片が既に削除されており「チャンクが見つかりません」の誤エラーになるうえ、結合済みの
+// ファイルが保留一覧に残るため、自動再送の効果よりも混乱の方が大きい。結合（最大500MBの連結）に
+// 時間がかかるため、タイムアウトはweb.configのrequestTimeout（10分）に合わせて長くとる。
+const LAST_CHUNK_TIMEOUT_MS = 10 * 60 * 1000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 通信自体の失敗（ネットワーク断・タイムアウト・5xx・JSONでない応答）は retriable=true の
+// エラーにして呼び出し側で再送する。サーバーがJSONで返したエラー（status==='error'）や
+// 4xxは再送しても結果が変わらないため再送しない。
+class ChunkRequestError extends Error {
+  constructor(message, retriable) {
+    super(message);
+    this.retriable = retriable;
+  }
+}
+
+async function postChunkOnce(uploadUrl, formData, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(uploadUrl, {
+      method: 'POST',
+      body: formData,
+      headers: { 'X-CSRFToken': getCsrfToken() },
+      credentials: 'include',
+      signal: controller.signal,
+    });
+  } catch (e) {
+    const reason = e && e.name === 'AbortError' ? '応答がありませんでした（タイムアウト）' : '通信に失敗しました';
+    throw new ChunkRequestError(reason, true);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const contentType = res.headers.get('Content-Type') || '';
+  if (!contentType.includes('application/json')) {
+    // IIS/LBのエラーページ（502等）はHTMLで返る。5xxは一時的な障害の可能性が高いので再送する。
+    // 5xx以外でJSONでない場合は、セッション切れでログイン画面へリダイレクトされた等で、
+    // 再送しても直らない。
+    if (res.status >= 500) {
+      throw new ChunkRequestError(`サーバーが一時的に応答しませんでした（${res.status}）`, true);
+    }
+    throw new ChunkRequestError(
+      'セッションが切れた可能性があります。ログインし直してからやり直してください。', false,
+    );
+  }
+  return res.json();
+}
+
+async function postChunk(uploadUrl, buildFormData, isLastChunk, onRetry) {
+  const timeoutMs = isLastChunk ? LAST_CHUNK_TIMEOUT_MS : CHUNK_TIMEOUT_MS;
+  const delays = isLastChunk ? [] : CHUNK_RETRY_DELAYS_MS;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // FormDataは送信ごとに作り直す（再利用すると中のBlobの読み取り状態に依存するため）。
+      return await postChunkOnce(uploadUrl, buildFormData(), timeoutMs);
+    } catch (e) {
+      if (!(e instanceof ChunkRequestError) || !e.retriable || attempt >= delays.length) {
+        if (e instanceof ChunkRequestError && e.retriable && isLastChunk) {
+          throw new Error(
+            `${e.message}。サーバー側で処理が完了している可能性があります。保管画面１を開き直して、最初からアップロードしてください。`,
+          );
+        }
+        throw e;
+      }
+      onRetry(attempt + 1, delays.length);
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
 // files: 選択されたFileの配列。1ファイルずつ・1ファイル内はチャンク順に直列でPOSTする
 // （並列化するとサーバー側のセッション保留ファイル一覧への追記が競合し得るため）。
 // 結合が完了したファイルはサーバー側セッションの保留ファイル一覧に貯まるだけで、本チャンクの
@@ -100,20 +184,30 @@ async function uploadFilesInChunks(files, uploadUrl, chunkSize) {
       const uploadId = generateUploadId();
       for (let i = 0; i < totalChunks; i++) {
         const chunk = file.slice(i * chunkBytes, (i + 1) * chunkBytes);
-        const formData = new FormData();
-        formData.append('upload_id', uploadId);
-        formData.append('file_name', file.name);
-        formData.append('chunk_index', i);
-        formData.append('total_chunks', totalChunks);
-        formData.append('file', chunk);
+        const buildFormData = () => {
+          const formData = new FormData();
+          formData.append('upload_id', uploadId);
+          formData.append('file_name', file.name);
+          formData.append('chunk_index', i);
+          formData.append('total_chunks', totalChunks);
+          formData.append('file', chunk);
+          return formData;
+        };
 
-        const res = await fetch(uploadUrl, {
-          method: 'POST',
-          body: formData,
-          headers: { 'X-CSRFToken': getCsrfToken() },
-          credentials: 'include',
-        });
-        const data = await res.json();
+        let data;
+        try {
+          data = await postChunk(uploadUrl, buildFormData, i === totalChunks - 1, (n, max) => {
+            if (msgEl) msgEl.textContent = `通信を再試行しています（${n}/${max}）...`;
+          });
+        } catch (e) {
+          // 通信エラーも、サーバーのエラー応答と同じく「ファイル名＋既に登録済みのファイル」付きで
+          // 利用者に伝える（呼び出し元はthrowされたErrorのmessageをそのまま表示する）。
+          const note = completedFileNames.length > 0
+            ? `（${completedFileNames.join('、')} は登録済みです。これらは選び直さずに再実行してください）`
+            : '';
+          throw new Error(`${file.name}: ${e.message}${note ? ' ' + note : ''}`);
+        }
+        if (msgEl) msgEl.textContent = 'アップロード中...';
         if (data.status === 'error') {
           const note = completedFileNames.length > 0
             ? `（${completedFileNames.join('、')} は登録済みです。これらは選び直さずに再実行してください）`
