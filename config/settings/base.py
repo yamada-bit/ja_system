@@ -247,6 +247,13 @@ OCR_VISION_TIMEOUT_SECONDS = env.int("OCR_VISION_TIMEOUT_SECONDS", default=60)
 # サービス関数（accounts.csv_import_services.import_staff_csv）自体には上限を置かない。
 STAFF_CSV_IMPORT_MAX_ROWS = env.int("STAFF_CSV_IMPORT_MAX_ROWS", default=1000)
 
+# ファイル配信（プレビュー・ダウンロード）でRange（部分取得）対応を宣言する最小ファイルサイズ（バイト）。
+# 未満のファイルはAccept-Rangesを返さず、PDF.jsは全体を1回で取得する。往復の遅延が大きい環境では、
+# 小さいPDFを部分取得すると直列の往復が増えて遅くなるため（core.file_serving.ranged_file_response参照）。
+# 0にすると全ファイルで宣言する。既定10MBは、往復約0.4秒・実効1.5〜10MB/秒の環境での損益分岐
+# （2〜12MB）から選んだ暫定値で、実測後に調整する。
+FILE_RANGE_MIN_BYTES = env.int("FILE_RANGE_MIN_BYTES", default=10 * 1024 * 1024)
+
 # 一括ダウンロード（検索画面のZIP）で受け付ける、選択ファイルの合計サイズ上限（バイト）。ZIPは
 # メモリ上で組み立てて一括返却するため（core.zip_services.build_zip_archive）、大きいとメモリ不足や
 # リクエストのタイムアウト（httpPlatformHandler requestTimeout/LB）による502の原因になる。超過時は

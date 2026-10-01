@@ -2013,12 +2013,27 @@ class PreviewViewTests(TestCase):
         return f"/documents/{self.document.pk}/preview/"
 
     def test_full_response_advertises_range_support(self):
-        """PDF.jsがRangeで部分取得するための条件（Accept-Ranges/Content-Length）を満たす。"""
+        """PDF.jsがRangeで部分取得するための条件（Accept-Ranges/Content-Length）を満たす
+        （しきい値FILE_RANGE_MIN_BYTES以上のファイル）。"""
         url = self._grant_and_store()
-        response = self.client.get(url)
+        with self.settings(FILE_RANGE_MIN_BYTES=10):
+            response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Accept-Ranges"], "bytes")
         self.assertEqual(response["Content-Length"], "10")
+
+    def test_small_file_does_not_advertise_range_support(self):
+        """しきい値未満の小さいファイルはAccept-Rangesを返さない（PDF.jsが全体を1回で取得する。
+        往復遅延の大きい環境で、部分取得の往復が増えて遅くなるのを避けるため）。Rangeヘッダー
+        付きの要求自体は、大きさによらず処理する。"""
+        url = self._grant_and_store()
+        with self.settings(FILE_RANGE_MIN_BYTES=11):
+            response = self.client.get(url)
+            partial = self.client.get(url, HTTP_RANGE="bytes=2-5")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Accept-Ranges", response)
+        self.assertEqual(response["Content-Length"], "10")
+        self.assertEqual(partial.status_code, 206)
 
     def test_range_request_returns_206_with_requested_bytes(self):
         url = self._grant_and_store()

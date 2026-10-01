@@ -26,6 +26,7 @@ H-1/H-2 の被害低減にも有効だが、本アプリのテンプレートは
 import os
 import re
 
+from django.conf import settings
 from django.http import FileResponse, HttpResponse
 
 from core.file_type_services import IMAGE_EXTENSIONS, PDF_EXTENSION
@@ -69,6 +70,13 @@ def apply_file_response_security_headers(response):
 # 単一範囲（"bytes=0-99" / "bytes=100-" / "bytes=-500"）のみ解釈する。複数範囲（カンマ区切り）や
 # 不正な書式は、RFC 9110に従い「Rangeヘッダーを無視して全体を200で返す」。
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+# 配信時に1回で読み込むバイト数。DjangoのFileResponseの既定は4KBで、1MBの配信に約250回の
+# read()と書き込みを繰り返す。特に部分取得（206）は下の_LimitedReaderを経由して1回あたりの
+# Python側の呼び出しが増えるため、waitress上で5MBの取得が約77ms→115msとサイズに比例して
+# 遅くなった（実測）。256KBにすると従来と同等（約79ms）に戻る。
+FILE_RESPONSE_BLOCK_SIZE = 256 * 1024
 
 
 class _LimitedReader:
@@ -139,8 +147,16 @@ def ranged_file_response(request, file_obj, *, as_attachment, filename):
 
     if byte_range is None:
         response = FileResponse(file_obj, as_attachment=as_attachment, filename=filename)
+        response.block_size = FILE_RESPONSE_BLOCK_SIZE
         response["Content-Length"] = str(size)
-        response["Accept-Ranges"] = "bytes"
+        # Range対応を「宣言」するのは大きいファイルだけにする。PDF.jsはAccept-Rangesを見て部分取得に
+        # 切り替えるが、往復1回あたりの遅延が大きい環境（IIS/LB経由のテストサーバーで約0.4秒/回、
+        # 1.3MBのPDFで実測）では、直列の部分取得が2〜3回増えるぶん、全体を1回で取るより遅くなる
+        # （しかもPDF.jsは全体取得も止めないため転送量も増える）。小さいファイルは従来どおり全体を
+        # 1回で返し、部分取得が有利になる大容量だけRangeを宣言する。Rangeヘッダー付きの要求自体は
+        # 大きさによらず処理する（上の206の分岐）。
+        if size >= settings.FILE_RANGE_MIN_BYTES:
+            response["Accept-Ranges"] = "bytes"
         return apply_file_response_security_headers(response), False
 
     start, end = byte_range
@@ -148,6 +164,7 @@ def ranged_file_response(request, file_obj, *, as_attachment, filename):
     response = FileResponse(
         _LimitedReader(file_obj, end - start + 1), as_attachment=as_attachment, filename=filename
     )
+    response.block_size = FILE_RESPONSE_BLOCK_SIZE
     response.status_code = 206
     response["Content-Length"] = str(end - start + 1)
     response["Content-Range"] = f"bytes {start}-{end}/{size}"
