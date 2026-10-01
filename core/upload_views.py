@@ -5,13 +5,13 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import PermissionDenied
-from django.http import FileResponse, Http404, JsonResponse
+from django.http import Http404, JsonResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
 from core import upload_services
-from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
+from core.file_serving import ranged_file_response, resolve_as_attachment
 from core.file_type_services import get_preview_kind
 from core.upload_services import ChunkUploadError, PendingFileStorageError, combine_upload_chunks, save_upload_chunk
 from core.upload_validation import blocked_upload_message, non_pdf_upload_message
@@ -282,7 +282,9 @@ class BasePendingPreviewView(View):
         # セキュリティレビュー H-3: PreviewView と同じく、PDF・ラスター画像以外はインライン
         # 配信させず、どの形式でも nosniff と実行禁止 CSP を付与する（core.file_serving 参照）。
         as_attachment = resolve_as_attachment(wants_inline=True, filename=item["original_name"])
-        response = FileResponse(
-            temp_file, as_attachment=as_attachment, filename=item["original_name"]
+        # 保管画面２のプレビューも、保管済みのプレビューと同じくRange対応にする
+        # （大容量PDFで全体転送にならないように）。監査ログは元々記録しない。
+        response, _is_continuation = ranged_file_response(
+            request, temp_file, as_attachment=as_attachment, filename=item["original_name"]
         )
-        return apply_file_response_security_headers(response)
+        return response

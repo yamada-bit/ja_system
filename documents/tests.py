@@ -2005,6 +2005,59 @@ class PreviewViewTests(TestCase):
         response = self.client.get(f"/documents/{self.document.pk}/preview/")
         self.assertEqual(response.status_code, 404)
 
+    def _grant_and_store(self, payload=b"0123456789"):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        self.document.file.save("preview.pdf", ContentFile(payload), save=True)
+        return f"/documents/{self.document.pk}/preview/"
+
+    def test_full_response_advertises_range_support(self):
+        """PDF.jsがRangeで部分取得するための条件（Accept-Ranges/Content-Length）を満たす。"""
+        url = self._grant_and_store()
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Accept-Ranges"], "bytes")
+        self.assertEqual(response["Content-Length"], "10")
+
+    def test_range_request_returns_206_with_requested_bytes(self):
+        url = self._grant_and_store()
+        response = self.client.get(url, HTTP_RANGE="bytes=2-5")
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(b"".join(response.streaming_content), b"2345")
+        self.assertEqual(response["Content-Range"], "bytes 2-5/10")
+        self.assertEqual(response["Content-Length"], "4")
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+
+    def test_open_ended_and_suffix_ranges(self):
+        url = self._grant_and_store()
+        r1 = self.client.get(url, HTTP_RANGE="bytes=7-")
+        self.assertEqual(b"".join(r1.streaming_content), b"789")
+        r2 = self.client.get(url, HTTP_RANGE="bytes=-3")
+        self.assertEqual(r2.status_code, 206)
+        self.assertEqual(b"".join(r2.streaming_content), b"789")
+
+    def test_unsatisfiable_range_returns_416(self):
+        url = self._grant_and_store()
+        response = self.client.get(url, HTTP_RANGE="bytes=50-60")
+        self.assertEqual(response.status_code, 416)
+        self.assertEqual(response["Content-Range"], "bytes */10")
+
+    def test_multi_range_is_ignored_and_returns_full_file(self):
+        url = self._grant_and_store()
+        response = self.client.get(url, HTTP_RANGE="bytes=0-1,4-5")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.streaming_content), b"0123456789")
+
+    def test_audit_logged_once_for_range_preview(self):
+        """PDF.jsはRangeで何度も取得するため、先頭以外の部分取得では監査ログを残さない
+        （1回のプレビュー=1件の履歴）。"""
+        url = self._grant_and_store()
+        self.client.get(url, HTTP_RANGE="bytes=0-3")
+        self.client.get(url, HTTP_RANGE="bytes=4-7")
+        self.client.get(url, HTTP_RANGE="bytes=8-9")
+        self.assertEqual(AuditLog.objects.filter(action="文書検索　プレビュー").count(), 1)
+
     def test_preview_adds_security_headers(self):
         """セキュリティレビュー H-3: どの形式でも nosniff と実行禁止 CSP を付与する。"""
         PermissionProfile.objects.create(

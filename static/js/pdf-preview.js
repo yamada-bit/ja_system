@@ -121,7 +121,7 @@
         if (st.cancelled) {
           return null;
         }
-        // 同一オリジン・セッション Cookie は自動送出。FileResponse は Range 対応のため
+        // 同一オリジン・セッション Cookie は自動送出。配信側は core.file_serving.ranged_file_response で Range 対応のため
         // PDF.js は必要ページのバイトだけ取得する（大きな PDF でも初回転送が軽い）。
         return pdfjsLib.getDocument({ url: url }).promise;
       })

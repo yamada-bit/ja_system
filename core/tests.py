@@ -2693,6 +2693,27 @@ class TryImmediateTextLayerExtractionTests(TestCase):
         self.assertFalse(second.text_extracted)
 
 
+class ParseByteRangeTests(TestCase):
+    """core.file_serving.parse_byte_range（Range対応の解釈部分）の単体テスト。"""
+
+    def test_cases(self):
+        from core.file_serving import parse_byte_range
+
+        self.assertIsNone(parse_byte_range("", 100))
+        self.assertEqual(parse_byte_range("bytes=0-9", 100), (0, 9))
+        self.assertEqual(parse_byte_range("bytes=90-", 100), (90, 99))
+        self.assertEqual(parse_byte_range("bytes=-10", 100), (90, 99))
+        self.assertEqual(parse_byte_range("bytes=-500", 100), (0, 99))  # サフィックスがサイズ超過
+        self.assertEqual(parse_byte_range("bytes=50-999", 100), (50, 99))  # 終端がサイズ超過
+        self.assertIsNone(parse_byte_range("bytes=0-1,4-5", 100))  # 複数範囲は無視
+        self.assertIsNone(parse_byte_range("items=0-9", 100))  # 単位不正は無視
+        self.assertIsNone(parse_byte_range("bytes=9-3", 100))  # 逆転は無視
+        with self.assertRaises(ValueError):
+            parse_byte_range("bytes=100-", 100)
+        with self.assertRaises(ValueError):
+            parse_byte_range("bytes=-0", 100)
+
+
 class IsImageFilenameTests(TestCase):
     """保管画面２・編集画面の実画像プレビュー可否判定（documents/contracts.views参照）。"""
 

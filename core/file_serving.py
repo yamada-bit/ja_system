@@ -24,6 +24,9 @@ H-1/H-2 の被害低減にも有効だが、本アプリのテンプレートは
 """
 
 import os
+import re
+
+from django.http import FileResponse, HttpResponse
 
 from core.file_type_services import IMAGE_EXTENSIONS, PDF_EXTENSION
 
@@ -55,3 +58,98 @@ def apply_file_response_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Content-Security-Policy"] = FILE_RESPONSE_CSP
     return response
+
+
+# ---- Range（部分取得）対応 --------------------------------------------------------
+# DjangoのFileResponseはRangeリクエストに対応せず、常にファイル全体を返す。PDF.js
+# （static/js/pdf-preview.js）はサーバーがRange対応のときだけ必要なページ分のバイトを取得し、
+# 非対応だとファイル全体をダウンロードしてから描画するため、500MBのPDFのプレビューを開くたびに
+# 全体転送になっていた。ここでRange（単一範囲）に対応して206を返す。
+
+# 単一範囲（"bytes=0-99" / "bytes=100-" / "bytes=-500"）のみ解釈する。複数範囲（カンマ区切り）や
+# 不正な書式は、RFC 9110に従い「Rangeヘッダーを無視して全体を200で返す」。
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+class _LimitedReader:
+    """ファイルの現在位置から remaining バイトまでだけを返すファイルライクオブジェクト
+    （FileResponseにそのまま渡して206の本文を作るため）。close()で元のファイルも閉じる。"""
+
+    def __init__(self, file_obj, remaining):
+        self._file = file_obj
+        self._remaining = remaining
+
+    def read(self, size=-1):
+        if self._remaining <= 0:
+            return b""
+        if size is None or size < 0 or size > self._remaining:
+            size = self._remaining
+        data = self._file.read(size)
+        self._remaining -= len(data)
+        return data
+
+    def close(self):
+        self._file.close()
+
+
+def parse_byte_range(header, size):
+    """Rangeヘッダー値を(開始, 終了)（両端を含む）に変換する。
+
+    戻り値: None＝ヘッダー無し・解釈不能・複数範囲（全体を200で返す）。
+    範囲が満たせない（開始がファイルサイズ以上、サフィックス長0）場合は ValueError を送出する
+    （呼び出し側が416にする）。
+    """
+    if not header:
+        return None
+    m = _RANGE_RE.match(header.strip())
+    if not m:
+        return None
+    first, last = m.groups()
+    if first == "" and last == "":
+        return None
+    if first == "":  # サフィックス範囲: 末尾 last バイト
+        length = int(last)
+        if length == 0 or size == 0:
+            raise ValueError("unsatisfiable")
+        return max(size - length, 0), size - 1
+    start = int(first)
+    if start >= size:
+        raise ValueError("unsatisfiable")
+    end = size - 1 if last == "" else min(int(last), size - 1)
+    if end < start:
+        return None  # 逆転した範囲は不正な書式として無視する
+    return start, end
+
+
+def ranged_file_response(request, file_obj, *, as_attachment, filename):
+    """file_obj（seek可能な開いたファイル）を、Range対応のFileResponseで返す。
+
+    戻り値は (response, is_continuation)。is_continuation は「先頭以外の部分取得」を表し、
+    PDF.jsのようにRangeで何度も取得するクライアントでは、監査ログをファイルごとに1回に
+    保つため、呼び出し側は is_continuation の応答では監査ログを残さない。
+    """
+    size = file_obj.size
+    try:
+        byte_range = parse_byte_range(request.META.get("HTTP_RANGE", ""), size)
+    except ValueError:
+        file_obj.close()
+        response = HttpResponse(status=416)
+        response["Content-Range"] = f"bytes */{size}"
+        return apply_file_response_security_headers(response), False
+
+    if byte_range is None:
+        response = FileResponse(file_obj, as_attachment=as_attachment, filename=filename)
+        response["Content-Length"] = str(size)
+        response["Accept-Ranges"] = "bytes"
+        return apply_file_response_security_headers(response), False
+
+    start, end = byte_range
+    file_obj.seek(start)
+    response = FileResponse(
+        _LimitedReader(file_obj, end - start + 1), as_attachment=as_attachment, filename=filename
+    )
+    response.status_code = 206
+    response["Content-Length"] = str(end - start + 1)
+    response["Content-Range"] = f"bytes {start}-{end}/{size}"
+    response["Accept-Ranges"] = "bytes"
+    return apply_file_response_security_headers(response), start > 0

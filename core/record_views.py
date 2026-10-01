@@ -13,7 +13,9 @@ from pypdf.errors import PyPdfError
 
 from audit import services as audit_services
 from core import deletion_services, searchable_pdf_services
-from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
+from core.file_serving import (
+    apply_file_response_security_headers, ranged_file_response, resolve_as_attachment,
+)
 from core.searchable_pdf_services import SearchablePdfUnavailable
 from permissions.services import can_download
 
@@ -61,10 +63,11 @@ class BaseFileServeView(View):
             as_attachment = resolve_as_attachment(
                 wants_inline=not self.as_attachment, filename=obj.display_name
             )
-            response = FileResponse(
-                obj.file.open("rb"), as_attachment=as_attachment, filename=obj.display_name
+            # Range対応（core.file_serving.ranged_file_response）：PDF.jsのプレビューが必要な
+            # ページ分だけを取得できるようにし、大容量PDFでも全体転送にならないようにする。
+            response, is_continuation = ranged_file_response(
+                request, obj.file.open("rb"), as_attachment=as_attachment, filename=obj.display_name
             )
-            apply_file_response_security_headers(response)
         except OSError:
             # FileNotFoundError（実体欠損）だけでなくPermissionError（ロック・権限エラー等）も
             # OSErrorのサブクラスのため、ストレージI/O境界で起こりうるOSError全般をここで
@@ -79,12 +82,16 @@ class BaseFileServeView(View):
         # （「ファイル名：契約書_001」等）に合わせ、タイトルではなく実ファイル名(display_name)を
         # 「ファイル名：」形式で記録する（原本フィデリティ監査で発見：以前は
         # 「{entity_label}「{title}」を〜しました。」という原本に無い独自形式だった）。
-        audit_services.log(
-            employee=request.user,
-            action=self.audit_action,
-            event_message=f"ファイル名：{obj.display_name}",
-            **self.audit_extra_kwargs(obj),
-        )
+        # PDF.jsはRangeで同じファイルを何度も取得するため、先頭以外の部分取得（is_continuation）では
+        # 記録しない（1回のプレビュー=1件の履歴という従来の粒度を保つ。Range非対応の通常の
+        # 全体取得・ダウンロードは従来どおり毎回記録する）。
+        if not is_continuation:
+            audit_services.log(
+                employee=request.user,
+                action=self.audit_action,
+                event_message=f"ファイル名：{obj.display_name}",
+                **self.audit_extra_kwargs(obj),
+            )
         return response
 
 
