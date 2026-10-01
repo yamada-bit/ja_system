@@ -86,6 +86,13 @@ DATABASES = {
     )
 }
 
+# Webプロセス（config/wsgi.py）だけに適用するDBのstatement_timeout（ミリ秒、0で無効）。
+# 1〜2文字のフリーワード検索はpg_trgmのインデックスが効かず本文の全件スキャンになり得るため、
+# 1文のSQLがこの時間を超えたらDB側で中断して（OperationalError→500）、他の利用者の処理を
+# 巻き込まないようにする。バッチ・マイグレーション・シード等のコマンドには適用しない
+# （長時間かかるのが正常な処理があるため。wsgi.pyだけが読む）。
+WEB_DB_STATEMENT_TIMEOUT_MS = env.int("WEB_DB_STATEMENT_TIMEOUT_MS", default=30000)
+
 # screen-login/screen-menu（HTML職員番号ログイン）に対応するカスタムユーザーモデル。
 AUTH_USER_MODEL = "accounts.Employee"
 
