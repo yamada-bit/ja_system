@@ -86,6 +86,14 @@ DATABASES = {
     )
 }
 
+# DB接続を張るまでの待ち時間（秒）。libpqの既定は無期限で、DBサーバーが落ちている・到達できない
+# （パケットが破棄される）状態だとリクエストごとの接続試行が待ち続け、waitressのスレッド
+# （既定4本）が順に埋まって画面が無応答になる。短く切ってエラーとして返す。statement_timeout
+# （SQL実行時間）とは別物で、バッチ・マイグレーションを含む全プロセスに適用する。
+DATABASES["default"].setdefault("OPTIONS", {})["connect_timeout"] = env.int(
+    "DB_CONNECT_TIMEOUT_SECONDS", default=10
+)
+
 # Webプロセス（config/wsgi.py）だけに適用するDBのstatement_timeout（ミリ秒、0で無効）。
 # 1〜2文字のフリーワード検索はpg_trgmのインデックスが効かず本文の全件スキャンになり得るため、
 # 1文のSQLがこの時間を超えたらDB側で中断して（OperationalError→500）、他の利用者の処理を
