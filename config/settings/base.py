@@ -228,6 +228,11 @@ AUDIT_LOG_RETENTION_MONTHS = env.int("AUDIT_LOG_RETENTION_MONTHS", default=3)
 # 承認済みの前提で既定True（2026-08-10ユーザー指示）。Falseにすると、テキスト層の無いPDFはextracted_textが
 # 空のまま据え置かれ全文検索の対象外になる（core.ocr_layout_services.OcrDisabledError参照）。
 OCR_ENABLED = env.bool("OCR_ENABLED", default=True)
+# Vision APIの1ページ分の呼び出し(document_text_detection)のタイムアウト（秒）。ライブラリ既定
+# （リトライ込みで最大10分前後）に任せると、ネットワーク障害で1ページに長時間固まり、バッチの
+# 時間制限（OCR_BATCH_TIME_LIMIT_SECONDS）はページの切れ目でしか判定できないため、タスクの
+# 強制終了まで止まる。超過したページは既存のページ単位のエラー処理でスキップされる。
+OCR_VISION_TIMEOUT_SECONDS = env.int("OCR_VISION_TIMEOUT_SECONDS", default=60)
 # 職員マスタCSV取込（画面）で受け付ける最大行数（ヘッダー・空行を除く）。新規職員1人ごとに
 # Argon2でパスワードをハッシュ化するため（1件約50ms）、行数が多いとリクエストのタイムアウト
 # （httpPlatformHandler requestTimeout/LB）の原因になる。画面のフォームだけを制限し、

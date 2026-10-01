@@ -162,6 +162,7 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
                 image_obj = vision.Image(content=buf.getvalue())
                 response = client.document_text_detection(
                     image=image_obj, image_context={"language_hints": ["ja"]},
+                    timeout=settings.OCR_VISION_TIMEOUT_SECONDS,
                 )
                 page_textdatas = _get_lines(page_no, response)
                 all_textdatas.extend(page_textdatas)

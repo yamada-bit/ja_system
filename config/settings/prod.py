@@ -59,6 +59,11 @@ EMAIL_PORT = env.int("EMAIL_PORT", default=587)
 EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
+# SMTP接続のタイムアウト（秒）。Djangoの既定は無期限で、AdminEmailHandler（500エラー通知）は
+# リクエスト処理スレッド内で同期送信するため、SMTPサーバーが応答しないとスレッドが固まる。
+# waitressのスレッドは既定4本なので、500エラーが重なると全スレッドが埋まりシステム全体が
+# 応答しなくなる。送信に失敗しても通知が1通落ちるだけなので短く切る。
+EMAIL_TIMEOUT = env.int("EMAIL_TIMEOUT", default=10)
 
 # base.pyのLOGGINGは辞書オブジェクトとして`from .base import *`でそのまま束縛されるため、
 # ここでの変更はprod.py配下でのみ有効（dev.pyは別途base.pyをimportし別インスタンスを持つ）。

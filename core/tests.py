@@ -2029,6 +2029,23 @@ class OcrLayoutServicesTests(TestCase):
         self.assertEqual(text, "")
         self.assertEqual(textdatas, [])
 
+    def test_vision_call_has_timeout(self):
+        """Vision APIの呼び出しにタイムアウトを付ける（応答が固まって1ページで長時間止まらないように）。"""
+        mock_vision = MagicMock()
+        mock_response = MagicMock()
+        mock_response.full_text_annotation.pages = []
+        client = mock_vision.ImageAnnotatorClient.return_value
+        client.document_text_detection.return_value = mock_response
+        with override_settings(OCR_ENABLED=True, OCR_VISION_TIMEOUT_SECONDS=17):
+            with patch.dict(
+                "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
+            ):
+                with patch("pdf2image.pdfinfo_from_path", return_value={"Pages": 1}), patch(
+                    "pdf2image.convert_from_path", return_value=[MagicMock()]
+                ):
+                    ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertEqual(client.document_text_detection.call_args.kwargs["timeout"], 17)
+
     def test_raises_time_limit_error_when_deadline_exceeded(self):
         """max_secondsを超えたら、残りページを処理せずOcrTimeLimitErrorで打ち切る
         （バッチが実行時間制限で強制終了される前に自分で諦められるようにするため）。"""
