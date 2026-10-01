@@ -1,6 +1,7 @@
 import io
 import logging
 
+from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import PermissionDenied
 from django.db import Error as DBError
@@ -169,6 +170,15 @@ class BaseBulkDownloadView(View):
     def audit_extra_kwargs(self, objects):
         return {}
 
+    @staticmethod
+    def _file_size(obj):
+        """合計サイズ判定用。実体欠損（OSError）やファイル未設定（ValueError）は0として数える
+        （欠損の扱いはZIP構築側が missing_count として利用者へ警告するため、ここでは止めない）。"""
+        try:
+            return obj.file.size
+        except (OSError, ValueError):
+            return 0
+
     def post(self, request):
         pks = request.POST.getlist("pks")
         if not pks:
@@ -210,6 +220,24 @@ class BaseBulkDownloadView(View):
         # 内の privacy_flag 集計でそれぞれ再SELECTしていた（コードレビューR-4、2026-08-28修正）。
         objects = list(objects)
         total_count = len(objects)
+
+        # ZIPはメモリ上で組み立てて一括で返すため（core.zip_services.build_zip_archive）、
+        # 合計サイズが大きいとメモリ不足や、リクエストのタイムアウト（httpPlatformHandlerの
+        # requestTimeout/LB）による502になる。構築前にファイルサイズだけで判定して拒否し、
+        # 選択を減らして再実行するよう案内する（上限はsettings.BULK_DOWNLOAD_MAX_TOTAL_BYTES）。
+        total_bytes = sum(self._file_size(obj) for obj in objects)
+        if total_bytes > settings.BULK_DOWNLOAD_MAX_TOTAL_BYTES:
+            limit_mb = settings.BULK_DOWNLOAD_MAX_TOTAL_BYTES // (1024 * 1024)
+            logger.warning(
+                "一括ダウンロードの合計サイズが上限を超えたため拒否しました: employee_no=%s 件数=%s 合計=%sバイト",
+                request.user.employee_no, total_count, total_bytes,
+            )
+            messages.error(
+                request,
+                f"選択したファイルの合計サイズが上限（{limit_mb}MB）を超えているためダウンロードできません。"
+                "選択する件数を減らして、もう一度お試しください。",
+            )
+            return redirect(self.search_url_name)
         # ZIP構築自体はcore.zip_services.build_zip_archiveへ分離済み（規約準拠監査で発見：
         # ファイルI/Oを伴うビジネスロジックがビューに直書きされていた。件数の不一致は下の
         # messages.warningで利用者にも案内する）。

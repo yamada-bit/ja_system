@@ -1392,6 +1392,33 @@ class BulkDownloadViewTests(TestCase):
         entry = AuditLog.objects.get(action="文書検索　一括ダウンロード")
         self.assertIn("2件", entry.event_message)
 
+    def test_total_size_over_limit_is_rejected_without_building_zip(self):
+        """選択ファイルの合計サイズが上限を超えたらZIPを作らず、メッセージ付きで検索画面へ戻す
+        （メモリ不足・タイムアウト回避）。監査ログも残さない（ダウンロードは行われていないため）。"""
+        from django.contrib.messages import get_messages
+
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        doc1 = self._create_document("test1")
+        doc2 = self._create_document("test2")
+        with self.settings(BULK_DOWNLOAD_MAX_TOTAL_BYTES=9):  # 各5バイト、合計10バイト
+            response = self.client.post("/documents/bulk-download/", {"pks": [doc1.pk, doc2.pk]})
+        self.assertRedirects(response, "/documents/search/")
+        msgs = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("合計サイズが上限" in m for m in msgs))
+        self.assertFalse(AuditLog.objects.filter(action="文書検索　一括ダウンロード").exists())
+
+    def test_total_size_at_limit_is_allowed(self):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        doc1 = self._create_document("test1")
+        doc2 = self._create_document("test2")
+        with self.settings(BULK_DOWNLOAD_MAX_TOTAL_BYTES=10):
+            response = self.client.post("/documents/bulk-download/", {"pks": [doc1.pk, doc2.pk]})
+        self.assertEqual(response.status_code, 200)
+
     def test_no_selection_redirects_with_message(self):
         from django.contrib.messages import get_messages
 
