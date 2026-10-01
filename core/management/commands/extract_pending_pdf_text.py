@@ -51,15 +51,37 @@ TARGET_MODELS = [
 class Command(BaseCommand):
     help = "未処理PDF（text_extracted=False）から本文テキストを抽出する（全文検索基盤）。"
 
+    def add_arguments(self, parser):
+        # 通常（5分間隔）と大容量（夜間）の2本のタスクに、ファイルサイズで担当を分けるための
+        # オプション。--max-bytesは「以下」、--larger-than-bytesは「超」なので、同じ値を指定すれば
+        # 担当が重複も漏れもなく分かれる（同じ文書を2本が二重にOCRしない）。どちらも未指定なら
+        # 全件が対象（従来の動作）。
+        parser.add_argument(
+            "--max-bytes", type=int, default=None,
+            help="このバイト数以下のファイルだけを対象にする（通常タスク用）。",
+        )
+        parser.add_argument(
+            "--larger-than-bytes", type=int, default=None,
+            help="このバイト数を超えるファイルだけを対象にする（大容量タスク用）。",
+        )
+        parser.add_argument(
+            "--time-limit", type=int, default=None,
+            help="1回の実行に使える秒数。未指定ならsettings.OCR_BATCH_TIME_LIMIT_SECONDS。"
+                 "大容量タスクでは、タスクスケジューラの実行時間制限より短い値を指定する。",
+        )
+
     def handle(self, *args, **options):
         total_processed = 0
         total_skipped = 0
         total_failed = 0
         total_deferred = 0
-        # 1回の実行に使える時間の上限（settings.OCR_BATCH_TIME_LIMIT_SECONDS）。タスクスケジューラの
-        # 実行時間制限（register_scheduled_tasks.ps1の$ExtractTimeLimit、30分）に強制終了される前に、
-        # 自分で区切って終えるためのもの。
-        deadline = time.monotonic() + settings.OCR_BATCH_TIME_LIMIT_SECONDS
+        # 1回の実行に使える時間の上限（既定はsettings.OCR_BATCH_TIME_LIMIT_SECONDS、--time-limitで
+        # 上書き）。タスクスケジューラの実行時間制限（register_scheduled_tasks.ps1の
+        # $ExtractTimeLimit、30分）に強制終了される前に、自分で区切って終えるためのもの。
+        time_limit = options.get("time_limit") or settings.OCR_BATCH_TIME_LIMIT_SECONDS
+        max_bytes = options.get("max_bytes")
+        larger_than_bytes = options.get("larger_than_bytes")
+        deadline = time.monotonic() + time_limit
 
         # documents/contractsをまたいで、ファイルサイズの小さい順に処理する。pk順だと、数百ページの
         # 大容量スキャンPDFが先頭に居座った場合、実行時間制限で毎回その1件の途中で打ち切られ、
@@ -68,7 +90,12 @@ class Command(BaseCommand):
         targets = []
         for model, label in TARGET_MODELS:
             for obj in model.objects.filter(text_extracted=False, is_deleted=False).order_by("pk"):
-                targets.append((self._file_size(obj), label, obj))
+                size = self._file_size(obj)
+                if max_bytes is not None and size > max_bytes:
+                    continue
+                if larger_than_bytes is not None and size <= larger_than_bytes:
+                    continue
+                targets.append((size, label, obj))
         targets.sort(key=lambda t: t[0])
 
         for index, (_size, label, obj) in enumerate(targets):
@@ -77,13 +104,13 @@ class Command(BaseCommand):
                 total_deferred = len(targets) - index
                 logger.warning(
                     "実行時間の上限（%s秒）に達したため残り%s件の処理を次回に持ち越します",
-                    settings.OCR_BATCH_TIME_LIMIT_SECONDS, total_deferred,
+                    time_limit, total_deferred,
                 )
                 break
             # 先頭の1件目（＝この実行で使える時間をまだ全く消費していない）でも制限時間内に
             # 終わらなかった場合は、何度実行しても完了しない大きさの文書。ログで運用者に伝える。
             is_first = index == 0
-            outcome = self._process_one(obj, label, remaining, is_first)
+            outcome = self._process_one(obj, label, remaining, is_first, time_limit)
             if outcome == "processed":
                 total_processed += 1
             elif outcome == "skipped":
@@ -107,7 +134,7 @@ class Command(BaseCommand):
         except OSError:
             return 0
 
-    def _process_one(self, obj, label, remaining_seconds, is_first):
+    def _process_one(self, obj, label, remaining_seconds, is_first, time_limit):
         """1件分の抽出と保存。戻り値は "processed" / "skipped" / "deferred" / "failed"。"""
         try:
             result = self._extract_text(obj, label, remaining_seconds)
@@ -115,9 +142,9 @@ class Command(BaseCommand):
             if is_first:
                 logger.error(
                     "OCRが1回の実行時間の上限（%s秒）内に終わりません。このままでは何度実行しても"
-                    "完了しない大きさの文書です（settings.OCR_BATCH_TIME_LIMIT_SECONDSとタスクの"
+                    "完了しない大きさの文書です（--time-limit/OCR_BATCH_TIME_LIMIT_SECONDSとタスクの"
                     "実行時間制限を延ばすか、PDFを分割してください）: model=%s pk=%s",
-                    settings.OCR_BATCH_TIME_LIMIT_SECONDS, label, obj.pk,
+                    time_limit, label, obj.pk,
                 )
             else:
                 logger.warning(

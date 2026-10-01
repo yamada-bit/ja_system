@@ -2219,6 +2219,46 @@ class ExtractPendingPdfTextCommandTests(TestCase):
         self.assertEqual(order, [small.pk, big.pk])
         self.assertEqual(Document.objects.filter(text_extracted=True).count(), 2)
 
+    def test_size_options_split_documents_into_disjoint_lanes(self):
+        """--max-bytes（以下）と--larger-than-bytes（超）に同じ値を渡すと、通常タスクと大容量タスクの
+        担当が重複も漏れもなく分かれる。"""
+        small = self._make_document("小さい")
+        big = self._make_document("大きい")
+        big.file.save("big.pdf", ContentFile(b"%PDF-1.4 " + b"x" * 5000), save=True)
+        boundary = small.file.size
+        seen = []
+
+        def fake_extract(obj):
+            seen.append(obj.pk)
+            return "十分な文字数を含む本文テキストです。"
+
+        target = "core.management.commands.extract_pending_pdf_text.extract_text_layer"
+        with patch(target, side_effect=fake_extract):
+            call_command("extract_pending_pdf_text", max_bytes=boundary)
+        self.assertEqual(seen, [small.pk])
+        seen.clear()
+        with patch(target, side_effect=fake_extract):
+            call_command("extract_pending_pdf_text", larger_than_bytes=boundary)
+        self.assertEqual(seen, [big.pk])
+
+    def test_time_limit_option_overrides_setting(self):
+        """--time-limitがsettings.OCR_BATCH_TIME_LIMIT_SECONDSより優先される。"""
+        doc1 = self._make_document("一件目")
+        doc2 = self._make_document("二件目")
+        # 設定は十分長いが、--time-limit=100で2件目の着手時(200秒経過)には打ち切られる。
+        with override_settings(OCR_BATCH_TIME_LIMIT_SECONDS=100000), patch(
+            "core.management.commands.extract_pending_pdf_text.time.monotonic",
+            side_effect=[0, 10, 200],
+        ), patch(
+            "core.management.commands.extract_pending_pdf_text.extract_text_layer",
+            return_value="十分な文字数を含む本文テキストです。",
+        ):
+            call_command("extract_pending_pdf_text", time_limit=100)
+        doc1.refresh_from_db()
+        doc2.refresh_from_db()
+        self.assertTrue(doc1.text_extracted)
+        self.assertFalse(doc2.text_extracted)
+
     def test_stops_starting_new_records_after_time_limit(self):
         """実行時間の上限に達したら、残りは処理せず次回に持ち越す（text_extracted=Falseのまま）。"""
         doc1 = self._make_document("一件目")
