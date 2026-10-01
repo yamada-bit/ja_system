@@ -2182,6 +2182,44 @@ class PreviewViewTests(TestCase):
         self.assertNotIn("attachment", response["Content-Disposition"])
         self.assertTrue(AuditLog.objects.filter(action="契約書検索　プレビュー").exists())
 
+    def _grant_and_store(self, payload=b"0123456789"):
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, contract_download=True
+        )
+        self.contract.file.save("preview.pdf", ContentFile(payload), save=True)
+        return f"/contracts/{self.contract.pk}/preview/"
+
+    def test_range_request_returns_206_with_requested_bytes(self):
+        """documents.tests.PreviewViewTests.test_range_request_returns_206_with_requested_bytesと
+        同じ理由（Range対応は共通基底BaseFileServeViewだが、契約書側の配線も確認する）。"""
+        url = self._grant_and_store()
+        response = self.client.get(url, HTTP_RANGE="bytes=2-5")
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(b"".join(response.streaming_content), b"2345")
+        self.assertEqual(response["Content-Range"], "bytes 2-5/10")
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+
+    def test_small_file_does_not_advertise_range_support_but_large_does(self):
+        """documents.tests.PreviewViewTests.test_small_file_does_not_advertise_range_supportと同じ
+        理由。FILE_RANGE_MIN_BYTES未満はAccept-Rangesを返さず（PDF.jsが全体を1回で取得）、
+        以上なら返す。"""
+        url = self._grant_and_store()
+        with self.settings(FILE_RANGE_MIN_BYTES=11):
+            small = self.client.get(url)
+        with self.settings(FILE_RANGE_MIN_BYTES=10):
+            large = self.client.get(url)
+        self.assertNotIn("Accept-Ranges", small)
+        self.assertEqual(large["Accept-Ranges"], "bytes")
+
+    def test_audit_logged_once_for_range_preview(self):
+        """documents.tests.PreviewViewTests.test_audit_logged_once_for_range_previewと同じ理由
+        （契約書側のaudit_actionでも、先頭以外の部分取得では記録しない）。"""
+        url = self._grant_and_store()
+        self.client.get(url, HTTP_RANGE="bytes=0-3")
+        self.client.get(url, HTTP_RANGE="bytes=4-7")
+        self.client.get(url, HTTP_RANGE="bytes=8-9")
+        self.assertEqual(AuditLog.objects.filter(action="契約書検索　プレビュー").count(), 1)
+
     def test_missing_file_returns_404(self):
         PermissionProfile.objects.create(
             employee=self.employee, role=PermissionRole.STAFF, contract_download=True
