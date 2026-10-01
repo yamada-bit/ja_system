@@ -17,6 +17,7 @@ OCR関数統合（core.ocr_layout_servicesへの一本化）でOCR呼び出し�
 import logging
 
 import pdfplumber
+from django.conf import settings
 
 from core.text_normalization import normalize_for_search
 
@@ -56,6 +57,16 @@ def try_immediate_text_layer_extraction(obj, *, label):
     既に成功した後にこの関数を呼ぶため、失敗してもレコード自体は正常に登録済み）。
     """
     try:
+        if obj.file.size > settings.SYNC_TEXT_EXTRACTION_MAX_BYTES:
+            # 大容量PDFはpdfplumberの全ページ解析に数十秒〜数分かかり得て、リクエストのタイム
+            # アウト（httpPlatformHandlerのrequestTimeout/LB）に達すると、DBコミット済みのまま
+            # 応答が切れて保留ファイルが残り、再送で重複登録になる。同期抽出は見送り、
+            # 定期バッチ（text_extracted=Falseのまま据え置き）に委ねる。
+            logger.info(
+                "大容量のため同期の本文抽出を見送りました（バッチに委ねます）: model=%s pk=%s size=%s",
+                label, obj.pk, obj.file.size,
+            )
+            return
         text = extract_text_layer(obj)
     except Exception:
         # pdfplumberの解析失敗（破損PDF等）・ファイルI/Oエラー等、例外の型は多岐にわたるが、
@@ -72,3 +83,33 @@ def try_immediate_text_layer_extraction(obj, *, label):
     obj.extracted_text_normalized = normalize_for_search(text)
     obj.text_extracted = True
     obj.save(update_fields=["extracted_text_normalized", "text_extracted"])
+
+
+def try_immediate_text_layer_extraction_batch(objs, *, label):
+    """複数レコードの同期抽出を、1リクエスト内の累計サイズ上限
+    （settings.SYNC_TEXT_EXTRACTION_MAX_TOTAL_BYTES）付きで順に行う。
+
+    1ファイルごとの上限（try_immediate_text_layer_extraction内）だけでは、閾値以下の
+    ファイルを多数まとめて登録した場合に所要時間が合算されて同じタイムアウトを招くため、
+    累計がこの上限を超えた分は同期抽出を飛ばしてバッチに委ねる。累計には実際に抽出を試みた
+    ファイルのサイズだけを加算する（個別上限で見送られたファイルは加算しない）。
+    """
+    total = 0
+    for obj in objs:
+        try:
+            size = obj.file.size
+        except OSError:
+            logger.exception("ファイルサイズを取得できず同期抽出を見送りました: model=%s pk=%s", label, obj.pk)
+            continue
+        if size > settings.SYNC_TEXT_EXTRACTION_MAX_BYTES:
+            # 個別上限超過はtry_immediate_text_layer_extraction側でログを残して見送る。
+            try_immediate_text_layer_extraction(obj, label=label)
+            continue
+        if total + size > settings.SYNC_TEXT_EXTRACTION_MAX_TOTAL_BYTES:
+            logger.info(
+                "1リクエストの累計上限のため同期の本文抽出を見送りました（バッチに委ねます）: "
+                "model=%s pk=%s", label, obj.pk,
+            )
+            continue
+        total += size
+        try_immediate_text_layer_extraction(obj, label=label)

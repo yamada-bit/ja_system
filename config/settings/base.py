@@ -232,6 +232,18 @@ GOOGLE_APPLICATION_CREDENTIALS = env("GOOGLE_APPLICATION_CREDENTIALS", default="
 # ディレクトリパス。OSのPATHにpopplerが通っている環境では設定不要（空文字のままでよい）。
 POPPLER_PATH = env("POPPLER_PATH", default="")
 
+# アップロード直後の同期テキスト層抽出（core.text_extraction_services）を行うPDFのサイズ上限。
+# 超えたファイルは同期抽出を見送り、定期バッチ（extract_pending_pdf_text、5分間隔）に委ねる
+# （全文検索への反映が最大5分遅れるだけ）。pdfplumberの全ページ解析は大容量PDFで数十秒〜数分
+# かかり得て、リクエストのタイムアウト（httpPlatformHandler requestTimeout/LB）で応答が切れると、
+# DB登録済みのまま保留ファイルが残り再送で重複登録になるため。
+# 既定値（個別20MB・1リクエスト累計30MB）は実測前の暫定値（2026-10-01）。テキスト層ありPDFが
+# 1〜数MB/秒で処理できる想定で、同期抽出を約30秒以内に収める目安。実測後に.envで調整する。
+SYNC_TEXT_EXTRACTION_MAX_BYTES = env.int("SYNC_TEXT_EXTRACTION_MAX_BYTES", default=20 * 1024 * 1024)
+SYNC_TEXT_EXTRACTION_MAX_TOTAL_BYTES = env.int(
+    "SYNC_TEXT_EXTRACTION_MAX_TOTAL_BYTES", default=30 * 1024 * 1024
+)
+
 # スキャン文書の OCR 行レイアウト（core.ocr_layout_services、座標＋テキスト）を
 # documents.Document/contracts.Contract.ocr_textdata（JSONField）へ保存するかどうか。保存した
 # 座標データは、検索可能なPDF（OCRテキスト埋め込み版）を core.searchable_pdf_services が

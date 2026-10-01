@@ -30,7 +30,9 @@ from core.forms import search_year_choices
 from core.middleware import SESSION_LAST_ACTIVITY_KEY
 from core.notice_services import add_months, get_notice_counts, is_expiring_soon
 from core.ocr_layout_services import OcrDisabledError, TextData, TextDatas
-from core.text_extraction_services import is_scanned, try_immediate_text_layer_extraction
+from core.text_extraction_services import (
+    is_scanned, try_immediate_text_layer_extraction, try_immediate_text_layer_extraction_batch,
+)
 from core.text_normalization import normalize_for_search
 from core.upload_services import (
     ChunkUploadError,
@@ -2526,6 +2528,38 @@ class TryImmediateTextLayerExtractionTests(TestCase):
         self.doc.refresh_from_db()
         self.assertEqual(self.doc.extracted_text_normalized, "")
         self.assertFalse(self.doc.text_extracted)
+
+    def test_oversized_file_skips_sync_extraction(self):
+        """個別サイズ上限（SYNC_TEXT_EXTRACTION_MAX_BYTES）超過ならpdfplumberを呼ばずバッチに委ねる。"""
+        with self.settings(SYNC_TEXT_EXTRACTION_MAX_BYTES=1), patch(
+            "core.text_extraction_services.pdfplumber.open"
+        ) as mock_open:
+            try_immediate_text_layer_extraction(self.doc, label="document")
+        mock_open.assert_not_called()
+        self.doc.refresh_from_db()
+        self.assertFalse(self.doc.text_extracted)
+
+    def test_batch_skips_files_over_cumulative_limit(self):
+        """1リクエスト累計上限を超えた分は同期抽出を飛ばす（先頭のファイルは抽出される）。"""
+        from documents.models import Document
+
+        second = Document(
+            title="2件目", department=self.department, group=self.group, category=self.category,
+            year=2026, retention_period=self.retention_period, uploader=self.employee,
+            expiry_date=timezone.localdate(),
+        )
+        second.file.save("b.pdf", ContentFile(b"%PDF-1.4 dummy"), save=False)
+        second.save()
+        size = self.doc.file.size
+        with self.settings(SYNC_TEXT_EXTRACTION_MAX_TOTAL_BYTES=size), patch(
+            "core.text_extraction_services.pdfplumber.open",
+            return_value=self._mock_pdfplumber("十分な文字数を含む本文テキストです。"),
+        ):
+            try_immediate_text_layer_extraction_batch([self.doc, second], label="document")
+        self.doc.refresh_from_db()
+        second.refresh_from_db()
+        self.assertTrue(self.doc.text_extracted)
+        self.assertFalse(second.text_extracted)
 
 
 class IsImageFilenameTests(TestCase):

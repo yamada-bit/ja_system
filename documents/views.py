@@ -22,7 +22,7 @@ from core import (
 )
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
-from core.text_extraction_services import try_immediate_text_layer_extraction
+from core.text_extraction_services import try_immediate_text_layer_extraction_batch
 from documents.forms import SearchForm, UploadStep2Form
 from documents.models import Document
 from documents.search_services import build_queryset
@@ -243,8 +243,7 @@ class UploadStep2View(LoginRequiredMixin, View):
         # transaction.atomic()のコミット後に行うことで、DBロック保持期間に本文抽出の所要時間を
         # 含めない。スキャン文書・解析失敗時は何もせず、後続のバッチ
         # （core.management.commands.extract_pending_pdf_text）に処理を委ねる。
-        for document in created:
-            try_immediate_text_layer_extraction(document, label="document")
+        try_immediate_text_layer_extraction_batch(created, label="document")
 
         upload_services.clear_pending_files(request.session, PENDING_SESSION_KEY)
         # 原本index.html:1603-1645のstartRegisterMock()はscreen-storage2から画面遷移せず、

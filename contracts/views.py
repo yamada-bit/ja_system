@@ -36,7 +36,7 @@ from core import (
 )
 from core.double_submit import consume_token, issue_token
 from core.file_type_services import get_preview_kind
-from core.text_extraction_services import try_immediate_text_layer_extraction
+from core.text_extraction_services import try_immediate_text_layer_extraction_batch
 from permissions.services import (
     can_download,
     can_edit_contract,
@@ -311,8 +311,7 @@ class UploadStep2View(RequiresContractEditMixin, View):
             return redirect("contracts:upload_step2")
 
         # documents.views.UploadStep2Viewと同じ理由（全文検索：テキスト層のあるPDFを同期抽出）。
-        for contract in created:
-            try_immediate_text_layer_extraction(contract, label="contract")
+        try_immediate_text_layer_extraction_batch(created, label="contract")
 
         upload_services.clear_pending_files(request.session, PENDING_SESSION_KEY)
         # documents.views.UploadStep2View.postと同じ理由（原本フィデリティ監査で発見：
