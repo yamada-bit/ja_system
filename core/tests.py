@@ -29,7 +29,7 @@ from core.csv_services import sanitize_csv_cell, sanitize_csv_row
 from core.forms import search_year_choices
 from core.middleware import SESSION_LAST_ACTIVITY_KEY
 from core.notice_services import add_months, get_notice_counts, is_expiring_soon
-from core.ocr_layout_services import OcrDisabledError, TextData, TextDatas
+from core.ocr_layout_services import OcrDisabledError, OcrTimeLimitError, TextData, TextDatas
 from core.text_extraction_services import (
     is_scanned, try_immediate_text_layer_extraction, try_immediate_text_layer_extraction_batch,
 )
@@ -1994,7 +1994,9 @@ class OcrLayoutServicesTests(TestCase):
             with patch.dict(
                 "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
             ):
-                with patch("pdf2image.convert_from_bytes", return_value=fake_images):
+                with patch("pdf2image.pdfinfo_from_path", return_value={"Pages": 7}), patch(
+                    "pdf2image.convert_from_path", return_value=[fake_images[0]]
+                ):
                     text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(
                         b"%PDF-1.4 dummy", source_name="big.pdf",
                     )
@@ -2019,11 +2021,28 @@ class OcrLayoutServicesTests(TestCase):
             with patch.dict(
                 "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
             ):
-                with patch("pdf2image.convert_from_bytes", return_value=[MagicMock(), MagicMock()]):
+                with patch("pdf2image.pdfinfo_from_path", return_value={"Pages": 2}), patch(
+                    "pdf2image.convert_from_path", return_value=[MagicMock()]
+                ):
                     text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
 
         self.assertEqual(text, "")
         self.assertEqual(textdatas, [])
+
+    def test_raises_time_limit_error_when_deadline_exceeded(self):
+        """max_secondsを超えたら、残りページを処理せずOcrTimeLimitErrorで打ち切る
+        （バッチが実行時間制限で強制終了される前に自分で諦められるようにするため）。"""
+        mock_vision = MagicMock()
+        with override_settings(OCR_ENABLED=True):
+            with patch.dict(
+                "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
+            ):
+                with patch("pdf2image.pdfinfo_from_path", return_value={"Pages": 3}), patch(
+                    "pdf2image.convert_from_path"
+                ) as mock_convert, patch("core.ocr_layout_services.time.monotonic", side_effect=[0, 100]):
+                    with self.assertRaises(ocr_layout_services.OcrTimeLimitError):
+                        ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy", max_seconds=10)
+        mock_convert.assert_not_called()
 
     def test_get_lines_reconstructs_line_from_word_coordinates(self):
         """座標ベースの行復元ロジック（_get_lines）が、同じ行にある複数wordのsymbolテキストを
@@ -2180,6 +2199,61 @@ class ExtractPendingPdfTextCommandTests(TestCase):
         mock_pdf.__enter__.return_value = mock_pdf
         mock_pdf.__exit__.return_value = False
         return mock_pdf
+
+    def test_smaller_files_are_processed_first(self):
+        """pk順ではなくファイルサイズの小さい順に処理する（大容量スキャンPDFが先頭に居座って
+        後ろの文書が飢餓状態になるのを防ぐ）。"""
+        from documents.models import Document
+
+        big = self._make_document("大きい")
+        big.file.save("big.pdf", ContentFile(b"%PDF-1.4 " + b"x" * 5000), save=True)
+        small = self._make_document("小さい")
+        order = []
+
+        def fake_extract(obj):
+            order.append(obj.pk)
+            return "十分な文字数を含む本文テキストです。"
+
+        with patch("core.management.commands.extract_pending_pdf_text.extract_text_layer", side_effect=fake_extract):
+            call_command("extract_pending_pdf_text")
+        self.assertEqual(order, [small.pk, big.pk])
+        self.assertEqual(Document.objects.filter(text_extracted=True).count(), 2)
+
+    def test_stops_starting_new_records_after_time_limit(self):
+        """実行時間の上限に達したら、残りは処理せず次回に持ち越す（text_extracted=Falseのまま）。"""
+        doc1 = self._make_document("一件目")
+        doc2 = self._make_document("二件目")
+        with override_settings(OCR_BATCH_TIME_LIMIT_SECONDS=100), patch(
+            "core.management.commands.extract_pending_pdf_text.time.monotonic",
+            side_effect=[0, 10, 200],
+        ), patch(
+            "core.management.commands.extract_pending_pdf_text.extract_text_layer",
+            return_value="十分な文字数を含む本文テキストです。",
+        ):
+            call_command("extract_pending_pdf_text")
+        doc1.refresh_from_db()
+        doc2.refresh_from_db()
+        self.assertTrue(doc1.text_extracted)
+        self.assertFalse(doc2.text_extracted)
+
+    def test_ocr_time_limit_defers_record_without_failing_batch(self):
+        """OCRが残り時間内に終わらなかった場合は失敗扱いにせず持ち越し、後続の処理は続ける。"""
+        scanned = self._make_document("スキャン")
+        scanned.file.save("scan.pdf", ContentFile(b"%PDF-1.4 " + b"x" * 5000), save=True)
+        normal = self._make_document("通常")
+        texts = {scanned.pk: "", normal.pk: "十分な文字数を含む本文テキストです。"}
+        with override_settings(OCR_ENABLED=True), patch(
+            "core.management.commands.extract_pending_pdf_text.extract_text_layer",
+            side_effect=lambda obj: texts[obj.pk],
+        ), patch(
+            "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+        ) as mock_ocr:
+            mock_ocr.extract_text_and_layout_via_ocr.side_effect = OcrTimeLimitError("time over")
+            call_command("extract_pending_pdf_text")
+        scanned.refresh_from_db()
+        normal.refresh_from_db()
+        self.assertFalse(scanned.text_extracted)
+        self.assertTrue(normal.text_extracted)
 
     def test_text_layer_extraction_populates_normalized_and_flag(self):
         doc = self._make_document("通常文書")

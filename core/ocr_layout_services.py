@@ -28,6 +28,9 @@ import dataclasses
 import io
 import logging
 import math
+import os
+import tempfile
+import time
 from typing import List
 
 from django.conf import settings
@@ -41,6 +44,10 @@ OCR_PAGE_IMAGE_DPI = 200
 
 class OcrDisabledError(Exception):
     """settings.OCR_ENABLED=False の状態でOCR実行が要求された場合に送出する。"""
+
+
+class OcrTimeLimitError(Exception):
+    """OCRが呼び出し元の指定した制限時間（max_seconds）を超えたため中断したことを表す。"""
 
 
 # 同じ行とみなすy座標の許容差（200DPIで約1mm相当）。移植元のYTHRESHOLDと同じ値。
@@ -97,7 +104,7 @@ def textdatas_from_json(data):
     ]
 
 
-def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name=""):
+def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=None):
     """PDFバイト列からテキストと座標データを抽出する。
 
     戻り値は (全文テキスト, 全ページ分のTextDatasのリスト) のタプル。後者は
@@ -108,46 +115,69 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name=""):
     google-cloud-vision・pdf2imageはいずれも遅延importする：OCR_ENABLED=Falseの環境
     （未導入・poppler未導入の環境を含む）では、この関数が呼ばれない限りSDKの読み込み・
     認証情報チェック・poppler実行が一切走らないようにするため。
+
+    ページ画像は1ページずつ変換して処理し、処理後に破棄する（従来は全ページを一度に
+    メモリへ展開しており、数百ページのPDFでメモリ不足になり得たため）。1ページごとに
+    pdf2image.convert_from_bytesへバイト列を渡すと毎回一時ファイルへ全体を書き出すため、
+    先にPDFを一時ディレクトリへ1回だけ書き出し、パス指定（convert_from_path）で変換する。
+
+    max_seconds を指定すると、その秒数を超えた時点で OcrTimeLimitError を送出して打ち切る
+    （呼び出し元のバッチがタスクスケジューラの実行時間制限で強制終了される前に、自分で
+    安全に諦められるようにするため。ページ単位でしか判定しないので、1ページの処理中は
+    超過し得る）。
     """
     if not settings.OCR_ENABLED:
         raise OcrDisabledError("OCR_ENABLED=False のためGoogle Cloud Vision連携は無効化されています。")
 
     from google.cloud import vision
-    from pdf2image import convert_from_bytes
+    from pdf2image import convert_from_path, pdfinfo_from_path
 
     client = vision.ImageAnnotatorClient()
-    images = convert_from_bytes(
-        pdf_bytes, dpi=OCR_PAGE_IMAGE_DPI, fmt="jpeg", poppler_path=settings.POPPLER_PATH or None,
-    )
+    poppler_path = settings.POPPLER_PATH or None
+    deadline = time.monotonic() + max_seconds if max_seconds else None
 
     page_texts = []
     all_textdatas = []
-    for i, image in enumerate(images):
-        page_no = i + 1
-        try:
-            buf = io.BytesIO()
-            image.save(buf, format="JPEG")
-            image_obj = vision.Image(content=buf.getvalue())
-            response = client.document_text_detection(
-                image=image_obj, image_context={"language_hints": ["ja"]},
-            )
-            page_textdatas = _get_lines(page_no, response)
-            all_textdatas.extend(page_textdatas)
-            page_texts.append("\n".join(_get_textlines(page_textdatas, page_no)))
-            # if response.full_text_annotation and response.full_text_annotation.text:
-            #     page_texts.append(response.full_text_annotation.text)
-        except Exception:
-            # 1ページのOCR失敗（Vision APIの一時的なエラー等）で文書全体の処理を止めない。
-            # このページの本文・座標データは欠落するが、他ページは継続する
-            # （移植元process_pdf_asyncのページ単位try/exceptと同じ設計判断）。
-            logger.exception(
-                "座標付きOCR処理でページの処理に失敗しました（このページはスキップ）: source=%s page=%s",
-                source_name, page_no,
-            )
+    with tempfile.TemporaryDirectory(prefix="ocr_") as tmp_dir:
+        pdf_path = os.path.join(tmp_dir, "source.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+        # ここ（ページ数取得）はpopplerの未導入・PDF破損を例外として呼び出し元へ伝播させるため、
+        # ページ単位のtry/exceptの外に置く（全ページ失敗が「本文が空のOCR完了」に化けないように）。
+        page_count = int(pdfinfo_from_path(pdf_path, poppler_path=poppler_path)["Pages"])
+
+        for page_no in range(1, page_count + 1):
+            if deadline is not None and time.monotonic() > deadline:
+                raise OcrTimeLimitError(
+                    f"OCRが制限時間（{max_seconds}秒）を超えたため中断しました: "
+                    f"{page_no - 1}/{page_count}ページ処理済み"
+                )
+            try:
+                image = convert_from_path(
+                    pdf_path, dpi=OCR_PAGE_IMAGE_DPI, fmt="jpeg",
+                    first_page=page_no, last_page=page_no, poppler_path=poppler_path,
+                )[0]
+                buf = io.BytesIO()
+                image.save(buf, format="JPEG")
+                image_obj = vision.Image(content=buf.getvalue())
+                response = client.document_text_detection(
+                    image=image_obj, image_context={"language_hints": ["ja"]},
+                )
+                page_textdatas = _get_lines(page_no, response)
+                all_textdatas.extend(page_textdatas)
+                page_texts.append("\n".join(_get_textlines(page_textdatas, page_no)))
+            except Exception:
+                # 1ページの画像化・OCR失敗（Vision APIの一時的なエラー等）で文書全体の処理を
+                # 止めない。このページの本文・座標データは欠落するが、他ページは継続する
+                # （移植元process_pdf_asyncのページ単位try/exceptと同じ設計判断）。
+                logger.exception(
+                    "座標付きOCR処理でページの処理に失敗しました（このページはスキップ）: source=%s page=%s",
+                    source_name, page_no,
+                )
 
     if source_name:
         logger.info(
-            "Google Cloud Vision OCR（座標付き）を実行しました: source=%s pages=%s", source_name, len(images),
+            "Google Cloud Vision OCR（座標付き）を実行しました: source=%s pages=%s", source_name, page_count,
         )
 
     return "\n".join(page_texts), all_textdatas

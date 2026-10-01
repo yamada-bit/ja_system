@@ -221,6 +221,12 @@ AUDIT_LOG_RETENTION_MONTHS = env.int("AUDIT_LOG_RETENTION_MONTHS", default=3)
 # 承認済みの前提で既定True（2026-08-10ユーザー指示）。Falseにすると、テキスト層の無いPDFはextracted_textが
 # 空のまま据え置かれ全文検索の対象外になる（core.ocr_layout_services.OcrDisabledError参照）。
 OCR_ENABLED = env.bool("OCR_ENABLED", default=True)
+# 本文抽出バッチ（core.management.commands.extract_pending_pdf_text）1回の実行に使える時間（秒）。
+# タスクスケジューラ側の実行時間制限（bat/register_scheduled_tasks.ps1の$ExtractTimeLimit、30分）
+# より短くしておくこと。超えそうなら新しい文書に着手せず、OCRも途中で打ち切って次回に持ち越す
+# （強制終了で毎回同じ大容量文書の途中で止まり、他の文書が処理されなくなるのを避けるため）。
+# 1回でこの時間内に終わらない大きさの文書は何度実行しても完了しないので、延ばすか分割する。
+OCR_BATCH_TIME_LIMIT_SECONDS = env.int("OCR_BATCH_TIME_LIMIT_SECONDS", default=25 * 60)
 # google-cloud-vision SDKはGOOGLE_APPLICATION_CREDENTIALS環境変数からサービスアカウント鍵
 # （JSONファイルのパス）を自動的に読み込む。django-environのEnv.read_env()は.envの内容を
 # os.environへ反映済みのため、.envにこの変数を書くだけでSDK側の追加設定は不要。

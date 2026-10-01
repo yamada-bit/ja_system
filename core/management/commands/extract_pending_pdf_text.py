@@ -25,6 +25,7 @@ documents.Document.privacy_flag=True を除外したくなった場合の切替�
 まま次回に持ち越せばよく、他レコードの処理まで巻き込んで止める必要がないため）。
 """
 import logging
+import time
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
@@ -32,7 +33,7 @@ from django.db import InterfaceError, OperationalError
 
 from contracts.models import Contract
 from core import ocr_layout_services
-from core.ocr_layout_services import OcrDisabledError
+from core.ocr_layout_services import OcrDisabledError, OcrTimeLimitError
 from core.text_extraction_services import extract_text_layer, is_scanned
 from core.text_normalization import normalize_for_search
 from documents.models import Document
@@ -54,67 +55,110 @@ class Command(BaseCommand):
         total_processed = 0
         total_skipped = 0
         total_failed = 0
+        total_deferred = 0
+        # 1回の実行に使える時間の上限（settings.OCR_BATCH_TIME_LIMIT_SECONDS）。タスクスケジューラの
+        # 実行時間制限（register_scheduled_tasks.ps1の$ExtractTimeLimit、30分）に強制終了される前に、
+        # 自分で区切って終えるためのもの。
+        deadline = time.monotonic() + settings.OCR_BATCH_TIME_LIMIT_SECONDS
+
+        # documents/contractsをまたいで、ファイルサイズの小さい順に処理する。pk順だと、数百ページの
+        # 大容量スキャンPDFが先頭に居座った場合、実行時間制限で毎回その1件の途中で打ち切られ、
+        # 後ろの小さな文書が永久に処理されない（飢餓状態）ため。大きいものは最後に回り、
+        # 他に処理すべきものが無い回に（その回の全時間を使って）処理される。
+        targets = []
         for model, label in TARGET_MODELS:
-            processed, skipped, failed = self._process_model(model, label)
-            total_processed += processed
-            total_skipped += skipped
-            total_failed += failed
+            for obj in model.objects.filter(text_extracted=False, is_deleted=False).order_by("pk"):
+                targets.append((self._file_size(obj), label, obj))
+        targets.sort(key=lambda t: t[0])
+
+        for index, (_size, label, obj) in enumerate(targets):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                total_deferred = len(targets) - index
+                logger.warning(
+                    "実行時間の上限（%s秒）に達したため残り%s件の処理を次回に持ち越します",
+                    settings.OCR_BATCH_TIME_LIMIT_SECONDS, total_deferred,
+                )
+                break
+            # 先頭の1件目（＝この実行で使える時間をまだ全く消費していない）でも制限時間内に
+            # 終わらなかった場合は、何度実行しても完了しない大きさの文書。ログで運用者に伝える。
+            is_first = index == 0
+            outcome = self._process_one(obj, label, remaining, is_first)
+            if outcome == "processed":
+                total_processed += 1
+            elif outcome == "skipped":
+                total_skipped += 1
+            elif outcome == "deferred":
+                total_deferred += 1
+            else:
+                total_failed += 1
         self.stdout.write(
-            f"抽出処理完了: 成功{total_processed}件 / OCR未実行のためスキップ{total_skipped}件 / 失敗{total_failed}件"
+            f"抽出処理完了: 成功{total_processed}件 / OCR未実行のためスキップ{total_skipped}件 / "
+            f"失敗{total_failed}件 / 時間切れで持ち越し{total_deferred}件"
         )
 
-    def _process_model(self, model, label):
-        # text_extracted=False のレコードだけを対象にする（抽出完了＝空結果でも True になるため、
-        # 5分間隔で繰り返し実行しても同じレコードを再処理しない。誤抽出時は運用手順で
-        # text_extracted を False に戻す想定）。order_by("pk")で処理順を確定させる（明示的な
-        # ordering が無いモデルへの依存を避け、「1件の失敗が他レコードの処理を止めない」ことを
-        # テストで再現しやすくするため）。
-        queryset = model.objects.filter(text_extracted=False, is_deleted=False).order_by("pk")
-        processed = 0
-        skipped = 0
-        failed = 0
-        for obj in queryset:
-            try:
-                result = self._extract_text(obj, label)
-            except Exception:
-                # pdfplumberの解析失敗（破損PDF等）・Google Cloud Vision呼び出し失敗
-                # （タイムアウト・割当量超過・認証エラー等）は例外の型が多岐にわたり、
-                # かつ「1件の失敗でバッチ全体を止めない」ことが本コマンドの存在意義そのもの
-                # （5分間隔で自動リトライされる）であるため、意図的に広くExceptionを捕捉する。
-                logger.exception("PDF本文抽出に失敗しました: model=%s pk=%s", label, obj.pk)
-                failed += 1
-                continue
-            if result is None:
-                # スキャン文書と判定したがOCR_ENABLED=Falseのためスキップした場合。
-                # text_extracted=False のまま据え置き、次回ポーリングで再判定する。
-                skipped += 1
-                continue
-            text, textdatas = result
-            obj.extracted_text_normalized = normalize_for_search(text)
-            obj.text_extracted = True
-            update_fields = ["extracted_text_normalized", "text_extracted"]
-            if textdatas is not None:
-                # OCR経路で、settings.OCR_STORE_TEXTDATA=True かつ _should_store_textdata()=True の
-                # ときだけ非None（textdatasのリスト）。検索用PDFの遅延生成用に保存する。
-                obj.ocr_textdata = ocr_layout_services.textdatas_to_json(textdatas)
-                update_fields.append("ocr_textdata")
-            try:
-                obj.save(update_fields=update_fields)
-            except (OperationalError, InterfaceError):
-                # DB接続断・タイムアウト等。「1件の失敗でバッチ全体を止めない」という本コマンドの
-                # 設計方針（モジュールdocstring参照）を貫くため、他の失敗系と同様にここも捕捉して
-                # ログに残し、後続レコードの処理を継続する。保存が失敗すると text_extracted=False の
-                # まま残り、次回バッチで再試行され最終的には整合する（ファイル実体を持たなくなった
-                # ため孤立ファイル問題も無い）。
-                logger.exception(
-                    "PDF本文抽出結果のDB保存に失敗しました: model=%s pk=%s", label, obj.pk,
-                )
-                failed += 1
-                continue
-            processed += 1
-        return processed, skipped, failed
+    @staticmethod
+    def _file_size(obj):
+        """処理順を決めるためのファイルサイズ。取得できない（実体欠損等）場合は0として先頭に
+        回し、失敗を早く確定させて他レコードの時間を食わないようにする（失敗自体は
+        _extract_textが改めてログに残す）。"""
+        try:
+            return obj.file.size
+        except OSError:
+            return 0
 
-    def _extract_text(self, obj, label):
+    def _process_one(self, obj, label, remaining_seconds, is_first):
+        """1件分の抽出と保存。戻り値は "processed" / "skipped" / "deferred" / "failed"。"""
+        try:
+            result = self._extract_text(obj, label, remaining_seconds)
+        except OcrTimeLimitError:
+            if is_first:
+                logger.error(
+                    "OCRが1回の実行時間の上限（%s秒）内に終わりません。このままでは何度実行しても"
+                    "完了しない大きさの文書です（settings.OCR_BATCH_TIME_LIMIT_SECONDSとタスクの"
+                    "実行時間制限を延ばすか、PDFを分割してください）: model=%s pk=%s",
+                    settings.OCR_BATCH_TIME_LIMIT_SECONDS, label, obj.pk,
+                )
+            else:
+                logger.warning(
+                    "OCRが残り時間内に終わらなかったため次回に持ち越します: model=%s pk=%s", label, obj.pk
+                )
+            return "deferred"
+        except Exception:
+            # pdfplumberの解析失敗（破損PDF等）・Google Cloud Vision呼び出し失敗
+            # （タイムアウト・割当量超過・認証エラー等）は例外の型が多岐にわたり、
+            # かつ「1件の失敗でバッチ全体を止めない」ことが本コマンドの存在意義そのもの
+            # （5分間隔で自動リトライされる）であるため、意図的に広くExceptionを捕捉する。
+            logger.exception("PDF本文抽出に失敗しました: model=%s pk=%s", label, obj.pk)
+            return "failed"
+        if result is None:
+            # スキャン文書と判定したがOCR_ENABLED=Falseのためスキップした場合。
+            # text_extracted=False のまま据え置き、次回ポーリングで再判定する。
+            return "skipped"
+        text, textdatas = result
+        obj.extracted_text_normalized = normalize_for_search(text)
+        obj.text_extracted = True
+        update_fields = ["extracted_text_normalized", "text_extracted"]
+        if textdatas is not None:
+            # OCR経路で、settings.OCR_STORE_TEXTDATA=True かつ _should_store_textdata()=True の
+            # ときだけ非None（textdatasのリスト）。検索用PDFの遅延生成用に保存する。
+            obj.ocr_textdata = ocr_layout_services.textdatas_to_json(textdatas)
+            update_fields.append("ocr_textdata")
+        try:
+            obj.save(update_fields=update_fields)
+        except (OperationalError, InterfaceError):
+            # DB接続断・タイムアウト等。「1件の失敗でバッチ全体を止めない」という本コマンドの
+            # 設計方針（モジュールdocstring参照）を貫くため、他の失敗系と同様にここも捕捉して
+            # ログに残し、後続レコードの処理を継続する。保存が失敗すると text_extracted=False の
+            # まま残り、次回バッチで再試行され最終的には整合する（ファイル実体を持たなくなった
+            # ため孤立ファイル問題も無い）。
+            logger.exception(
+                "PDF本文抽出結果のDB保存に失敗しました: model=%s pk=%s", label, obj.pk,
+            )
+            return "failed"
+        return "processed"
+
+    def _extract_text(self, obj, label, remaining_seconds=None):
         """1件分のテキスト抽出。
 
         戻り値：
@@ -147,7 +191,7 @@ class Command(BaseCommand):
             with obj.file.open("rb") as f:
                 pdf_bytes = f.read()
             text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(
-                pdf_bytes, source_name=obj.display_name,
+                pdf_bytes, source_name=obj.display_name, max_seconds=remaining_seconds,
             )
         except OcrDisabledError:
             return None
