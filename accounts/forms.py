@@ -1,6 +1,9 @@
+import csv
+import io
 import logging
 import unicodedata
 
+from django.conf import settings
 from django.contrib.auth.forms import AuthenticationForm
 from django import forms
 
@@ -66,7 +69,33 @@ class StaffCsvImportForm(forms.Form):
         csv_file = self.cleaned_data["csv_file"]
         if not csv_file.name.lower().endswith(".csv"):
             raise forms.ValidationError("CSVファイル（拡張子.csv）を選択してください。")
+        self._check_row_limit(csv_file)
         return csv_file
+
+    @staticmethod
+    def _check_row_limit(csv_file):
+        """取込行数（ヘッダーと空行を除く）がsettings.STAFF_CSV_IMPORT_MAX_ROWSを超えたら拒否する。
+
+        取込は新規職員1人ごとにArgon2でパスワードをハッシュ化し（1件約50ms）、全体を1回の
+        リクエストで同期処理するため、行数が多いとリクエストのタイムアウト（httpPlatformHandlerの
+        requestTimeout/LB）に達して画面上は失敗に見えるのに処理だけ続く状態になる。上限は画面
+        （このフォーム）にだけ置き、サービス関数import_staff_csv自体には置かない（将来の
+        バッチ取込などリクエスト時間の制約が無い呼び出し元を制限しないため）。
+        文字コード不正は行数を数えずにここでは通し、従来どおりimport_staff_csvのエラーに任せる。
+        """
+        limit = settings.STAFF_CSV_IMPORT_MAX_ROWS
+        try:
+            text = csv_file.read().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return
+        finally:
+            csv_file.seek(0)
+        row_count = sum(1 for row in csv.reader(io.StringIO(text)) if any(cell.strip() for cell in row)) - 1
+        if row_count > limit:
+            raise forms.ValidationError(
+                f"CSVの行数が上限（{limit}行）を超えています（{row_count}行）。"
+                "ファイルを分割して、複数回に分けて取り込んでください。"
+            )
 
 
 class StaffSearchForm(forms.Form):

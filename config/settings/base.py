@@ -221,6 +221,12 @@ AUDIT_LOG_RETENTION_MONTHS = env.int("AUDIT_LOG_RETENTION_MONTHS", default=3)
 # 承認済みの前提で既定True（2026-08-10ユーザー指示）。Falseにすると、テキスト層の無いPDFはextracted_textが
 # 空のまま据え置かれ全文検索の対象外になる（core.ocr_layout_services.OcrDisabledError参照）。
 OCR_ENABLED = env.bool("OCR_ENABLED", default=True)
+# 職員マスタCSV取込（画面）で受け付ける最大行数（ヘッダー・空行を除く）。新規職員1人ごとに
+# Argon2でパスワードをハッシュ化するため（1件約50ms）、行数が多いとリクエストのタイムアウト
+# （httpPlatformHandler requestTimeout/LB）の原因になる。画面のフォームだけを制限し、
+# サービス関数（accounts.csv_import_services.import_staff_csv）自体には上限を置かない。
+STAFF_CSV_IMPORT_MAX_ROWS = env.int("STAFF_CSV_IMPORT_MAX_ROWS", default=1000)
+
 # 一括ダウンロード（検索画面のZIP）で受け付ける、選択ファイルの合計サイズ上限（バイト）。ZIPは
 # メモリ上で組み立てて一括返却するため（core.zip_services.build_zip_archive）、大きいとメモリ不足や
 # リクエストのタイムアウト（httpPlatformHandler requestTimeout/LB）による502の原因になる。超過時は

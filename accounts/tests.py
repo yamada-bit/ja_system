@@ -1550,6 +1550,36 @@ class StaffCsvImportViewTests(TestCase):
         messages = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("二重に送信された可能性" in m for m in messages))
 
+    def test_post_over_row_limit_is_rejected_without_importing(self):
+        """画面の取込は、行数が上限（STAFF_CSV_IMPORT_MAX_ROWS）を超えたら1行も取り込まず拒否する
+        （リクエストのタイムアウト回避）。上限ちょうどは許可する。"""
+        rows = [
+            "0832,農協 太郎,000,本　店,01,総務部,16,課長,20,考査役,0",
+            "0833,農協 次郎,000,本　店,01,総務部,16,課長,20,考査役,0",
+        ]
+        token = self.client.get("/accounts/staff/").context["csv_import_token"]
+        with self.settings(STAFF_CSV_IMPORT_MAX_ROWS=1):
+            response = self.client.post(
+                "/accounts/staff/csv/import/", {"token": token, "csv_file": _csv_upload(rows)}, follow=True
+            )
+        self.assertFalse(Employee.objects.filter(employee_no__in=["0832", "0833"]).exists())
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("上限（1行）" in m for m in messages))
+
+        token = self.client.get("/accounts/staff/").context["csv_import_token"]
+        with self.settings(STAFF_CSV_IMPORT_MAX_ROWS=2):
+            self.client.post(
+                "/accounts/staff/csv/import/", {"token": token, "csv_file": _csv_upload(rows)}, follow=True
+            )
+        self.assertEqual(Employee.objects.filter(employee_no__in=["0832", "0833"]).count(), 2)
+
+    def test_service_has_no_row_limit(self):
+        """上限は画面のフォームだけ。サービス関数はバッチ等から呼ぶ場合に制限しない。"""
+        rows = [f"{9000 + i},職員{i},000,本　店,01,総務部,16,課長,20,考査役,0" for i in range(3)]
+        with self.settings(STAFF_CSV_IMPORT_MAX_ROWS=1):
+            summary = import_staff_csv(_csv_upload(rows), actor=self.operator)
+        self.assertEqual(summary.created, 3)
+
     def test_post_invalid_extension_shows_error(self):
         token = self.client.get("/accounts/staff/").context["csv_import_token"]
         upload = SimpleUploadedFile("staff.txt", b"dummy", content_type="text/plain")
