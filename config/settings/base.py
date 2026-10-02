@@ -248,6 +248,19 @@ OCR_VISION_TIMEOUT_SECONDS = env.int("OCR_VISION_TIMEOUT_SECONDS", default=60)
 # 避ける）。回数を使い切っても失敗するページがあれば、従来どおり文書ごと失敗扱いで次回に持ち越す。
 OCR_VISION_RETRY_COUNT = env.int("OCR_VISION_RETRY_COUNT", default=3)
 OCR_VISION_RETRY_WAIT_SECONDS = env.int("OCR_VISION_RETRY_WAIT_SECONDS", default=3)
+# OCRが文書単位で失敗した（Vision側の障害・割当量超過がやり直しを使い切った等）とき、その文書を
+# 再び試してよくなるまでの待ち時間（分）。1回目の失敗=この値、2回目=2倍…と延ばし、上限で頭打ちにする。
+# 5分間隔のバッチが同じ文書をVisionへ叩き続けて課金・割当量を浪費するのを防ぐ。成功済みのページは
+# チェックポイント（core.ocr_checkpoint_services）に残るので、再開時は失敗ページ以降だけを処理する。
+OCR_FAILURE_BACKOFF_MINUTES = env.int("OCR_FAILURE_BACKOFF_MINUTES", default=30)
+OCR_FAILURE_BACKOFF_MAX_MINUTES = env.int("OCR_FAILURE_BACKOFF_MAX_MINUTES", default=12 * 60)
+# 同じ文書のOCR失敗がこの回数に達したら、運用者の対応が要る状態としてERRORログに出す（バックオフ
+# しながら再試行自体は続ける）。
+OCR_FAILURE_ALERT_ATTEMPTS = env.int("OCR_FAILURE_ALERT_ATTEMPTS", default=5)
+# OCRチェックポイント（MEDIA_ROOT/ocr_checkpoints/）のうち、この日数更新されていないものを
+# 本文抽出バッチの起動時に削除する。文書が削除された・OCRを無効化した等で続きを処理する者が
+# いなくなった残骸の回収用（0以下で自動削除しない）。処理中の文書はページ完了ごとに更新される。
+OCR_CHECKPOINT_RETENTION_DAYS = env.int("OCR_CHECKPOINT_RETENTION_DAYS", default=30)
 # 職員マスタCSV取込（画面）で受け付ける最大行数（ヘッダー・空行を除く）。新規職員1人ごとに
 # Argon2でパスワードをハッシュ化するため（1件約50ms）、行数が多いとリクエストのタイムアウト
 # （httpPlatformHandler requestTimeout/LB）の原因になる。画面のフォームだけを制限し、

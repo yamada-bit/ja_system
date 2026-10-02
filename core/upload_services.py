@@ -1,5 +1,7 @@
 import logging
+import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -182,6 +184,24 @@ class ChunkUploadError(Exception):
     """
 
 
+def _replace_with_retry(src, dst, attempts=5, delay=0.05):
+    """os.replaceをPermissionErrorに限ってごく短い間隔で数回やり直す。
+
+    本番のWindowsでは、置換先を別のスレッド（タイムアウト後の再送と先行リクエストの同時置換、
+    結合処理の読み取り等）が一瞬開いているだけでos.replaceがPermissionErrorになる。これを
+    そのまま失敗として返すと、再送との競合を避けるための一時名経由の書き込みが、かえって
+    通信の不安定な環境でアップロード失敗を招く。
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
 def save_upload_chunk(upload_id, chunk_index, chunk_file):
     """分割アップロードの1チャンクを tmp_uploads/chunks/<upload_id>/chunk_XXXX に保存する。
 
@@ -189,13 +209,27 @@ def save_upload_chunk(upload_id, chunk_index, chunk_file):
     （core.upload_views.BaseChunkUploadAPIView）で英数字とハイフンのみに制限済みという前提。
     """
     chunk_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR / CHUNK_UPLOAD_SUBDIR / upload_id
+    part_path = None
     try:
         chunk_dir.mkdir(parents=True, exist_ok=True)
         chunk_path = chunk_dir / CHUNK_NAME_FORMAT.format(chunk_index)
-        with open(chunk_path, "wb") as dest:
+        # 一時名へ書き切ってからos.replaceで本来の名前に置き換える（原子的）。ブラウザ側は
+        # タイムアウトしたチャンクを再送するが（static/js/chunk_upload.js）、先に送った
+        # リクエストがサーバー側でまだ書き込み中のことがある。同じ名前へ直接書くと2本の書き込みが
+        # 同じファイルに重なって断片が壊れ、結合後のPDFが破損する。一時名経由なら、どちらが
+        # 先に置き換えても中身は完全な1チャンク分（同じ番号の再送は同じ内容）になる。
+        part_path = chunk_dir / f"{chunk_path.name}.part-{uuid.uuid4().hex}"
+        with open(part_path, "wb") as dest:
             for piece in chunk_file.chunks():
                 dest.write(piece)
+        _replace_with_retry(part_path, chunk_path)
+        part_path = None
     except OSError as exc:
+        if part_path is not None:
+            try:
+                part_path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("チャンクの一時ファイルの削除に失敗しました: %s", part_path)
         logger.exception(
             "チャンクアップロードの保存に失敗しました: upload_id=%s chunk_index=%s", upload_id, chunk_index
         )
@@ -220,16 +254,30 @@ def combine_upload_chunks(session, session_key, upload_id, total_chunks, origina
     chunk_paths = [chunk_dir / CHUNK_NAME_FORMAT.format(i) for i in range(total_chunks)]
 
     total_size = 0
+    sizes = []
     for i, chunk_path in enumerate(chunk_paths):
         if not chunk_path.exists():
             _delete_chunk_dir(chunk_dir)
             raise ChunkUploadError(f"チャンク {i} が見つかりません。最初からアップロードし直してください。")
-        total_size += chunk_path.stat().st_size
+        sizes.append(chunk_path.stat().st_size)
+        total_size += sizes[-1]
         if total_size > settings.CHUNK_UPLOAD_MAX_SIZE_BYTES:
             _delete_chunk_dir(chunk_dir)
             raise ChunkUploadError(
                 f"ファイルサイズが上限（{settings.CHUNK_UPLOAD_MAX_SIZE_BYTES // (1024 * 1024)}MB）を超えています。"
             )
+
+    # ブラウザは固定サイズでスライスして送るので、最後以外のチャンクはどれも同じ大きさで、最後は
+    # それ以下のはず。崩れていれば、書き込みの途中切れ・取り違え等でデータが欠けている（結合しても
+    # 破損PDFになる）ので、結合せずやり直しを促す。
+    if len(sizes) > 1:
+        body_size = sizes[0]
+        if any(size != body_size for size in sizes[:-1]) or sizes[-1] > body_size or sizes[-1] == 0:
+            _delete_chunk_dir(chunk_dir)
+            logger.warning(
+                "チャンクのサイズが不整合のため結合を中止しました: upload_id=%s sizes=%s", upload_id, sizes[:5]
+            )
+            raise ChunkUploadError("アップロードしたデータに欠けがあります。最初からアップロードし直してください。")
 
     tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
     temp_name = f"{uuid.uuid4().hex}_{original_filename}"

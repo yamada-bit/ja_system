@@ -85,7 +85,10 @@ class BaseFileServeView(View):
         # PDF.jsはRangeで同じファイルを何度も取得するため、先頭以外の部分取得（is_continuation）では
         # 記録しない（1回のプレビュー=1件の履歴という従来の粒度を保つ。Range非対応の通常の
         # 全体取得・ダウンロードは従来どおり毎回記録する）。
-        if not is_continuation:
+        # ただし添付ダウンロード（as_attachment）は、PDF.jsを介さずRangeを自由に付けて直接取得
+        # できるため（`Range: bytes=1-`で全体を受け取れる）、継続要求でも必ず記録する。
+        # 継続要求を記録対象から外してよいのはPDF.jsのインライン表示（プレビュー）だけ。
+        if not is_continuation or as_attachment:
             audit_services.log(
                 employee=request.user,
                 action=self.audit_action,

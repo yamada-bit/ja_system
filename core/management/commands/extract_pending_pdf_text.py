@@ -32,8 +32,10 @@ from django.core.management.base import BaseCommand
 from django.db import InterfaceError, OperationalError
 
 from contracts.models import Contract
-from core import ocr_layout_services
-from core.ocr_layout_services import OcrDisabledError, OcrRetryWaitTimeLimitError, OcrTimeLimitError
+from core import ocr_checkpoint_services, ocr_layout_services
+from core.ocr_layout_services import (
+    OcrDisabledError, OcrRetryWaitTimeLimitError, OcrTimeLimitError, OcrVisionUnavailableError,
+)
 from core.text_extraction_services import extract_text_layer, is_scanned
 from core.text_normalization import normalize_for_search
 from documents.models import Document
@@ -75,6 +77,9 @@ class Command(BaseCommand):
         total_skipped = 0
         total_failed = 0
         total_deferred = 0
+        total_backoff = 0
+        # 誰も続きを処理しなくなった古いOCRチェックポイント（削除済み文書の残骸等）を回収する。
+        ocr_checkpoint_services.purge_stale()
         # 1回の実行に使える時間の上限（既定はsettings.OCR_BATCH_TIME_LIMIT_SECONDS、--time-limitで
         # 上書き）。タスクスケジューラの実行時間制限（register_scheduled_tasks.ps1の
         # $ExtractTimeLimit、30分）に強制終了される前に、自分で区切って終えるためのもの。
@@ -89,16 +94,25 @@ class Command(BaseCommand):
         # 他に処理すべきものが無い回に（その回の全時間を使って）処理される。
         targets = []
         for model, label in TARGET_MODELS:
-            for obj in model.objects.filter(text_extracted=False, is_deleted=False).order_by("pk"):
+            # 並べ替えに要るのはpkとファイルサイズだけなので、本文（extracted_text_normalized）・
+            # 座標データ（ocr_textdata）等の大きい列は読まない。未処理が数千件溜まった状態でも
+            # メモリを圧迫しないため。処理する直前に1件ずつ全列を取り直す（下のループ）。
+            pending = model.objects.filter(text_extracted=False, is_deleted=False).only("pk", "file")
+            for obj in pending.order_by("pk").iterator(chunk_size=500):
                 size = self._file_size(obj)
                 if max_bytes is not None and size > max_bytes:
                     continue
                 if larger_than_bytes is not None and size <= larger_than_bytes:
                     continue
-                targets.append((size, label, obj))
+                # 前回OCRに失敗して再試行間隔（バックオフ）の途中の文書は、今回は触らない。Visionの
+                # 障害・割当量超過中に同じ文書を5分ごとに叩いて課金・割当量を浪費しないため。
+                if ocr_checkpoint_services.is_in_backoff(label, obj.pk):
+                    total_backoff += 1
+                    continue
+                targets.append((size, label, model, obj.pk))
         targets.sort(key=lambda t: t[0])
 
-        for index, (_size, label, obj) in enumerate(targets):
+        for index, (_size, label, model, pk) in enumerate(targets):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 total_deferred = len(targets) - index
@@ -107,6 +121,11 @@ class Command(BaseCommand):
                     time_limit, total_deferred,
                 )
                 break
+            # 一覧を作ってからここへ来るまでに、削除された・別のプロセスが先に処理を終えた文書は飛ばす
+            # （処理済みの文書を二重にOCRして課金・上書きしないための再確認も兼ねる）。
+            obj = model.objects.filter(pk=pk, text_extracted=False, is_deleted=False).first()
+            if obj is None:
+                continue
             # 先頭の1件目（＝この実行で使える時間をまだ全く消費していない）でも制限時間内に
             # 終わらなかった場合は、何度実行しても完了しない大きさの文書。ログで運用者に伝える。
             is_first = index == 0
@@ -117,11 +136,23 @@ class Command(BaseCommand):
                 total_skipped += 1
             elif outcome == "deferred":
                 total_deferred += 1
+            elif outcome == "vision_unavailable":
+                # Vision側（割当量超過・障害・認証エラー等）の失敗は他の文書でも同じ理由で起こりやすい。
+                # 残りへ進むと、失敗する呼び出しを重ねて割当量を食うだけなので、この実行はここで打ち切る
+                # （失敗した文書自体は以後バックオフで間隔を空けるため、毎回先頭で止まり続けることは無い）。
+                total_failed += 1
+                total_deferred += len(targets) - index - 1
+                logger.warning(
+                    "Vision API側の失敗のため、この実行を打ち切ります（残り%s件は次回に持ち越し）",
+                    len(targets) - index - 1,
+                )
+                break
             else:
                 total_failed += 1
         self.stdout.write(
             f"抽出処理完了: 成功{total_processed}件 / OCR未実行のためスキップ{total_skipped}件 / "
-            f"失敗{total_failed}件 / 時間切れで持ち越し{total_deferred}件"
+            f"失敗{total_failed}件 / 時間切れで持ち越し{total_deferred}件 / "
+            f"OCR失敗後の待機中{total_backoff}件"
         )
 
     @staticmethod
@@ -135,7 +166,8 @@ class Command(BaseCommand):
             return 0
 
     def _process_one(self, obj, label, remaining_seconds, is_first, time_limit):
-        """1件分の抽出と保存。戻り値は "processed" / "skipped" / "deferred" / "failed"。"""
+        """1件分の抽出と保存。戻り値は "processed" / "skipped" / "deferred" / "failed" /
+        "vision_unavailable"（Vision API側の失敗。呼び出し元はこの実行を打ち切る）。"""
         try:
             result = self._extract_text(obj, label, remaining_seconds)
         except OcrRetryWaitTimeLimitError:
@@ -148,10 +180,14 @@ class Command(BaseCommand):
             return "deferred"
         except OcrTimeLimitError:
             if is_first:
-                logger.error(
-                    "OCRが1回の実行時間の上限（%s秒）内に終わりません。このままでは何度実行しても"
-                    "完了しない大きさの文書です（--time-limit/OCR_BATCH_TIME_LIMIT_SECONDSとタスクの"
-                    "実行時間制限を延ばすか、PDFを分割してください）: model=%s pk=%s",
+                # 済んだページはチェックポイントに残るので、次回以降は続きから進み、何回かの実行で
+                # 完了する（従来は毎回1ページ目からやり直すため完了しなかった）。ただし1回の実行で
+                # 何ページも進まないほど遅い場合は設定の見直しが要るため、警告で知らせる。
+                logger.warning(
+                    "OCRが1回の実行時間の上限（%s秒）内に終わらなかったため、済んだページを保存して"
+                    "次回以降に続きから処理します（何度も続く場合は--time-limit/"
+                    "OCR_BATCH_TIME_LIMIT_SECONDSとタスクの実行時間制限の見直し、またはPDFの分割を"
+                    "検討してください）: model=%s pk=%s",
                     time_limit, label, obj.pk,
                 )
             else:
@@ -159,6 +195,9 @@ class Command(BaseCommand):
                     "OCRが残り時間内に終わらなかったため次回に持ち越します: model=%s pk=%s", label, obj.pk
                 )
             return "deferred"
+        except OcrVisionUnavailableError:
+            # 失敗の記録（バックオフ）とログは_extract_text側で済んでいる。
+            return "vision_unavailable"
         except Exception:
             # pdfplumberの解析失敗（破損PDF等）・Google Cloud Vision呼び出し失敗
             # （タイムアウト・割当量超過・認証エラー等）は例外の型が多岐にわたり、
@@ -191,6 +230,9 @@ class Command(BaseCommand):
                 "PDF本文抽出結果のDB保存に失敗しました: model=%s pk=%s", label, obj.pk,
             )
             return "failed"
+        # DBへの保存まで成功してはじめてOCRの途中経過（チェックポイント）を捨てる。保存前に消すと、
+        # 保存に失敗したとき次回また全ページをOCRし直すことになる。
+        ocr_checkpoint_services.clear(label, obj.pk)
         return "processed"
 
     def _extract_text(self, obj, label, remaining_seconds=None):
@@ -222,23 +264,42 @@ class Command(BaseCommand):
                 label, obj.pk,
             )
             return None
+        checkpoint = None
         try:
             with obj.file.open("rb") as f:
                 pdf_bytes = f.read()
+            # 前回までに済んだページの結果を読み込み、それらはVisionへ再送しない（課金・割当量の節約）。
+            checkpoint = ocr_checkpoint_services.OcrCheckpoint.load(label, obj.pk, pdf_bytes)
             text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(
                 pdf_bytes, source_name=obj.display_name, max_seconds=remaining_seconds,
+                completed_pages=checkpoint.completed_pages, on_page_done=checkpoint.save_page,
             )
         except OcrDisabledError:
             return None
         except OcrTimeLimitError:
             # 時間切れは失敗ではなく「次回に持ち越し」（_process_oneが専用のログを出す）。下の
             # 汎用の失敗ログ（ERROR＋スタックトレース）に流すと、運用者が障害と取り違える。
+            # 済んだページはon_page_doneで保存済みで、失敗回数にも数えない（バックオフもしない）。
             raise
         except Exception:
             logger.exception(
                 "Google Cloud Vision OCRに失敗しました（タイムアウト・割当量超過・認証エラー等）: model=%s pk=%s",
                 label, obj.pk,
             )
+            if checkpoint is not None:
+                # 次に試してよい時刻を後ろへ延ばす（指数バックオフ）。ファイル読み込み自体の失敗
+                # （checkpointが未作成）は文書側の問題で、OCR再試行の間隔制御の対象外。
+                attempts, wait = checkpoint.record_failure()
+                if attempts >= settings.OCR_FAILURE_ALERT_ATTEMPTS:
+                    logger.error(
+                        "OCRが%s回続けて失敗しています。運用者の確認が必要です（Vision側の障害・割当量・"
+                        "認証、または文書自体の問題）: model=%s pk=%s",
+                        attempts, label, obj.pk,
+                    )
+                logger.warning(
+                    "OCR失敗のため、この文書は%s分後まで再試行しません: model=%s pk=%s",
+                    wait // 60, label, obj.pk,
+                )
             raise
 
         store = None

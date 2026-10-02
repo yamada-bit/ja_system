@@ -2064,6 +2064,17 @@ class PreviewViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(b"".join(response.streaming_content), b"0123456789")
 
+    def test_download_with_continuation_range_is_still_audited(self):
+        """添付ダウンロードはPDF.jsを介さずRangeを自由に付けられるため、`bytes=1-`のような継続要求でも
+        監査ログを残す（プレビューだけが継続要求を記録対象から外す）。"""
+        PermissionProfile.objects.create(
+            employee=self.employee, role=PermissionRole.STAFF, doc_download=True
+        )
+        self.document.file.save("dl.pdf", ContentFile(b"0123456789"), save=True)
+        response = self.client.get(f"/documents/{self.document.pk}/download/", HTTP_RANGE="bytes=1-")
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(AuditLog.objects.filter(action="文書検索　ダウンロード").count(), 1)
+
     def test_audit_logged_once_for_range_preview(self):
         """PDF.jsはRangeで何度も取得するため、先頭以外の部分取得では監査ログを残さない
         （1回のプレビュー=1件の履歴）。"""

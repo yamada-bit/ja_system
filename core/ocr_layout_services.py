@@ -58,12 +58,27 @@ class OcrRetryWaitTimeLimitError(OcrTimeLimitError):
     """
 
 
+# Visionが応答のerror.code（google.rpc.Code）で返す、Vision側の事情による失敗：
+# DEADLINE_EXCEEDED=4／PERMISSION_DENIED=7／RESOURCE_EXHAUSTED=8／INTERNAL=13／UNAVAILABLE=14／UNAUTHENTICATED=16。
+# これ以外（INVALID_ARGUMENT=3等）は、その文書（ページ画像）固有の失敗として扱う。
+_SYSTEMIC_VISION_ERROR_CODES = frozenset({4, 7, 8, 13, 14, 16})
+
+
 class OcrFailedError(Exception):
     """OCRが本文を得られないまま終わったことを表す（呼び出し元は「完了」にせず再試行に回す）。
 
     Vision APIは割当量超過（RESOURCE_EXHAUSTED、code=8）等を例外ではなく応答の `error` に
     入れて返す。これを無視すると本文が空のまま「OCR成功」として確定し、text_extracted=True に
     なって二度と再処理されない（全文検索から黙って漏れる）ため、この例外で必ず失敗扱いにする。
+    """
+
+
+class OcrVisionUnavailableError(OcrFailedError):
+    """Vision API側の失敗（応答`error`・呼び出しの例外）がやり直しを使い切っても続いたことを表す。
+
+    文書固有の失敗（全ページの画像化失敗等）と区別するための型。割当量超過・障害・認証エラーなど
+    Vision側が原因の場合、他の文書も同じ理由で失敗するので、バッチはこの例外を受けたら
+    その実行を打ち切り、無駄な呼び出しを重ねない（extract_pending_pdf_text参照）。
     """
 
 
@@ -121,7 +136,9 @@ def textdatas_from_json(data):
     ]
 
 
-def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=None):
+def extract_text_and_layout_via_ocr(
+    pdf_bytes, *, source_name="", max_seconds=None, completed_pages=None, on_page_done=None,
+):
     """PDFバイト列からテキストと座標データを抽出する。
 
     戻り値は (全文テキスト, 全ページ分のTextDatasのリスト) のタプル。後者は
@@ -142,10 +159,23 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
     （呼び出し元のバッチがタスクスケジューラの実行時間制限で強制終了される前に、自分で
     安全に諦められるようにするため。ページ単位でしか判定しないので、1ページの処理中は
     超過し得る）。
+
+    completed_pages（{ページ番号: (本文, [TextDatas])}）に含まれるページはVisionへ送らずその結果を
+    使い、on_page_done(ページ番号, 本文, [TextDatas])は1ページ完了するたびに呼ぶ。途中で失敗しても
+    次回は済んだページを再送せず続きから再開できるようにするためのフック
+    （core.ocr_checkpoint_services）。どちらも省略すれば従来どおり全ページを処理する。
     """
     if not settings.OCR_ENABLED:
         raise OcrDisabledError("OCR_ENABLED=False のためGoogle Cloud Vision連携は無効化されています。")
 
+    from google.api_core import exceptions as api_exceptions
+    from google.api_core.exceptions import GoogleAPIError
+
+    # この文書（ページ画像）固有の失敗。Vision側の事情ではないので、バッチの打ち切り対象にしない。
+    document_specific_errors = (
+        api_exceptions.InvalidArgument, api_exceptions.NotFound,
+        api_exceptions.FailedPrecondition, api_exceptions.OutOfRange,
+    )
     from google.cloud import vision
     from pdf2image import convert_from_path, pdfinfo_from_path
 
@@ -164,7 +194,14 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
         # ページ単位のtry/exceptの外に置く（全ページ失敗が「本文が空のOCR完了」に化けないように）。
         page_count = int(pdfinfo_from_path(pdf_path, poppler_path=poppler_path)["Pages"])
 
+        completed_pages = completed_pages or {}
         for page_no in range(1, page_count + 1):
+            if page_no in completed_pages:
+                # 前回までに済んだページ。Vision（課金・割当量）にも画像化にも触れずに結果を再利用する。
+                saved_text, saved_textdatas = completed_pages[page_no]
+                all_textdatas.extend(saved_textdatas)
+                page_texts.append(saved_text)
+                continue
             if deadline is not None and time.monotonic() > deadline:
                 raise OcrTimeLimitError(
                     f"OCRが制限時間（{max_seconds}秒）を超えたため中断しました: "
@@ -183,19 +220,36 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
                 # 使い切ってもエラーなら、ページ単位のスキップ（下のexcept）にはせず文書ごと中断する
                 # （続行しても後続ページが同じ理由で失敗しやすく、本文が欠けたまま「完了」になるため）。
                 retries = max(settings.OCR_VISION_RETRY_COUNT, 0)
+                systemic = True  # 直近の失敗が、他の文書でも起こりうる（Vision側の）失敗か
                 for attempt in range(retries + 1):
-                    response = client.document_text_detection(
-                        image=image_obj, image_context={"language_hints": ["ja"]},
-                        timeout=settings.OCR_VISION_TIMEOUT_SECONDS,
-                    )
-                    if response.error.code == 0:
-                        break
-                    message = (
-                        f"Vision APIがエラーを返しました: code={response.error.code} "
-                        f"message={response.error.message} source={source_name} page={page_no}"
-                    )
+                    try:
+                        response = client.document_text_detection(
+                            image=image_obj, image_context={"language_hints": ["ja"]},
+                            timeout=settings.OCR_VISION_TIMEOUT_SECONDS,
+                        )
+                    except GoogleAPIError as exc:
+                        # タイムアウト（DeadlineExceeded）・接続断・一時的なサーバーエラー等、呼び出し
+                        # 自体の失敗も、応答`error`と同じくそのページだけやり直す。使い切っても失敗なら
+                        # 文書ごと失敗（下のOcrFailedError）。ページを飛ばして完了にすると本文が欠けたまま
+                        # text_extracted=Trueで確定し、全文検索から永久に漏れるため。
+                        systemic = not isinstance(exc, document_specific_errors)
+                        message = (
+                            f"Vision API呼び出しに失敗しました: {type(exc).__name__}: {exc} "
+                            f"source={source_name} page={page_no}"
+                        )
+                    else:
+                        if response.error.code == 0:
+                            break
+                        systemic = response.error.code in _SYSTEMIC_VISION_ERROR_CODES
+                        message = (
+                            f"Vision APIがエラーを返しました: code={response.error.code} "
+                            f"message={response.error.message} source={source_name} page={page_no}"
+                        )
                     if attempt >= retries:
-                        raise OcrFailedError(message)
+                        # 割当量超過・障害・認証エラー等は他の文書でも同じ理由で失敗するので、バッチが
+                        # 実行ごと打ち切れるよう専用の型で送出する。画像が大きすぎる等、この文書だけの
+                        # 失敗（INVALID_ARGUMENT等）は、文書ごと失敗にするだけで他の文書は続ける。
+                        raise (OcrVisionUnavailableError if systemic else OcrFailedError)(message)
                     wait = settings.OCR_VISION_RETRY_WAIT_SECONDS * (2 ** attempt)
                     if deadline is not None and time.monotonic() + wait > deadline:
                         # 待つと制限時間を超える。待たずに諦め、次回バッチに持ち越す。
@@ -208,14 +262,18 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
                     )
                     time.sleep(wait)
                 page_textdatas = _get_lines(page_no, response)
+                page_text = "\n".join(_get_textlines(page_textdatas, page_no))
                 all_textdatas.extend(page_textdatas)
-                page_texts.append("\n".join(_get_textlines(page_textdatas, page_no)))
+                page_texts.append(page_text)
+                if on_page_done is not None:
+                    on_page_done(page_no, page_text, page_textdatas)
             except (OcrFailedError, OcrTimeLimitError):
                 raise
             except Exception:
-                # 1ページの画像化・OCR失敗（Vision APIの一時的なエラー等）で文書全体の処理を
-                # 止めない。このページの本文・座標データは欠落するが、他ページは継続する
-                # （移植元process_pdf_asyncのページ単位try/exceptと同じ設計判断）。
+                # 1ページの画像化など文書側の原因による失敗で文書全体の処理を止めない。このページの
+                # 本文・座標データは欠落するが、他ページは継続する（移植元process_pdf_asyncの
+                # ページ単位try/exceptと同じ設計判断）。Vision API側の失敗（GoogleAPIError）は
+                # 上でやり直し、使い切れば文書ごと失敗にするので、ここには来ない。
                 logger.exception(
                     "座標付きOCR処理でページの処理に失敗しました（このページはスキップ）: source=%s page=%s",
                     source_name, page_no,

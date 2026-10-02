@@ -1,6 +1,7 @@
 import contextlib
 import datetime
 import os
+import shutil
 import tempfile
 import time
 from io import BytesIO
@@ -21,7 +22,7 @@ from pypdf import PdfReader, PdfWriter
 
 from accounts.models import Employee, Position, Rank
 from audit.models import AuditLog
-from core import ocr_layout_services, pdf_text_embed_services, searchable_pdf_services
+from core import ocr_checkpoint_services, ocr_layout_services, pdf_text_embed_services, searchable_pdf_services
 from core.double_submit import consume_token, issue_token
 from core.file_serving import apply_file_response_security_headers, resolve_as_attachment
 from core.file_type_services import is_image_filename
@@ -31,7 +32,8 @@ from core.forms import search_year_choices
 from core.middleware import SESSION_LAST_ACTIVITY_KEY
 from core.notice_services import add_months, get_notice_counts, is_expiring_soon
 from core.ocr_layout_services import (
-    OcrDisabledError, OcrFailedError, OcrRetryWaitTimeLimitError, OcrTimeLimitError, TextData, TextDatas,
+    OcrDisabledError, OcrFailedError, OcrRetryWaitTimeLimitError, OcrTimeLimitError, OcrVisionUnavailableError,
+    TextData, TextDatas,
 )
 from core.text_extraction_services import (
     is_scanned, try_immediate_text_layer_extraction, try_immediate_text_layer_extraction_batch,
@@ -1785,6 +1787,81 @@ class ChunkUploadServiceTests(TestCase):
         self.assertTrue((self.tmp_dir / temp_name).exists())
         (self.tmp_dir / temp_name).unlink(missing_ok=True)
 
+    def test_save_upload_chunk_leaves_only_final_chunk_file(self):
+        """チャンクは一時名へ書いてから置き換えるため、保存後にディレクトリへ一時ファイル(.part-*)が
+        残らず、同じ番号の再送は完全な1チャンク分の内容で上書きされる。"""
+        save_upload_chunk("upload-atomic", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        save_upload_chunk("upload-atomic", 0, SimpleUploadedFile("chunk", b"B" * 10))  # タイムアウト後の再送
+        names = sorted(p.name for p in (self.chunk_dir / "upload-atomic").iterdir())
+        self.assertEqual(names, ["chunk_0000"])
+        self.assertEqual((self.chunk_dir / "upload-atomic" / "chunk_0000").read_bytes(), b"B" * 10)
+
+    def test_save_upload_chunk_failure_removes_partial_temp_file(self):
+        """書き込み中に失敗したら、一時ファイルを残さず、既存の同番号チャンクも壊さない。"""
+        save_upload_chunk("upload-fail", 0, SimpleUploadedFile("chunk", b"A" * 10))
+
+        class BrokenUpload:
+            def chunks(self):
+                yield b"B" * 3
+                raise OSError("simulated disconnect")
+
+        with self.assertRaises(PendingFileStorageError):
+            save_upload_chunk("upload-fail", 0, BrokenUpload())
+        directory = self.chunk_dir / "upload-fail"
+        self.assertEqual(sorted(p.name for p in directory.iterdir()), ["chunk_0000"])
+        self.assertEqual((directory / "chunk_0000").read_bytes(), b"A" * 10)
+
+    def test_save_upload_chunk_retries_replace_on_permission_error(self):
+        """Windowsで置換先が一瞬開かれていてPermissionErrorになっても、短くやり直して保存に成功する。"""
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise PermissionError("in use")
+            return real_replace(src, dst)
+
+        with patch("core.upload_services.os.replace", side_effect=flaky), patch("core.upload_services.time.sleep"):
+            save_upload_chunk("upload-perm", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual((self.chunk_dir / "upload-perm" / "chunk_0000").read_bytes(), b"A" * 10)
+
+    def test_save_upload_chunk_gives_up_after_repeated_permission_errors(self):
+        with patch("core.upload_services.os.replace", side_effect=PermissionError("locked")), patch(
+            "core.upload_services.time.sleep"
+        ):
+            with self.assertRaises(PendingFileStorageError):
+                save_upload_chunk("upload-perm2", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        names = [p.name for p in (self.chunk_dir / "upload-perm2").iterdir()]
+        self.assertEqual(names, [])  # 一時ファイルは残さない
+
+    def test_combine_rejects_chunks_with_inconsistent_sizes(self):
+        """最後以外のチャンクの大きさが揃っていない（欠けた断片が混ざった）場合は、結合せず
+        やり直しを促し、断片も片付ける。"""
+        save_upload_chunk("upload-size", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        save_upload_chunk("upload-size", 1, SimpleUploadedFile("chunk", b"B" * 7))  # 途中切れ
+        save_upload_chunk("upload-size", 2, SimpleUploadedFile("chunk", b"C" * 4))
+        with self.assertRaises(ChunkUploadError):
+            combine_upload_chunks(self.session, self.SESSION_KEY, "upload-size", 3, "broken.pdf")
+        self.assertFalse((self.chunk_dir / "upload-size").exists())
+        self.assertEqual(self.session.get(self.SESSION_KEY, []), [])
+
+    def test_combine_rejects_last_chunk_larger_than_others(self):
+        save_upload_chunk("upload-last", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        save_upload_chunk("upload-last", 1, SimpleUploadedFile("chunk", b"B" * 11))
+        with self.assertRaises(ChunkUploadError):
+            combine_upload_chunks(self.session, self.SESSION_KEY, "upload-last", 2, "broken.pdf")
+
+    def test_combine_accepts_consistent_chunks_with_shorter_last(self):
+        save_upload_chunk("upload-ok", 0, SimpleUploadedFile("chunk", b"A" * 10))
+        save_upload_chunk("upload-ok", 1, SimpleUploadedFile("chunk", b"B" * 10))
+        save_upload_chunk("upload-ok", 2, SimpleUploadedFile("chunk", b"C" * 3))
+        combine_upload_chunks(self.session, self.SESSION_KEY, "upload-ok", 3, "ok.pdf")
+        temp_name = self.session[self.SESSION_KEY][0]["temp_name"]
+        self.assertEqual((self.tmp_dir / temp_name).read_bytes(), b"A" * 10 + b"B" * 10 + b"C" * 3)
+        (self.tmp_dir / temp_name).unlink(missing_ok=True)
+
     def test_save_upload_chunk_io_failure_raises_pending_file_storage_error(self):
         with patch("pathlib.Path.mkdir", side_effect=OSError("simulated disk error")):
             with self.assertRaises(PendingFileStorageError):
@@ -2099,6 +2176,77 @@ class OcrLayoutServicesTests(TestCase):
         self.assertEqual(client.document_text_detection.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
+    def test_vision_api_exception_is_retried_then_fails_document(self):
+        """Vision呼び出し自体の例外（タイムアウト等）も応答`error`と同じくそのページだけやり直し、
+        使い切ったら、ページをスキップして本文欠落のまま完了にせず文書ごと失敗（OcrFailedError）にする。"""
+        from google.api_core.exceptions import DeadlineExceeded
+
+        with self._ocr_env(
+            pages=3, OCR_VISION_RETRY_COUNT=2, OCR_VISION_RETRY_WAIT_SECONDS=1,
+        ) as (client, sleep):
+            client.document_text_detection.side_effect = DeadlineExceeded("timeout")
+            with self.assertRaises(ocr_layout_services.OcrFailedError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertEqual(client.document_text_detection.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_vision_api_exception_recovers_on_retry(self):
+        """一時的なタイムアウトは再送で回復すれば、そのページの本文を採用して完了する。"""
+        from google.api_core.exceptions import DeadlineExceeded
+
+        with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=2, OCR_VISION_RETRY_WAIT_SECONDS=1) as (client, sleep):
+            ok = MagicMock()
+            ok.full_text_annotation.pages = []
+            ok.error.code = 0
+            client.document_text_detection.side_effect = [DeadlineExceeded("timeout"), ok]
+            text, _textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertEqual(client.document_text_detection.call_count, 2)
+        self.assertEqual(text, "")
+
+    def test_completed_pages_are_not_sent_to_vision(self):
+        """チェックポイントで済んでいるページはVisionにも画像化にも触れず、その結果を再利用する。
+        新たに処理したページだけon_page_doneで通知する。本文は全ページ分が順序どおりに連結される。"""
+        done = {
+            1: ("一頁目", [TextDatas(1, 100, 100, [TextData(0, 0, 1, 1, "一頁目")])]),
+            2: ("二頁目", []),
+        }
+        saved = []
+        with self._ocr_env(pages=3) as (client, _sleep):
+            client.document_text_detection.return_value = self._vision_ok()
+            text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(
+                b"%PDF-1.4 dummy", completed_pages=done,
+                on_page_done=lambda page_no, page_text, tds: saved.append(page_no),
+            )
+        self.assertEqual(client.document_text_detection.call_count, 1)
+        self.assertEqual(saved, [3])
+        self.assertTrue(text.startswith("一頁目\n二頁目\n"))
+        self.assertEqual(textdatas[0].textdata_list[0].text, "一頁目")
+
+    def test_vision_failure_raises_vision_unavailable_error(self):
+        """Vision側の失敗は、バッチが実行を打ち切る判断に使うため専用の型（OcrFailedErrorの派生）で送出する。"""
+        with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=0) as (client, _sleep):
+            client.document_text_detection.return_value = self._vision_error()
+            with self.assertRaises(ocr_layout_services.OcrVisionUnavailableError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+
+    def test_document_specific_vision_error_code_does_not_abort_the_run(self):
+        """INVALID_ARGUMENT(code=3)等の文書固有の失敗は、文書ごと失敗（OcrFailedError）にするが、
+        Vision側の失敗（OcrVisionUnavailableError）ではないので、バッチは実行を打ち切らない。"""
+        with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=0) as (client, _sleep):
+            client.document_text_detection.return_value = self._vision_error(code=3)
+            with self.assertRaises(ocr_layout_services.OcrFailedError) as ctx:
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertNotIsInstance(ctx.exception, ocr_layout_services.OcrVisionUnavailableError)
+
+    def test_document_specific_api_exception_does_not_abort_the_run(self):
+        from google.api_core.exceptions import InvalidArgument
+
+        with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=0) as (client, _sleep):
+            client.document_text_detection.side_effect = InvalidArgument("image too large")
+            with self.assertRaises(ocr_layout_services.OcrFailedError) as ctx:
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertNotIsInstance(ctx.exception, ocr_layout_services.OcrVisionUnavailableError)
+
     def test_vision_retry_count_zero_fails_on_first_error(self):
         with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=0) as (client, sleep):
             client.document_text_detection.return_value = self._vision_error()
@@ -2270,6 +2418,114 @@ class SearchablePdfServicesTests(TestCase):
             searchable_pdf_services.build_searchable_pdf(obj)
 
 
+class OcrCheckpointServicesTests(TestCase):
+    """core.ocr_checkpoint_services（OCRのページ単位チェックポイントと失敗時のバックオフ）の単体テスト。"""
+
+    PDF = b"%PDF-1.4 checkpoint"
+
+    def setUp(self):
+        path = Path(settings.MEDIA_ROOT) / ocr_checkpoint_services.CHECKPOINT_SUBDIR
+        shutil.rmtree(path, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, path, True)
+
+    @staticmethod
+    def _tds(text):
+        return [TextDatas(10, 20, 30, [TextData(1, 2, 3, 4, text)])]
+
+    def test_saved_pages_are_restored_on_next_load(self):
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        self.assertEqual(cp.completed_pages, {})
+        cp.save_page(1, "一頁", self._tds("一頁"))
+        cp.save_page(2, "二頁", self._tds("二頁"))
+        again = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        self.assertEqual(sorted(again.completed_pages), [1, 2])
+        text, tds = again.completed_pages[2]
+        self.assertEqual(text, "二頁")
+        self.assertEqual(tds[0].textdata_list[0].text, "二頁")
+
+    def test_different_pdf_discards_old_progress(self):
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        cp.save_page(1, "一頁", self._tds("一頁"))
+        other = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, b"%PDF-1.4 replaced")
+        self.assertEqual(other.completed_pages, {})
+        # 古い途中経過は破棄され、元のPDFで読み直しても残っていない（別文書の本文が混ざらない）。
+        self.assertEqual(ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF).completed_pages, {})
+
+    def test_torn_last_line_is_ignored_but_other_pages_survive(self):
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        cp.save_page(1, "一頁", self._tds("一頁"))
+        with open(cp._pages_path, "a", encoding="utf-8") as f:
+            f.write('{"p": 2, "text": "途中')  # クラッシュで途中までしか書かれなかった行
+        again = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        self.assertEqual(sorted(again.completed_pages), [1])
+
+    def test_failure_backoff_doubles_and_is_capped(self):
+        with override_settings(OCR_FAILURE_BACKOFF_MINUTES=10, OCR_FAILURE_BACKOFF_MAX_MINUTES=30):
+            cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+            self.assertFalse(ocr_checkpoint_services.is_in_backoff("document", 1, now=1000))
+            self.assertEqual(cp.record_failure(now=1000), (1, 600))
+            self.assertTrue(ocr_checkpoint_services.is_in_backoff("document", 1, now=1599))
+            self.assertFalse(ocr_checkpoint_services.is_in_backoff("document", 1, now=1600))
+            self.assertEqual(cp.record_failure(now=2000), (2, 1200))
+            self.assertEqual(cp.record_failure(now=3000), (3, 1800))  # 2400は上限1800で頭打ち
+            # 試行回数は次回の読み込みへ引き継がれる。
+            again = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+            self.assertEqual(again.attempts, 3)
+
+    def test_backoff_cap_below_base_keeps_wait_constant_instead_of_unlimited(self):
+        """上限0を「上限なし」と解釈せず、基準値まで切り上げて待ち時間を一定にする。"""
+        with override_settings(OCR_FAILURE_BACKOFF_MINUTES=10, OCR_FAILURE_BACKOFF_MAX_MINUTES=0):
+            self.assertEqual(
+                [ocr_checkpoint_services.backoff_seconds(n) for n in (1, 2, 8, 30)], [600, 600, 600, 600]
+            )
+
+    def test_purge_stale_survives_directory_scan_failure(self):
+        """掃除はあくまで後片付け。ディレクトリの走査に失敗しても例外を出さず、本文抽出バッチを巻き込まない。"""
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        cp.save_page(1, "一頁", self._tds("一頁"))
+        with patch("pathlib.Path.iterdir", side_effect=PermissionError("denied")):
+            self.assertEqual(ocr_checkpoint_services.purge_stale(retention_days=30), 0)
+
+    def test_save_page_failure_does_not_raise(self):
+        """チェックポイントへの保存失敗（容量不足等）はOCR本体を止めない。"""
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            cp.save_page(1, "一頁", self._tds("一頁"))  # 例外にならない
+        self.assertEqual(
+            ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF).completed_pages, {}
+        )
+
+    def test_corrupt_state_file_is_treated_as_missing(self):
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        cp.save_page(1, "一頁", self._tds("一頁"))
+        cp._state_path.write_text("{壊れたJSON", encoding="utf-8")
+        again = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        self.assertEqual(again.completed_pages, {})
+        self.assertFalse(ocr_checkpoint_services.is_in_backoff("document", 1))
+
+    def test_clear_removes_checkpoint_and_backoff(self):
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        cp.save_page(1, "一頁", self._tds("一頁"))
+        cp.record_failure(now=time.time())
+        ocr_checkpoint_services.clear("document", 1)
+        self.assertFalse(ocr_checkpoint_services.is_in_backoff("document", 1))
+        self.assertEqual(ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF).completed_pages, {})
+        ocr_checkpoint_services.clear("document", 1)  # 冪等
+
+    def test_purge_stale_removes_only_old_files(self):
+        old = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        old.save_page(1, "古い", self._tds("古い"))
+        fresh = ocr_checkpoint_services.OcrCheckpoint.load("document", 2, self.PDF)
+        fresh.save_page(1, "新しい", self._tds("新しい"))
+        long_ago = time.time() - 40 * 86400
+        for path in (old._state_path, old._pages_path):
+            os.utime(path, (long_ago, long_ago))
+        removed = ocr_checkpoint_services.purge_stale(retention_days=30)
+        self.assertEqual(removed, 2)
+        self.assertFalse(old._state_path.exists())
+        self.assertTrue(fresh._state_path.exists())
+
+
 class ExtractPendingPdfTextCommandTests(TestCase):
     """extract_pending_pdf_textコマンド（全文検索基盤、2026-08-10追加）の単体テスト。
     実際のPDF解析（pdfplumber）・Google Cloud Vision呼び出しはモック化し、
@@ -2429,6 +2685,155 @@ class ExtractPendingPdfTextCommandTests(TestCase):
         self.assertFalse(scanned.text_extracted)
         self.assertTrue(any("一時的なエラー" in line for line in logs.output))
         self.assertFalse(any(line.startswith("ERROR") for line in logs.output))
+
+    def _make_scanned_document(self, title):
+        doc = self._make_document(title)
+        doc.file.save(f"{title}.pdf", ContentFile(b"%PDF-1.4 " + b"x" * 5000), save=True)
+        return doc
+
+    def _run_with_mock_ocr(self, mock_ocr_setup, **command_kwargs):
+        """スキャン文書（テキスト層が空）のOCR呼び出しをモックしてバッチを1回実行する。"""
+        with override_settings(OCR_ENABLED=True), patch(
+            "core.management.commands.extract_pending_pdf_text.extract_text_layer", return_value="",
+        ), patch(
+            "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+        ) as mock_ocr:
+            mock_ocr_setup(mock_ocr)
+            call_command("extract_pending_pdf_text", **command_kwargs)
+        return mock_ocr
+
+    def _clean_checkpoints(self):
+        path = Path(settings.MEDIA_ROOT) / ocr_checkpoint_services.CHECKPOINT_SUBDIR
+        shutil.rmtree(path, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, path, True)
+
+    def test_vision_unavailable_aborts_run_and_backs_off_failed_document(self):
+        """Vision側の失敗（割当量超過等）が出たら、残りの文書へ進まずその実行を打ち切り、失敗した文書は
+        バックオフ中として次の実行では触らない（失敗する呼び出しを重ねて割当量を浪費しない）。"""
+        self._clean_checkpoints()
+        first = self._make_scanned_document("一件目")
+        second = self._make_scanned_document("二件目")
+
+        def setup(mock_ocr):
+            mock_ocr.extract_text_and_layout_via_ocr.side_effect = OcrVisionUnavailableError("quota")
+
+        mock_ocr = self._run_with_mock_ocr(setup)
+        self.assertEqual(mock_ocr.extract_text_and_layout_via_ocr.call_count, 1)  # 二件目へは進まない
+        self.assertTrue(ocr_checkpoint_services.is_in_backoff("document", first.pk))
+        self.assertFalse(ocr_checkpoint_services.is_in_backoff("document", second.pk))
+
+        # 次の実行：一件目は待機中なので飛ばされ、二件目だけが試される。
+        mock_ocr = self._run_with_mock_ocr(setup)
+        self.assertEqual(mock_ocr.extract_text_and_layout_via_ocr.call_count, 1)
+        self.assertTrue(ocr_checkpoint_services.is_in_backoff("document", second.pk))
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertFalse(first.text_extracted)
+        self.assertFalse(second.text_extracted)
+
+    def test_document_specific_failure_backs_off_but_does_not_abort_run(self):
+        """文書固有の失敗（Vision側ではない）は、その文書だけバックオフし、後続の文書は処理を続ける。"""
+        self._clean_checkpoints()
+        broken = self._make_scanned_document("壊れた文書")
+        ok = self._make_scanned_document("正常な文書")
+
+        def fake(pdf_bytes, **kwargs):
+            if kwargs["source_name"] == broken.display_name:
+                raise OcrFailedError("all pages failed")
+            return "本文", []
+
+        def setup(mock_ocr):
+            mock_ocr.extract_text_and_layout_via_ocr.side_effect = fake
+
+        self._run_with_mock_ocr(setup)
+        self.assertTrue(ocr_checkpoint_services.is_in_backoff("document", broken.pk))
+        ok.refresh_from_db()
+        self.assertTrue(ok.text_extracted)
+
+    def test_time_limit_keeps_progress_and_next_run_resumes_without_resending_pages(self):
+        """実行時間切れでは、済んだページを保存して持ち越し（失敗回数に数えない）、次の実行は済んだ
+        ページを渡して続きから再開する。完了後はチェックポイントを消す。"""
+        self._clean_checkpoints()
+        doc = self._make_scanned_document("大きな文書")
+        tds = [TextDatas(10, 20, 1, [TextData(0, 0, 1, 1, "一頁")])]
+
+        def first_run(mock_ocr):
+            def fake(pdf_bytes, **kwargs):
+                kwargs["on_page_done"](1, "一頁", tds)
+                raise OcrTimeLimitError("time over")
+
+            mock_ocr.extract_text_and_layout_via_ocr.side_effect = fake
+
+        self._run_with_mock_ocr(first_run)
+        doc.refresh_from_db()
+        self.assertFalse(doc.text_extracted)
+        self.assertFalse(ocr_checkpoint_services.is_in_backoff("document", doc.pk))  # 時間切れは失敗ではない
+
+        seen = {}
+
+        def second_run(mock_ocr):
+            def fake(pdf_bytes, **kwargs):
+                seen["completed"] = sorted(kwargs["completed_pages"])
+                return "一頁\n二頁", []
+
+            mock_ocr.extract_text_and_layout_via_ocr.side_effect = fake
+
+        self._run_with_mock_ocr(second_run)
+        self.assertEqual(seen["completed"], [1])
+        doc.refresh_from_db()
+        self.assertTrue(doc.text_extracted)
+        # 完了したのでチェックポイントは残らない（次に同じpkのPDFが来ても混ざらない）。
+        state_path, pages_path = ocr_checkpoint_services._paths("document", doc.pk)
+        self.assertFalse(state_path.exists())
+        self.assertFalse(pages_path.exists())
+
+    def test_target_listing_does_not_load_large_columns(self):
+        """処理順を決める一覧の取得では、本文・座標データ等の大きい列を読まない（未処理が大量でも
+        メモリを圧迫しない）。処理する文書は直前に全列を取り直す。"""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from documents.models import Document
+
+        doc = self._make_document("通常")
+        with patch(
+            "core.management.commands.extract_pending_pdf_text.extract_text_layer",
+            return_value="十分な文字数を含む本文テキストです。",
+        ), CaptureQueriesContext(connection) as ctx:
+            call_command("extract_pending_pdf_text")
+        # 一覧はサーバーサイドカーソル（iterator）で、pkとfileの2列だけを読む。
+        listing = [
+            q["sql"] for q in ctx.captured_queries
+            if "CURSOR FOR SELECT" in q["sql"] and Document._meta.db_table in q["sql"]
+        ]
+        self.assertTrue(listing, [q["sql"][:120] for q in ctx.captured_queries])
+        self.assertNotIn("extracted_text_normalized", listing[0])
+        self.assertNotIn("ocr_textdata", listing[0])
+        self.assertNotIn(".title", listing[0])
+        doc.refresh_from_db()
+        self.assertTrue(doc.text_extracted)
+
+    def test_record_finished_after_listing_is_skipped(self):
+        """一覧を作った後に処理済み（text_extracted=True）になった文書は、取り直しで外れて二重に
+        処理されない。"""
+        doc = self._make_scanned_document("先に完了")
+        calls = []
+
+        def fake_layer(obj):
+            calls.append(obj.pk)
+            return ""
+
+        original = ocr_checkpoint_services.is_in_backoff
+
+        def finish_then_check(label, pk, now=None):
+            # 一覧作成中に別プロセスが処理を終えた状況を再現する。
+            type(doc).objects.filter(pk=doc.pk).update(text_extracted=True)
+            return original(label, pk, now)
+
+        with patch(
+            "core.management.commands.extract_pending_pdf_text.extract_text_layer", side_effect=fake_layer
+        ), patch.object(ocr_checkpoint_services, "is_in_backoff", side_effect=finish_then_check):
+            call_command("extract_pending_pdf_text")
+        self.assertEqual(calls, [])
 
     def test_text_layer_extraction_populates_normalized_and_flag(self):
         doc = self._make_document("通常文書")
