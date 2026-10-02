@@ -68,5 +68,10 @@ Write-Host "  → 毎日 $($Schedule['ExtractLargePdfText'])（大容量）"
 - 夜間の上限（5.5時間）内にも終わらない文書は、何度実行しても完了しない。実行ログに
   「OCRが1回の実行時間の上限…内に終わりません」というエラーが出るので、その場合はPDFを分割する
   （ページ単位の進捗保存による再開は未実装。そのサイズの文書が実際に出てから検討する）。
+- Visionが一時的なエラー（割当量超過等）を返すと、そのページだけ再送し（`OCR_VISION_RETRY_COUNT`／
+  `OCR_VISION_RETRY_WAIT_SECONDS`）、使い切ると文書ごと失敗扱いで次回に持ち越す（`text_extracted=False`
+  のまま）。再送の待ちが残り時間に収まらない場合は「Vision APIが一時的なエラーを返し…次回に持ち越します」
+  という警告ログになる。これは上の「内に終わりません」エラー（文書が大きすぎて終わらない）とは別事象
+  で、PDFの分割は不要。
 - 大容量タスクの初回実行は、`Start-ScheduledTask JaDocSys_ExtractPendingPdfTextLarge` で手動実行し、
   `storage\logs\extract_pending_pdf_text_large.log` を確認する。

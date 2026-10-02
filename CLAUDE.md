@@ -43,7 +43,12 @@ Rev1.1〜1.3期、それより前）に反映節あり（2026-09-16、ARCHIVE.md
   extract_pending_pdf_text`）でOCR（`core.ocr_layout_services`、Google Cloud Vision
   `document_text_detection`）、の2段階で反映する。抽出完了は `text_extracted`（BooleanField、
   結果が空でも True）で管理し、バッチは `filter(text_extracted=False)` を対象にする（旧
-  `ocr_attempted`＋`extracted_text=""` 判定を1フラグに統合＝監査 案2）。OCRはPDFをpdf2imageで
+  `ocr_attempted`＋`extracted_text=""` 判定を1フラグに統合＝監査 案2）。ただし「結果が空」は
+  Visionがエラー無しで文字を返さなかった場合に限る。Visionは割当量超過等（code=8）を例外では
+  なくHTTP 200の応答の`error`で返すため、`core.ocr_layout_services`が`error`を検査し、そのページ
+  だけ`OCR_VISION_RETRY_COUNT`（既定3）回・`OCR_VISION_RETRY_WAIT_SECONDS`（既定3秒、2倍ずつ）
+  で再送し、使い切ったら`OcrFailedError`で文書ごと失敗扱い（`text_extracted=False`のまま次回
+  持ち越し。2026-10-02）。OCRはPDFをpdf2imageで
   ページごとに画像化して1ページずつ投入する方式で固定しており、ページ数の上限は無い。
   `settings.OCR_ENABLED`（既定True）でOCR自体の無効化が可能（GOOGLE_APPLICATION_CREDENTIALS
   未設定の環境でも、バッチはOCR呼び出し失敗を1件ずつ捕捉してログに残すのみで停止しない）。

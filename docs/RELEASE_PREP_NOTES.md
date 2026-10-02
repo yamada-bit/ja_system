@@ -218,6 +218,19 @@ IISのバージョン・構成に依存し机上では断定できないため�
 LBケースと同様にネットワーク構成（Waitress待受ポートへの外部直接アクセス遮断）を確認した上で
 TRUST_X_FORWARDED_PROTO=Trueを設定する、という手順。編集前に`doc/backup_20260916/`へバックアップ済み。
 
+### 追記：エンハンスドLB配下ではTrueにしない（2026-09-24実機検証、2026-10-02注記整理）
+
+上記2つの「対応済み」はヘッダ信頼方式（`TRUST_X_FORWARDED_PROTO=True`）を前提に書かれているが、
+2026-09-24の本番構築での実機検証で、**エンハンスドLB配下（12-4）ではこの方式は機能しない**ことが
+判明した。httpPlatformHandlerがLBの`X-Forwarded-Proto`をIIS自身の実接続方式（この構成では常に
+平文HTTP）で上書きするため、Trueにしても誤った値（http）を信頼するだけで無限リダイレクトが
+解消しない。LBのテストサーバー・本番とも`TRUST_X_FORWARDED_PROTO`は**Falseのまま**とし、
+`web.config`の`httpPlatform arguments`に`--url-scheme=https`を付けてWaitressの既定スキームを
+httpsに固定する（`環境構築・実装手順書.xlsx` シート5「12-4」⑤・手順13のD列、シート6参照）。
+`TRUST_X_FORWARDED_PROTO=True`が動く可能性があるのは、IISへ証明書を直接バインドする基本構成
+（12-2/12-3）のみで、こちらは実機未検証。`prod.py`と`.env.example`のコメントはこの内容に合わせて
+更新済み（それまでは「LB等でTrueにする」と読める記述だった）。
+
 ---
 
 ## 5. CSV 取込で新規登録される職員の初期パスワード（初回強制変更が無い）

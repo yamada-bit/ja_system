@@ -27,8 +27,14 @@ CSRF_COOKIE_SECURE = True
 # 非セキュアと判定し、上のSECURE_SSL_REDIRECT=True（既定）がHTTPS→HTTPSの無限リダイレクトを
 # 起こす。X-Forwarded-Protoヘッダを信頼してよいのは「外部から直接そのヘッダを送れない」
 # ネットワーク構成（プロキシ／LB以外からのアクセスをパケットフィルタ等で遮断済み）が前提のため、
-# 既定Falseとし、その前提が整った本番環境でのみ.envで明示的に有効化する
-# （プロキシを挟まないテスト環境ではFalseのままでSECURE_SSL_REDIRECTが正しく機能する）。
+# 既定Falseとし、.envで明示的に有効化したときだけ信頼する。
+# ただし、エンハンスドLB配下（LBのテストサーバー・本番）ではFalseのままにすること：
+# httpPlatformHandlerがLBのX-Forwarded-ProtoをIISの実接続方式（平文HTTP）で上書きするため
+# Trueにしても機能せず、誤った値を信頼して逆効果になる（2026-09-24実機検証）。この構成の
+# 無限リダイレクトは、web.configのhttpPlatform argumentsへ--url-scheme=httpsを指定して
+# Waitressの既定スキームをhttpsに固定することで解消する（環境構築・実装手順書 シート5「12-4」⑤）。
+# Trueで動く可能性があるのは、IISに証明書を直接バインドする基本構成（12-2/12-3）のみで、
+# 実機未検証。（プロキシを挟まないテスト環境ではFalseのままでSECURE_SSL_REDIRECTが正しく機能する）
 if env.bool("TRUST_X_FORWARDED_PROTO", default=False):
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
