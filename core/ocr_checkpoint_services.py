@@ -11,17 +11,17 @@
 
 を担う。DBのスキーマは変えず、`MEDIA_ROOT/ocr_checkpoints/` 配下の2ファイルで持つ：
 
-- `<label>_<pk>.state.json` … 小さな状態（PDFのSHA-256・試行回数・次回時刻）。バックオフ判定は
+- `<label>_<pk>.state.json` … 小さな状態（PDFの指紋・試行回数・次回時刻）。バックオフ判定は
   対象文書が多くてもこの小さいファイルだけを読めば済む。
 - `<label>_<pk>.pages.jsonl` … 1ページ1行の追記専用。1ページ完了するたびに1行足すだけなので、
   数百ページでも全体を書き直さない。クラッシュで最終行が途中までしか書かれていなくても、
   読み込み時にその行だけ捨てれば他ページは使える。
 
 チェックポイントはあくまで最適化であり、読み書きの失敗（OSError・壊れたJSON）でOCR本体を
-止めない（ログに残して、チェックポイント無しとして続行する）。PDFのSHA-256が一致しない場合
+止めない（ログに残して、チェックポイント無しとして続行する）。PDFの指紋（サイズ＋先頭・末尾の抜粋のハッシュ）が一致しない場合
 （ファイルが差し替わった等）は、古い途中経過を使うと別文書の本文が混ざるため破棄する。
 OCR完了後（DB保存まで成功したあと）に`clear`で消す。放置された古いファイルは`purge_stale`が
-更新日時で回収する（バッチ起動時に呼ぶ）。
+更新日時で回収する（日次の cleanup_temp_uploads バッチから呼ぶ）。
 """
 import hashlib
 import json
@@ -95,8 +95,9 @@ def clear(label, pk):
             logger.exception("OCRチェックポイントの削除に失敗しました: %s", path)
 
 
-def purge_stale(retention_days=None, now=None):
+def purge_stale(retention_days=None, now=None, dry_run=False):
     """更新日時が保持期間より古いチェックポイントを削除し、削除したファイル数を返す。
+    dry_run=Trueなら削除せず、対象の件数だけを返す。
     文書がその後削除された・OCR設定が無効化された等で、誰も続きを処理しなくなった残骸の回収用。
     処理中の文書はページ完了のたびに更新日時が進むので対象にならない。"""
     days = settings.OCR_CHECKPOINT_RETENTION_DAYS if retention_days is None else retention_days
@@ -109,7 +110,8 @@ def purge_stale(retention_days=None, now=None):
         for path in directory.iterdir():
             try:
                 if path.is_file() and path.stat().st_mtime < threshold:
-                    path.unlink()
+                    if not dry_run:
+                        path.unlink()
                     removed += 1
             except OSError:
                 logger.exception("古いOCRチェックポイントの削除に失敗しました: %s", path)
@@ -120,13 +122,29 @@ def purge_stale(retention_days=None, now=None):
     return removed
 
 
+_FINGERPRINT_SAMPLE_BYTES = 1024 * 1024
+
+
+def pdf_fingerprint(pdf_bytes):
+    """PDFの同一性を確かめる指紋（サイズ＋先頭・末尾1MBのSHA-256）を返す。
+
+    全体をハッシュすると500MBのPDFでは起動のたびに1〜2秒のCPUを使う。保管済みのファイルは
+    登録後に書き換えられないので、必要なのは「別の文書の途中経過を取り違えない」ための検出で、
+    サイズと先頭・末尾の抜粋で足りる。
+    """
+    digest = hashlib.sha256()
+    digest.update(pdf_bytes[:_FINGERPRINT_SAMPLE_BYTES])
+    digest.update(pdf_bytes[-_FINGERPRINT_SAMPLE_BYTES:])
+    return f"{len(pdf_bytes)}:{digest.hexdigest()}"
+
+
 class OcrCheckpoint:
     """1文書分のチェックポイント。`load`で作り、`completed_pages`と`save_page`をOCR関数へ渡す。"""
 
-    def __init__(self, label, pk, pdf_sha256, state, completed_pages):
+    def __init__(self, label, pk, fingerprint, state, completed_pages):
         self.label = label
         self.pk = pk
-        self.pdf_sha256 = pdf_sha256
+        self.pdf_fingerprint = fingerprint
         self.attempts = int(state.get("attempts", 0)) if state else 0
         # {page_no: (本文, [TextDatas])}。OCR関数がこのページのVision呼び出しを省くために使う。
         self.completed_pages = completed_pages
@@ -134,12 +152,12 @@ class OcrCheckpoint:
 
     @classmethod
     def load(cls, label, pk, pdf_bytes):
-        """途中経過を読み込む。SHA-256が合わない（別ファイル）・読めない場合は破棄して空から始める。"""
-        sha = hashlib.sha256(pdf_bytes).hexdigest()
+        """途中経過を読み込む。指紋が合わない（別ファイル）・読めない場合は破棄して空から始める。"""
+        fingerprint = pdf_fingerprint(pdf_bytes)
         state_path, pages_path = _paths(label, pk)
         state = _read_state(state_path)
         completed = {}
-        if state and state.get("pdf_sha256") != sha:
+        if state and state.get("pdf_fingerprint") != fingerprint:
             logger.warning("OCRチェックポイントのPDFが現在のファイルと一致しないため破棄します: %s_%s", label, pk)
             clear(label, pk)
             state = None
@@ -149,7 +167,7 @@ class OcrCheckpoint:
             # 状態ファイルが無いのにページ結果だけ残っている（書き込み途中の中断等）。出所が確かでない
             # ので使わず、消して空から始める。
             clear(label, pk)
-        return cls(label, pk, sha, state, completed)
+        return cls(label, pk, fingerprint, state, completed)
 
     @staticmethod
     def _read_pages(pages_path):
@@ -178,7 +196,7 @@ class OcrCheckpoint:
     def _write_state(self, **fields):
         state = {
             "version": _STATE_VERSION,
-            "pdf_sha256": self.pdf_sha256,
+            "pdf_fingerprint": self.pdf_fingerprint,
             "attempts": self.attempts,
             "next_retry_at": 0,
         }

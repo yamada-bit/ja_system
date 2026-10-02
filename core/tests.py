@@ -1891,6 +1891,29 @@ class CleanupTempUploadsCommandTests(TestCase):
         old_time = (timezone.now() - datetime.timedelta(hours=hours_ago)).timestamp()
         os.utime(path, (old_time, old_time))
 
+    def _stale_checkpoint(self, pk, days_ago):
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", pk, b"%PDF-1.4 stale")
+        cp.save_page(1, "頁", [TextDatas(1, 1, 1, [TextData(0, 0, 1, 1, "頁")])])
+        old = time.time() - days_ago * 86400
+        for path in (cp._state_path, cp._pages_path):
+            os.utime(path, (old, old))
+        return cp
+
+    def test_stale_ocr_checkpoints_are_removed_by_the_daily_cleanup(self):
+        """古いOCRチェックポイントは日次のcleanup_temp_uploadsが回収する（5分間隔のバッチでは走査しない）。
+        tmp_uploads/が無くても掃除する。直近のものは残す。"""
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        self.addCleanup(self.tmp_dir.mkdir, parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, Path(settings.MEDIA_ROOT) / ocr_checkpoint_services.CHECKPOINT_SUBDIR, True)
+        stale = self._stale_checkpoint(9001, days_ago=40)
+        fresh = self._stale_checkpoint(9002, days_ago=1)
+        call_command("cleanup_temp_uploads", "--dry-run")
+        self.assertTrue(stale._state_path.exists())  # dry-runでは消さない
+        call_command("cleanup_temp_uploads")
+        self.assertFalse(stale._state_path.exists())
+        self.assertFalse(stale._pages_path.exists())
+        self.assertTrue(fresh._state_path.exists())
+
     def test_old_loose_file_removed_recent_file_kept(self):
         old_file = self.tmp_dir / "old_a.pdf"
         recent_file = self.tmp_dir / "recent_a.pdf"
@@ -2095,16 +2118,15 @@ class OcrLayoutServicesTests(TestCase):
         ok_response = MagicMock()
         ok_response.full_text_annotation.pages = []
         ok_response.error.code = 0
-        mock_vision.ImageAnnotatorClient.return_value.document_text_detection.side_effect = [
-            RuntimeError("internal error"), ok_response,
-        ]
+        mock_vision.ImageAnnotatorClient.return_value.document_text_detection.side_effect = [ok_response]
 
         with override_settings(OCR_ENABLED=True):
             with patch.dict(
                 "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
             ):
+                # 1ページ目の画像化（文書側の原因）だけが失敗する。2ページ目はVisionまで進む。
                 with patch("pdf2image.pdfinfo_from_path", return_value={"Pages": 2}), patch(
-                    "pdf2image.convert_from_path", return_value=[MagicMock()]
+                    "pdf2image.convert_from_path", side_effect=[RuntimeError("bad image"), [MagicMock()]]
                 ):
                     text, textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
 
@@ -2229,6 +2251,18 @@ class OcrLayoutServicesTests(TestCase):
             with self.assertRaises(ocr_layout_services.OcrVisionUnavailableError):
                 ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
 
+    def test_non_google_exception_from_vision_call_is_retried_then_fails_document(self):
+        """ソケットのOSError等、GoogleAPIError以外の例外でも、ページをスキップして本文欠落のまま完了にせず、
+        再送してから文書ごと失敗（Vision側の失敗）にする。"""
+        with self._ocr_env(
+            pages=3, OCR_VISION_RETRY_COUNT=2, OCR_VISION_RETRY_WAIT_SECONDS=1,
+        ) as (client, sleep):
+            client.document_text_detection.side_effect = ConnectionResetError("reset by peer")
+            with self.assertRaises(ocr_layout_services.OcrVisionUnavailableError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertEqual(client.document_text_detection.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_document_specific_vision_error_code_does_not_abort_the_run(self):
         """INVALID_ARGUMENT(code=3)等の文書固有の失敗は、文書ごと失敗（OcrFailedError）にするが、
         Vision側の失敗（OcrVisionUnavailableError）ではないので、バッチは実行を打ち切らない。"""
@@ -2246,6 +2280,47 @@ class OcrLayoutServicesTests(TestCase):
             with self.assertRaises(ocr_layout_services.OcrFailedError) as ctx:
                 ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
         self.assertNotIsInstance(ctx.exception, ocr_layout_services.OcrVisionUnavailableError)
+
+    def test_document_specific_error_on_one_page_skips_only_that_page_without_retry(self):
+        """INVALID_ARGUMENT(code=3)になるページは、待っても直らないので再送せず、そのページだけスキップして
+        他のページの本文を採用し、文書は完了させる（1ページのために文書全体を永久に完了させない）。"""
+        saved = []
+        with self._ocr_env(pages=3, OCR_VISION_RETRY_COUNT=3, OCR_VISION_RETRY_WAIT_SECONDS=1) as (client, sleep):
+            client.document_text_detection.side_effect = [
+                self._vision_ok(), self._vision_error(code=3), self._vision_ok(),
+            ]
+            ocr_layout_services.extract_text_and_layout_via_ocr(
+                b"%PDF-1.4 dummy", on_page_done=lambda page_no, text, tds: saved.append(page_no),
+            )
+        self.assertEqual(client.document_text_detection.call_count, 3)  # 再送していない
+        sleep.assert_not_called()
+        self.assertEqual(saved, [1, 3])  # スキップしたページはチェックポイントにも載せない
+
+    def test_document_specific_api_exception_on_one_page_skips_only_that_page(self):
+        from google.api_core.exceptions import InvalidArgument
+
+        saved = []
+        with self._ocr_env(pages=3, OCR_VISION_RETRY_COUNT=3, OCR_VISION_RETRY_WAIT_SECONDS=1) as (client, sleep):
+            client.document_text_detection.side_effect = [
+                self._vision_ok(), InvalidArgument("image too large"), self._vision_ok(),
+            ]
+            ocr_layout_services.extract_text_and_layout_via_ocr(
+                b"%PDF-1.4 dummy", on_page_done=lambda page_no, text, tds: saved.append(page_no),
+            )
+        self.assertEqual(client.document_text_detection.call_count, 3)
+        sleep.assert_not_called()
+        self.assertEqual(saved, [1, 3])
+
+    def test_programming_error_from_vision_call_is_not_retried_or_treated_as_vision_outage(self):
+        """TypeError等のコード上のバグは、Vision側の障害として再送・実行打ち切りにせず、ページ単位のスキップ
+        （ERRORログ付き）に流す。全ページ失敗なら文書ごと失敗（OcrFailedError）で、打ち切り用の型ではない。"""
+        with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=3, OCR_VISION_RETRY_WAIT_SECONDS=1) as (client, sleep):
+            client.document_text_detection.side_effect = TypeError("unexpected keyword argument")
+            with self.assertRaises(ocr_layout_services.OcrFailedError) as ctx:
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertNotIsInstance(ctx.exception, ocr_layout_services.OcrVisionUnavailableError)
+        self.assertEqual(client.document_text_detection.call_count, 1)
+        sleep.assert_not_called()
 
     def test_vision_retry_count_zero_fails_on_first_error(self):
         with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=0) as (client, sleep):
@@ -2471,6 +2546,29 @@ class OcrCheckpointServicesTests(TestCase):
             # 試行回数は次回の読み込みへ引き継がれる。
             again = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
             self.assertEqual(again.attempts, 3)
+
+    def test_fingerprint_only_samples_head_and_tail_of_large_pdf(self):
+        """全体をハッシュしない（サイズ＋先頭・末尾1MBだけ）。サイズ違い・先頭違い・末尾違いは別物と判定する。"""
+        mb = 1024 * 1024
+        base = b"H" * mb + b"M" * (2 * mb) + b"T" * mb
+        fp = ocr_checkpoint_services.pdf_fingerprint(base)
+        self.assertEqual(fp, ocr_checkpoint_services.pdf_fingerprint(bytes(base)))
+        self.assertNotEqual(fp, ocr_checkpoint_services.pdf_fingerprint(base + b"x"))  # サイズ
+        self.assertNotEqual(fp, ocr_checkpoint_services.pdf_fingerprint(b"X" + base[1:]))  # 先頭
+        self.assertNotEqual(fp, ocr_checkpoint_services.pdf_fingerprint(base[:-1] + b"X"))  # 末尾
+        # 中央の入れ替えは（意図して）見ない。保管済みファイルは登録後に書き換えられないため。
+        self.assertEqual(fp, ocr_checkpoint_services.pdf_fingerprint(b"H" * mb + b"N" * (2 * mb) + b"T" * mb))
+
+    def test_purge_stale_dry_run_counts_without_deleting(self):
+        cp = ocr_checkpoint_services.OcrCheckpoint.load("document", 1, self.PDF)
+        cp.save_page(1, "古い", self._tds("古い"))
+        long_ago = time.time() - 40 * 86400
+        for path in (cp._state_path, cp._pages_path):
+            os.utime(path, (long_ago, long_ago))
+        self.assertEqual(ocr_checkpoint_services.purge_stale(retention_days=30, dry_run=True), 2)
+        self.assertTrue(cp._state_path.exists())
+        self.assertEqual(ocr_checkpoint_services.purge_stale(retention_days=30), 2)
+        self.assertFalse(cp._state_path.exists())
 
     def test_backoff_cap_below_base_keeps_wait_constant_instead_of_unlimited(self):
         """上限0を「上限なし」と解釈せず、基準値まで切り上げて待ち時間を一定にする。"""

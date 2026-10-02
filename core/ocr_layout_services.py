@@ -60,8 +60,10 @@ class OcrRetryWaitTimeLimitError(OcrTimeLimitError):
 
 # Visionが応答のerror.code（google.rpc.Code）で返す、Vision側の事情による失敗：
 # DEADLINE_EXCEEDED=4／PERMISSION_DENIED=7／RESOURCE_EXHAUSTED=8／INTERNAL=13／UNAVAILABLE=14／UNAUTHENTICATED=16。
-# これ以外（INVALID_ARGUMENT=3等）は、その文書（ページ画像）固有の失敗として扱う。
+# 割当量超過等はVision側の事情として、バッチを打ち切る対象にする。
 _SYSTEMIC_VISION_ERROR_CODES = frozenset({4, 7, 8, 13, 14, 16})
+# このページ画像固有の失敗（INVALID_ARGUMENT=3／NOT_FOUND=5／FAILED_PRECONDITION=9／OUT_OF_RANGE=11）。
+_DOCUMENT_SPECIFIC_VISION_ERROR_CODES = frozenset({3, 5, 9, 11})
 
 
 class OcrFailedError(Exception):
@@ -168,10 +170,13 @@ def extract_text_and_layout_via_ocr(
     if not settings.OCR_ENABLED:
         raise OcrDisabledError("OCR_ENABLED=False のためGoogle Cloud Vision連携は無効化されています。")
 
+    import grpc
     from google.api_core import exceptions as api_exceptions
-    from google.api_core.exceptions import GoogleAPIError
 
-    # この文書（ページ画像）固有の失敗。Vision側の事情ではないので、バッチの打ち切り対象にしない。
+    # Vision呼び出しの通信系の失敗として再送の対象にする例外。google.api_coreが変換しきれずに
+    # 漏れるgrpc.RpcErrorと、ソケット等のOSErrorを含む（TypeError等のバグは含めない）。
+    call_errors = (api_exceptions.GoogleAPIError, OSError, grpc.RpcError)
+    # このページ画像固有の失敗。待っても直らず、Vision側の事情でもないので、再送せずページをスキップする。
     document_specific_errors = (
         api_exceptions.InvalidArgument, api_exceptions.NotFound,
         api_exceptions.FailedPrecondition, api_exceptions.OutOfRange,
@@ -216,39 +221,46 @@ def extract_text_and_layout_via_ocr(
                 image.save(buf, format="JPEG")
                 image_obj = vision.Image(content=buf.getvalue())
                 # 応答レベルのエラー（割当量超過等）は例外にならないので明示的に検査する。
-                # 一時的な混雑制限であることが多いため、そのページだけ待ってやり直す。やり直しを
-                # 使い切ってもエラーなら、ページ単位のスキップ（下のexcept）にはせず文書ごと中断する
+                # Vision側の事情（混雑・障害・通信断）は一時的なことが多いため、そのページだけ待ってやり直す。
+                # やり直しを使い切ってもエラーなら、ページ単位のスキップ（下のexcept）にはせず文書ごと中断する
                 # （続行しても後続ページが同じ理由で失敗しやすく、本文が欠けたまま「完了」になるため）。
+                # 一方、このページ画像固有の失敗（INVALID_ARGUMENT等）は待っても直らず、他の文書にも波及しない
+                # ので、再送せずそのページだけをスキップする（1ページのために文書全体を永久に完了させない）。
                 retries = max(settings.OCR_VISION_RETRY_COUNT, 0)
-                systemic = True  # 直近の失敗が、他の文書でも起こりうる（Vision側の）失敗か
+                document_specific = False
                 for attempt in range(retries + 1):
                     try:
                         response = client.document_text_detection(
                             image=image_obj, image_context={"language_hints": ["ja"]},
                             timeout=settings.OCR_VISION_TIMEOUT_SECONDS,
                         )
-                    except GoogleAPIError as exc:
-                        # タイムアウト（DeadlineExceeded）・接続断・一時的なサーバーエラー等、呼び出し
-                        # 自体の失敗も、応答`error`と同じくそのページだけやり直す。使い切っても失敗なら
-                        # 文書ごと失敗（下のOcrFailedError）。ページを飛ばして完了にすると本文が欠けたまま
-                        # text_extracted=Trueで確定し、全文検索から永久に漏れるため。
-                        systemic = not isinstance(exc, document_specific_errors)
+                    except call_errors as exc:
+                        # タイムアウト（DeadlineExceeded）・接続断・一時的なサーバーエラー、およびソケットの
+                        # OSError等、Vision呼び出し自体の通信系の失敗。応答`error`と同じくそのページだけ
+                        # やり直す。ページを飛ばして完了にすると本文が欠けたままtext_extracted=Trueで確定し、
+                        # 全文検索から永久に漏れるため。TypeError等のコード上のバグはここでは捕捉せず、
+                        # 下のページ単位のexcept（ERRORログ＋スタックトレース付きでスキップ）へ流す。
+                        document_specific = isinstance(exc, document_specific_errors)
                         message = (
                             f"Vision API呼び出しに失敗しました: {type(exc).__name__}: {exc} "
                             f"source={source_name} page={page_no}"
                         )
+                        systemic = not document_specific
                     else:
                         if response.error.code == 0:
                             break
                         systemic = response.error.code in _SYSTEMIC_VISION_ERROR_CODES
+                        document_specific = response.error.code in _DOCUMENT_SPECIFIC_VISION_ERROR_CODES
                         message = (
                             f"Vision APIがエラーを返しました: code={response.error.code} "
                             f"message={response.error.message} source={source_name} page={page_no}"
                         )
+                    if document_specific:
+                        break
                     if attempt >= retries:
                         # 割当量超過・障害・認証エラー等は他の文書でも同じ理由で失敗するので、バッチが
-                        # 実行ごと打ち切れるよう専用の型で送出する。画像が大きすぎる等、この文書だけの
-                        # 失敗（INVALID_ARGUMENT等）は、文書ごと失敗にするだけで他の文書は続ける。
+                        # 実行ごと打ち切れるよう専用の型で送出する。それ以外（原因が不明なcode等）は
+                        # 文書ごと失敗にとどめ、他の文書は続ける。
                         raise (OcrVisionUnavailableError if systemic else OcrFailedError)(message)
                     wait = settings.OCR_VISION_RETRY_WAIT_SECONDS * (2 ** attempt)
                     if deadline is not None and time.monotonic() + wait > deadline:
@@ -261,6 +273,10 @@ def extract_text_and_layout_via_ocr(
                         "%s。%s秒待って再試行します（%s/%s回目）", message, wait, attempt + 1, retries,
                     )
                     time.sleep(wait)
+                if document_specific:
+                    logger.warning("%s。このページの本文はスキップします", message)
+                    failed_pages += 1
+                    continue
                 page_textdatas = _get_lines(page_no, response)
                 page_text = "\n".join(_get_textlines(page_textdatas, page_no))
                 all_textdatas.extend(page_textdatas)
@@ -272,13 +288,21 @@ def extract_text_and_layout_via_ocr(
             except Exception:
                 # 1ページの画像化など文書側の原因による失敗で文書全体の処理を止めない。このページの
                 # 本文・座標データは欠落するが、他ページは継続する（移植元process_pdf_asyncの
-                # ページ単位try/exceptと同じ設計判断）。Vision API側の失敗（GoogleAPIError）は
+                # ページ単位try/exceptと同じ設計判断）。Vision呼び出しの失敗（例外の型を問わない）は
                 # 上でやり直し、使い切れば文書ごと失敗にするので、ここには来ない。
                 logger.exception(
                     "座標付きOCR処理でページの処理に失敗しました（このページはスキップ）: source=%s page=%s",
                     source_name, page_no,
                 )
                 failed_pages += 1
+
+    if failed_pages:
+        # 一部のページをスキップして完了させる場合（画像化の失敗・ページ固有のVisionエラー）。本文が欠けた
+        # まま完了扱いになるので、どれだけ欠けたかを運用者が後から追えるようにログに残す。
+        logger.warning(
+            "OCRで%s/%sページをスキップしました（本文は他のページのみ）: source=%s",
+            failed_pages, page_count, source_name,
+        )
 
     if page_count > 0 and failed_pages == page_count:
         # 全ページ失敗が「本文が空のOCR完了」に化けないように（一部ページだけの失敗は従来どおり

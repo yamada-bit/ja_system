@@ -258,7 +258,7 @@ OCR_FAILURE_BACKOFF_MAX_MINUTES = env.int("OCR_FAILURE_BACKOFF_MAX_MINUTES", def
 # しながら再試行自体は続ける）。
 OCR_FAILURE_ALERT_ATTEMPTS = env.int("OCR_FAILURE_ALERT_ATTEMPTS", default=5)
 # OCRチェックポイント（MEDIA_ROOT/ocr_checkpoints/）のうち、この日数更新されていないものを
-# 本文抽出バッチの起動時に削除する。文書が削除された・OCRを無効化した等で続きを処理する者が
+# 日次の cleanup_temp_uploads バッチで削除する。文書が削除された・OCRを無効化した等で続きを処理する者が
 # いなくなった残骸の回収用（0以下で自動削除しない）。処理中の文書はページ完了ごとに更新される。
 OCR_CHECKPOINT_RETENTION_DAYS = env.int("OCR_CHECKPOINT_RETENTION_DAYS", default=30)
 # 職員マスタCSV取込（画面）で受け付ける最大行数（ヘッダー・空行を除く）。新規職員1人ごとに

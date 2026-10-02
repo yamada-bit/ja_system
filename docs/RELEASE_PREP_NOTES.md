@@ -652,7 +652,7 @@ static/js minify・本番初期マスタ投入手段・定期バッチのsetting
 - 監査ログ回避：`BaseFileServeView`は、添付ダウンロード（as_attachment）なら継続Range要求でも
   必ず記録する（`if not is_continuation or as_attachment`）。PDF.jsのインライン表示だけ従来どおり
   継続要求を除外。テスト：`documents.tests`にダウンロード＋`bytes=1-`の監査テストを追加。
-- OCRページ欠落：Vision呼び出しの`GoogleAPIError`（DeadlineExceeded等）は、応答`error`と同じ
+- OCRページ欠落：Vision呼び出しの例外（DeadlineExceeded・ソケットのOSError等、型を問わない）は、応答`error`と同じ
   ページ単位の再送ループ（`OCR_VISION_RETRY_COUNT`）に載せ、使い切ったら`OcrFailedError`で文書ごと
   失敗扱い（`text_extracted=False`のまま次回バッチで**全ページ**再試行。ページ単位の進捗は保存しない）。
   画像化失敗など文書側の例外は従来どおりページ単位スキップ。「失敗ページを飛ばして
@@ -671,7 +671,7 @@ static/js minify・本番初期マスタ投入手段・定期バッチのsetting
   Vision・画像化に通さず再利用する（PDFのSHA-256が違えば破棄、壊れた最終行は無視）。DB保存に成功して
   から削除。実行時間切れ（25分）でも進捗が残るため、巨大文書は複数回の実行で完了する
   （従来は毎回1ページ目からで完了しなかった）。
-- **打ち切り**：Vision側の失敗（応答`error`・`GoogleAPIError`が再送を使い切った）は
+- **打ち切り**：Vision側の失敗（応答`error`・呼び出しの例外が再送を使い切った）は
   `OcrVisionUnavailableError`として、バッチがその実行を打ち切る（残りも同じ理由で失敗するため）。
   文書固有の失敗（全ページ画像化失敗等）は打ち切らず、その文書だけバックオフする。
 - **バックオフ**：失敗の度に`<label>_<pk>.state.json`へ試行回数と次回時刻を記録し、
@@ -752,9 +752,33 @@ static/js minify・本番初期マスタ投入手段・定期バッチのsetting
 - チャンク保存の`os.replace`がWindowsで`PermissionError`になりうる → 短い間隔で数回やり直す（`_replace_with_retry`）。
 - `purge_stale`の走査失敗でバッチが起動時に落ちる → 例外を捕捉してログのみで続行。
 - 文書固有のVisionエラー（INVALID_ARGUMENT等）でも実行全体を打ち切っていた → 打ち切りは割当量超過・障害・認証エラー等
-  （code 4/7/8/13/14/16、GoogleAPIErrorのうち文書固有でないもの）に限定。文書固有は文書ごと失敗にとどめる。
+  （code 4/7/8/13/14/16、GoogleAPIErrorのうち文書固有でないもの）に限定。文書固有は文書ごと失敗にとどめる（→追記9で「そのページだけスキップ」に変更）。
 - `OCR_FAILURE_BACKOFF_MAX_MINUTES=0`が「上限なし」になる → 基準値まで切り上げて一定にする。
 - 追加テスト：上記の各修正、`save_page`失敗・壊れた状態ファイル・走査失敗。
 
 未対応（意図的）：Google SDK以外の例外（ソケットのOSError等）によるページスキップ／チェックポイント読み込み時の
 PDF全体のSHA-256計算／古いチェックポイント掃除を日次バッチへ移すこと。いずれも影響は小さく、実測後に判断する。
+→ **2026-10-02に3点とも対応済み**（追記8）。
+
+### 11-追記8：レビューで見送った3点への対応（2026-10-02）
+
+- **Vision呼び出しの例外は型を問わず再送**：`GoogleAPIError`以外（ソケットの`OSError`等）でも、ページをスキップせず再送し、
+  使い切ったら文書ごと失敗にする（打ち切り対象は従来どおりVision側の失敗のみ。文書固有の`InvalidArgument`等は除く）。
+  ページ単位でスキップするのは、画像化（poppler）の失敗など文書側の原因だけ。
+- **チェックポイントの同一性確認を軽量化**：PDF全体のSHA-256をやめ、「サイズ＋先頭・末尾1MBのSHA-256」の指紋（`pdf_fingerprint`）に変更。
+  500MBでも1〜2秒の計算が不要になる。保管済みファイルは書き換えられないため、取り違えの検出として十分。
+- **古いチェックポイントの掃除を日次バッチへ**：5分間隔の本文抽出バッチからは外し、日次の`cleanup_temp_uploads`
+  （`--dry-run`対応）で回収する（`tmp_uploads/`が無くても実行）。手順書（環境構築・実装手順書 シート10）に反映。
+- テスト：全体1114件OK（追加4件）。
+- 文書（`../../doc`）：環境構築・実装手順書（シート4に OCR_FAILURE_*／OCR_CHECKPOINT_RETENTION_DAYS を追加、シート7に ocr_checkpoints/、
+  シート10の cleanup_temp_uploads に掃除対象を追記、改訂履歴1.6に追記）、保管処理_実装整理・タイムアウト対策まとめ（SHA-256→指紋、掃除の移動、
+  例外の型を問わない再送）を更新。
+
+### 11-追記9：2回目の`/code-review high`と修正（2026-10-02）
+
+- **文書固有のVisionエラー（INVALID_ARGUMENT等）は再送せず、そのページだけスキップ**：従来は4回呼んで約21秒待ったうえ、文書ごと失敗にして
+  12時間のバックオフを繰り返し、1ページのために文書全体が永久に完了しなかった。応答code（3/5/9/11）と`InvalidArgument`等の例外が対象。
+  他ページの本文を採用して文書は完了させる（スキップしたページは警告ログに残し、チェックポイントにも載せない）。
+- **再送の対象を通信系に絞る**：`except Exception`をやめ、`GoogleAPIError`・`OSError`・`grpc.RpcError`のみ再送。`TypeError`等のバグは
+  再送・実行打ち切りにせず、ページ単位のスキップ（ERRORログ＋スタックトレース）へ流す（全ページ失敗なら文書ごと失敗）。
+- `OcrCheckpoint.__init__`の引数名が関数`pdf_fingerprint`を隠していたのを改名。`cleanup_temp_uploads`のチェックポイント件数を「ファイル数」と明記。

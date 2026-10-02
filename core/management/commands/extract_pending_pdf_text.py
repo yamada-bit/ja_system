@@ -78,8 +78,6 @@ class Command(BaseCommand):
         total_failed = 0
         total_deferred = 0
         total_backoff = 0
-        # 誰も続きを処理しなくなった古いOCRチェックポイント（削除済み文書の残骸等）を回収する。
-        ocr_checkpoint_services.purge_stale()
         # 1回の実行に使える時間の上限（既定はsettings.OCR_BATCH_TIME_LIMIT_SECONDS、--time-limitで
         # 上書き）。タスクスケジューラの実行時間制限（register_scheduled_tasks.ps1の
         # $ExtractTimeLimit、30分）に強制終了される前に、自分で区切って終えるためのもの。

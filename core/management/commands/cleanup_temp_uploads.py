@@ -9,7 +9,10 @@
 
 いずれも「一定時間より古ければ、進行中のウィザードではなく放置されたものとみなして削除してよい」
 という判断が成り立つため、settings.STALE_TMP_UPLOAD_THRESHOLD_HOURS（既定24時間）より
-更新日時が古いものを削除する。Windowsタスクスケジューラ等から日次実行する想定
+更新日時が古いものを削除する。あわせて、OCRのチェックポイント（MEDIA_ROOT/ocr_checkpoints/、
+core.ocr_checkpoint_services）のうち、settings.OCR_CHECKPOINT_RETENTION_DAYS（既定30日）以上
+更新が無い残骸（削除済み文書・OCR無効化後など、続きを処理する者がいなくなったもの）も削除する。
+Windowsタスクスケジューラ等から日次実行する想定
 （core.management.commands.extract_pending_pdf_textと同様の運用）。
 
 コマンド名は`ja_system/bat/cleanup_temp_uploads.bat`が既に前提としている名前に合わせている
@@ -28,6 +31,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
+from core import ocr_checkpoint_services
 from core.upload_services import CHUNK_UPLOAD_SUBDIR, TMP_UPLOAD_SUBDIR
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,14 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
+        # OCRのチェックポイント（MEDIA_ROOT/ocr_checkpoints/）のうち、削除済み文書・OCR無効化などで
+        # 続きを処理する者がいなくなった残骸（settings.OCR_CHECKPOINT_RETENTION_DAYS以上未更新）も、
+        # 同じ「放置された一時領域」の回収としてここで日次に掃除する（5分間隔の本文抽出バッチの
+        # 起動ごとにディレクトリを走査しないため）。tmp_uploads/が無くても行う。
+        stale_checkpoints = ocr_checkpoint_services.purge_stale(dry_run=dry_run)
+        checkpoint_verb = "削除対象" if dry_run else "削除完了"
+        # 1文書につき状態ファイルとページ結果ファイルの2つがあるため、文書数ではなくファイル数で表示する。
+        self.stdout.write(f"{checkpoint_verb}: OCRチェックポイントのファイル{stale_checkpoints}件")
         tmp_dir = Path(settings.MEDIA_ROOT) / TMP_UPLOAD_SUBDIR
         if not tmp_dir.exists():
             self.stdout.write("tmp_uploads/が存在しないため何もしません。")

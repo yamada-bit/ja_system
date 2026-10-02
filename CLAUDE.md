@@ -48,7 +48,7 @@ Rev1.1〜1.3期、それより前）に反映節あり（2026-09-16、ARCHIVE.md
   なくHTTP 200の応答の`error`で返すため、`core.ocr_layout_services`が`error`を検査し、そのページ
   だけ`OCR_VISION_RETRY_COUNT`（既定3）回・`OCR_VISION_RETRY_WAIT_SECONDS`（既定3秒、2倍ずつ）
   で再送し、使い切ったら`OcrFailedError`で文書ごと失敗扱い（`text_extracted=False`のまま次回
-  持ち越し。`GoogleAPIError`〈タイムアウト等〉も同じ再送対象。2026-10-02）。文書単位の失敗に備え、
+  持ち越し。Vision呼び出しの例外〈タイムアウト・接続断等、型を問わない〉も同じ再送対象。2026-10-02）。文書単位の失敗に備え、
   OCR済みページは`MEDIA_ROOT/ocr_checkpoints/`へ1ページずつ保存して次回は再送せず続きから再開し
   〈`core.ocr_checkpoint_services`、DBスキーマ変更なし〉、失敗した文書は指数バックオフ
   〈`OCR_FAILURE_BACKOFF_MINUTES`既定30分〜上限`OCR_FAILURE_BACKOFF_MAX_MINUTES`〉で再試行を遅らせ、
