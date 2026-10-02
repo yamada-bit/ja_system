@@ -33,7 +33,7 @@ from django.db import InterfaceError, OperationalError
 
 from contracts.models import Contract
 from core import ocr_layout_services
-from core.ocr_layout_services import OcrDisabledError, OcrTimeLimitError
+from core.ocr_layout_services import OcrDisabledError, OcrRetryWaitTimeLimitError, OcrTimeLimitError
 from core.text_extraction_services import extract_text_layer, is_scanned
 from core.text_normalization import normalize_for_search
 from documents.models import Document
@@ -138,6 +138,14 @@ class Command(BaseCommand):
         """1件分の抽出と保存。戻り値は "processed" / "skipped" / "deferred" / "failed"。"""
         try:
             result = self._extract_text(obj, label, remaining_seconds)
+        except OcrRetryWaitTimeLimitError:
+            # Vision側の一時的なエラーで、やり直しの待ちが残り時間に収まらなかった場合。文書の大きさ
+            # が原因ではないので、「完了しない大きさ」のエラーログ（下）にはしない。
+            logger.warning(
+                "Vision APIが一時的なエラーを返し、やり直しの待ちが残り時間に収まらないため"
+                "次回に持ち越します: model=%s pk=%s", label, obj.pk,
+            )
+            return "deferred"
         except OcrTimeLimitError:
             if is_first:
                 logger.error(
@@ -222,6 +230,10 @@ class Command(BaseCommand):
             )
         except OcrDisabledError:
             return None
+        except OcrTimeLimitError:
+            # 時間切れは失敗ではなく「次回に持ち越し」（_process_oneが専用のログを出す）。下の
+            # 汎用の失敗ログ（ERROR＋スタックトレース）に流すと、運用者が障害と取り違える。
+            raise
         except Exception:
             logger.exception(
                 "Google Cloud Vision OCRに失敗しました（タイムアウト・割当量超過・認証エラー等）: model=%s pk=%s",

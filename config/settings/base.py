@@ -241,6 +241,13 @@ OCR_ENABLED = env.bool("OCR_ENABLED", default=True)
 # 時間制限（OCR_BATCH_TIME_LIMIT_SECONDS）はページの切れ目でしか判定できないため、タスクの
 # 強制終了まで止まる。超過したページは既存のページ単位のエラー処理でスキップされる。
 OCR_VISION_TIMEOUT_SECONDS = env.int("OCR_VISION_TIMEOUT_SECONDS", default=60)
+# Vision APIが応答の`error`（RESOURCE_EXHAUSTED等、HTTP 200で返るため例外にならない）を返したとき、
+# そのページだけをやり直す回数と待ち時間（秒）。待ち時間は1回目=この値、2回目=2倍…と延ばす。
+# 一時的な混雑制限は数秒で解消することが多く、文書全体を諦めて次回バッチで1ページ目からやり直す
+# より、そのページだけ再送するほうが安い（数百ページの文書で毎回途中失敗して完了しなくなるのを
+# 避ける）。回数を使い切っても失敗するページがあれば、従来どおり文書ごと失敗扱いで次回に持ち越す。
+OCR_VISION_RETRY_COUNT = env.int("OCR_VISION_RETRY_COUNT", default=3)
+OCR_VISION_RETRY_WAIT_SECONDS = env.int("OCR_VISION_RETRY_WAIT_SECONDS", default=3)
 # 職員マスタCSV取込（画面）で受け付ける最大行数（ヘッダー・空行を除く）。新規職員1人ごとに
 # Argon2でパスワードをハッシュ化するため（1件約50ms）、行数が多いとリクエストのタイムアウト
 # （httpPlatformHandler requestTimeout/LB）の原因になる。画面のフォームだけを制限し、

@@ -50,6 +50,23 @@ class OcrTimeLimitError(Exception):
     """OCRが呼び出し元の指定した制限時間（max_seconds）を超えたため中断したことを表す。"""
 
 
+class OcrRetryWaitTimeLimitError(OcrTimeLimitError):
+    """Visionがエラーを返し、やり直しの待ちで制限時間を超えるため中断したことを表す。
+
+    原因は「文書が大きくて終わらない」ではなく「Vision側の一時的な混雑」なので、バッチが
+    先頭1件目の時間切れとして出す「何度実行しても完了しない大きさ」のエラーログとは区別する。
+    """
+
+
+class OcrFailedError(Exception):
+    """OCRが本文を得られないまま終わったことを表す（呼び出し元は「完了」にせず再試行に回す）。
+
+    Vision APIは割当量超過（RESOURCE_EXHAUSTED、code=8）等を例外ではなく応答の `error` に
+    入れて返す。これを無視すると本文が空のまま「OCR成功」として確定し、text_extracted=True に
+    なって二度と再処理されない（全文検索から黙って漏れる）ため、この例外で必ず失敗扱いにする。
+    """
+
+
 # 同じ行とみなすy座標の許容差（200DPIで約1mm相当）。移植元のYTHRESHOLDと同じ値。
 _LINE_Y_THRESHOLD = 8
 
@@ -138,6 +155,7 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
 
     page_texts = []
     all_textdatas = []
+    failed_pages = 0
     with tempfile.TemporaryDirectory(prefix="ocr_") as tmp_dir:
         pdf_path = os.path.join(tmp_dir, "source.pdf")
         with open(pdf_path, "wb") as f:
@@ -160,13 +178,40 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
                 buf = io.BytesIO()
                 image.save(buf, format="JPEG")
                 image_obj = vision.Image(content=buf.getvalue())
-                response = client.document_text_detection(
-                    image=image_obj, image_context={"language_hints": ["ja"]},
-                    timeout=settings.OCR_VISION_TIMEOUT_SECONDS,
-                )
+                # 応答レベルのエラー（割当量超過等）は例外にならないので明示的に検査する。
+                # 一時的な混雑制限であることが多いため、そのページだけ待ってやり直す。やり直しを
+                # 使い切ってもエラーなら、ページ単位のスキップ（下のexcept）にはせず文書ごと中断する
+                # （続行しても後続ページが同じ理由で失敗しやすく、本文が欠けたまま「完了」になるため）。
+                retries = max(settings.OCR_VISION_RETRY_COUNT, 0)
+                for attempt in range(retries + 1):
+                    response = client.document_text_detection(
+                        image=image_obj, image_context={"language_hints": ["ja"]},
+                        timeout=settings.OCR_VISION_TIMEOUT_SECONDS,
+                    )
+                    if response.error.code == 0:
+                        break
+                    message = (
+                        f"Vision APIがエラーを返しました: code={response.error.code} "
+                        f"message={response.error.message} source={source_name} page={page_no}"
+                    )
+                    if attempt >= retries:
+                        raise OcrFailedError(message)
+                    wait = settings.OCR_VISION_RETRY_WAIT_SECONDS * (2 ** attempt)
+                    if deadline is not None and time.monotonic() + wait > deadline:
+                        # 待つと制限時間を超える。待たずに諦め、次回バッチに持ち越す。
+                        raise OcrRetryWaitTimeLimitError(
+                            f"OCRのやり直し待ちで制限時間（{max_seconds}秒）を超えるため中断しました: "
+                            f"{page_no}/{page_count}ページ目"
+                        )
+                    logger.warning(
+                        "%s。%s秒待って再試行します（%s/%s回目）", message, wait, attempt + 1, retries,
+                    )
+                    time.sleep(wait)
                 page_textdatas = _get_lines(page_no, response)
                 all_textdatas.extend(page_textdatas)
                 page_texts.append("\n".join(_get_textlines(page_textdatas, page_no)))
+            except (OcrFailedError, OcrTimeLimitError):
+                raise
             except Exception:
                 # 1ページの画像化・OCR失敗（Vision APIの一時的なエラー等）で文書全体の処理を
                 # 止めない。このページの本文・座標データは欠落するが、他ページは継続する
@@ -175,6 +220,12 @@ def extract_text_and_layout_via_ocr(pdf_bytes, *, source_name="", max_seconds=No
                     "座標付きOCR処理でページの処理に失敗しました（このページはスキップ）: source=%s page=%s",
                     source_name, page_no,
                 )
+                failed_pages += 1
+
+    if page_count > 0 and failed_pages == page_count:
+        # 全ページ失敗が「本文が空のOCR完了」に化けないように（一部ページだけの失敗は従来どおり
+        # スキップして他ページの本文を採用する）。
+        raise OcrFailedError(f"全{page_count}ページのOCRに失敗しました: source={source_name}")
 
     if source_name:
         logger.info(

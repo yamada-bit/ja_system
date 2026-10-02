@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import os
 import tempfile
@@ -29,7 +30,9 @@ from core.csv_services import sanitize_csv_cell, sanitize_csv_row
 from core.forms import search_year_choices
 from core.middleware import SESSION_LAST_ACTIVITY_KEY
 from core.notice_services import add_months, get_notice_counts, is_expiring_soon
-from core.ocr_layout_services import OcrDisabledError, OcrTimeLimitError, TextData, TextDatas
+from core.ocr_layout_services import (
+    OcrDisabledError, OcrFailedError, OcrRetryWaitTimeLimitError, OcrTimeLimitError, TextData, TextDatas,
+)
 from core.text_extraction_services import (
     is_scanned, try_immediate_text_layer_extraction, try_immediate_text_layer_extraction_batch,
 )
@@ -1987,6 +1990,7 @@ class OcrLayoutServicesTests(TestCase):
         mock_vision = MagicMock()
         mock_response = MagicMock()
         mock_response.full_text_annotation.pages = []
+        mock_response.error.code = 0
         mock_vision.ImageAnnotatorClient.return_value.document_text_detection.return_value = mock_response
         fake_images = [MagicMock() for _ in range(7)]
 
@@ -2013,6 +2017,7 @@ class OcrLayoutServicesTests(TestCase):
         mock_vision = MagicMock()
         ok_response = MagicMock()
         ok_response.full_text_annotation.pages = []
+        ok_response.error.code = 0
         mock_vision.ImageAnnotatorClient.return_value.document_text_detection.side_effect = [
             RuntimeError("internal error"), ok_response,
         ]
@@ -2029,11 +2034,105 @@ class OcrLayoutServicesTests(TestCase):
         self.assertEqual(text, "")
         self.assertEqual(textdatas, [])
 
+    @contextlib.contextmanager
+    def _ocr_env(self, pages, **setting_overrides):
+        """Vision・pdf2image・time.sleepをモックした環境で、(Visionのclientモック, sleepモック)を返す
+        （テスト補助）。やり直し待ちで実際に眠らないよう、time.sleepは常に差し替える。"""
+        mock_vision = MagicMock()
+        client = mock_vision.ImageAnnotatorClient.return_value
+        with override_settings(OCR_ENABLED=True, **setting_overrides):
+            with patch.dict(
+                "sys.modules", {"google.cloud": MagicMock(vision=mock_vision), "google.cloud.vision": mock_vision}
+            ):
+                with patch("pdf2image.pdfinfo_from_path", return_value={"Pages": pages}), patch(
+                    "pdf2image.convert_from_path", return_value=[MagicMock()]
+                ), patch("core.ocr_layout_services.time.sleep") as mock_sleep:
+                    yield client, mock_sleep
+
+    @staticmethod
+    def _vision_error(code=8):
+        response = MagicMock()
+        response.error.code = code
+        response.error.message = "Resource has been exhausted (e.g. check quota)."
+        return response
+
+    @staticmethod
+    def _vision_ok():
+        response = MagicMock()
+        response.error.code = 0
+        response.full_text_annotation.pages = []
+        return response
+
+    def test_vision_response_error_raises_instead_of_empty_success(self):
+        """Visionが割当量超過（code=8）を例外ではなく応答のerrorで返し続けたとき、本文が空の
+        「OCR成功」にせずOcrFailedErrorを送出する（text_extracted=Trueで確定して全文検索から
+        黙って漏れるのを防ぐ。2026-10-02、20MB超スキャンPDFの検証で発覚）。"""
+        with self._ocr_env(pages=1) as (client, _sleep):
+            client.document_text_detection.return_value = self._vision_error()
+            with self.assertRaises(ocr_layout_services.OcrFailedError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+
+    def test_vision_response_error_retries_same_page_then_succeeds(self):
+        """応答エラーはそのページだけ待ってやり直し、通ればそのまま続行する（文書全体を諦めて
+        次回バッチで1ページ目からやり直すより安い）。待ち時間は2倍ずつ延びる。"""
+        with self._ocr_env(
+            pages=2, OCR_VISION_RETRY_COUNT=3, OCR_VISION_RETRY_WAIT_SECONDS=3,
+        ) as (client, sleep):
+            client.document_text_detection.side_effect = [
+                self._vision_error(), self._vision_error(), self._vision_ok(),  # 1ページ目: 2回失敗→成功
+                self._vision_ok(),  # 2ページ目
+            ]
+            text, _textdatas = ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertEqual(client.document_text_detection.call_count, 4)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [3, 6])
+        self.assertEqual(text, "\n")
+
+    def test_vision_response_error_gives_up_after_retries_and_skips_remaining_pages(self):
+        """やり直しを使い切ってもエラーなら文書ごと中断し、残りのページで割当量を無駄に消費しない
+        （呼び出しは1ページ目の 1回＋やり直し回数 だけ）。"""
+        with self._ocr_env(
+            pages=3, OCR_VISION_RETRY_COUNT=2, OCR_VISION_RETRY_WAIT_SECONDS=1,
+        ) as (client, sleep):
+            client.document_text_detection.return_value = self._vision_error()
+            with self.assertRaises(ocr_layout_services.OcrFailedError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertEqual(client.document_text_detection.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_vision_retry_count_zero_fails_on_first_error(self):
+        with self._ocr_env(pages=1, OCR_VISION_RETRY_COUNT=0) as (client, sleep):
+            client.document_text_detection.return_value = self._vision_error()
+            with self.assertRaises(ocr_layout_services.OcrFailedError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+        self.assertEqual(client.document_text_detection.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_vision_retry_wait_beyond_deadline_raises_time_limit(self):
+        """やり直しの待ちで制限時間（max_seconds）を超えるなら、待たずにOcrTimeLimitErrorで
+        打ち切る（バッチが次回に持ち越す。失敗扱いにはしない）。"""
+        with self._ocr_env(
+            pages=1, OCR_VISION_RETRY_COUNT=3, OCR_VISION_RETRY_WAIT_SECONDS=30,
+        ) as (client, sleep):
+            client.document_text_detection.return_value = self._vision_error()
+            with patch("core.ocr_layout_services.time.monotonic", side_effect=[0, 1, 5]):
+                with self.assertRaises(ocr_layout_services.OcrRetryWaitTimeLimitError):
+                    ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy", max_seconds=10)
+        sleep.assert_not_called()
+
+    def test_all_pages_failing_with_exceptions_raises(self):
+        """全ページが例外で失敗した場合も、本文が空のOCR完了に化けさせずOcrFailedErrorにする。
+        （一部ページだけの失敗は従来どおりスキップして他ページを採用する）"""
+        with self._ocr_env(pages=2) as (client, _sleep):
+            client.document_text_detection.side_effect = [RuntimeError("a"), RuntimeError("b")]
+            with self.assertRaises(ocr_layout_services.OcrFailedError):
+                ocr_layout_services.extract_text_and_layout_via_ocr(b"%PDF-1.4 dummy")
+
     def test_vision_call_has_timeout(self):
         """Vision APIの呼び出しにタイムアウトを付ける（応答が固まって1ページで長時間止まらないように）。"""
         mock_vision = MagicMock()
         mock_response = MagicMock()
         mock_response.full_text_annotation.pages = []
+        mock_response.error.code = 0
         client = mock_vision.ImageAnnotatorClient.return_value
         client.document_text_detection.return_value = mock_response
         with override_settings(OCR_ENABLED=True, OCR_VISION_TIMEOUT_SECONDS=17):
@@ -2312,6 +2411,25 @@ class ExtractPendingPdfTextCommandTests(TestCase):
         self.assertFalse(scanned.text_extracted)
         self.assertTrue(normal.text_extracted)
 
+    def test_retry_wait_time_limit_on_first_record_does_not_log_too_large_error(self):
+        """先頭1件でも、Visionの一時エラーでやり直しの待ちが制限時間に収まらなかった場合は、
+        「何度実行しても完了しない大きさ」のERRORログを出さず（原因は文書の大きさではない）、
+        警告だけ出して持ち越す。text_extractedはFalseのまま。"""
+        scanned = self._make_document("スキャン")
+        scanned.file.save("scan.pdf", ContentFile(b"%PDF-1.4 " + b"x" * 5000), save=True)
+        with override_settings(OCR_ENABLED=True), patch(
+            "core.management.commands.extract_pending_pdf_text.extract_text_layer", return_value="",
+        ), patch(
+            "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+        ) as mock_ocr:
+            mock_ocr.extract_text_and_layout_via_ocr.side_effect = OcrRetryWaitTimeLimitError("wait")
+            with self.assertLogs("core.management.commands.extract_pending_pdf_text", level="WARNING") as logs:
+                call_command("extract_pending_pdf_text")
+        scanned.refresh_from_db()
+        self.assertFalse(scanned.text_extracted)
+        self.assertTrue(any("一時的なエラー" in line for line in logs.output))
+        self.assertFalse(any(line.startswith("ERROR") for line in logs.output))
+
     def test_text_layer_extraction_populates_normalized_and_flag(self):
         doc = self._make_document("通常文書")
         with patch(
@@ -2394,6 +2512,23 @@ class ExtractPendingPdfTextCommandTests(TestCase):
                     call_command("extract_pending_pdf_text")
         doc.refresh_from_db()
         self.assertEqual(doc.extracted_text_normalized, "")
+        self.assertFalse(doc.text_extracted)
+
+    def test_ocr_failed_error_does_not_mark_extracted_so_it_retries_next_run(self):
+        """Vision APIの割当量超過等でOCRがOcrFailedErrorになった場合、本文が空のまま
+        text_extracted=Trueで確定せず、次回バッチで再試行される（2026-10-02の不具合修正）。"""
+        doc = self._make_document("割当量超過文書")
+        with override_settings(OCR_ENABLED=True):
+            with patch(
+                "core.text_extraction_services.pdfplumber.open", return_value=self._mock_pdfplumber(""),
+            ):
+                with patch(
+                    "core.management.commands.extract_pending_pdf_text.ocr_layout_services"
+                    ".extract_text_and_layout_via_ocr",
+                    side_effect=OcrFailedError("quota"),
+                ):
+                    call_command("extract_pending_pdf_text")
+        doc.refresh_from_db()
         self.assertFalse(doc.text_extracted)
 
     def test_one_failure_does_not_stop_processing_of_other_documents(self):
