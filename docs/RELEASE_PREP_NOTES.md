@@ -782,3 +782,13 @@ PDF全体のSHA-256計算／古いチェックポイント掃除を日次バッ�
 - **再送の対象を通信系に絞る**：`except Exception`をやめ、`GoogleAPIError`・`OSError`・`grpc.RpcError`のみ再送。`TypeError`等のバグは
   再送・実行打ち切りにせず、ページ単位のスキップ（ERRORログ＋スタックトレース）へ流す（全ページ失敗なら文書ごと失敗）。
 - `OcrCheckpoint.__init__`の引数名が関数`pdf_fingerprint`を隠していたのを改名。`cleanup_temp_uploads`のチェックポイント件数を「ファイル数」と明記。
+
+### 11-追記10：`ja_system/bat/`・`bat_srv/` の確認と修正（2026-10-02、git管理外）
+
+- 確認：両フォルダはパス以外同一。本文抽出の通常（`--max-bytes 20971520 --time-limit 600`）／大容量（`--larger-than-bytes 20971520 --time-limit 19800`）の
+  境界・時間は登録スクリプトの実行時間制限（30分／6時間）と整合。全`.bat`が`DJANGO_SETTINGS_MODULE=config.settings.prod`を明示。
+- `daily_backup.ps1`：robocopy `/MIR`の除外（`/XD`）に`ocr_checkpoints`を追加（`tmp_uploads`と同様、再生成できる一時データのため）。
+  除外を足す前にミラー済みだった分は`media\latest\`に残る（無害）。
+- `.bat`先頭のコメントを現行に更新（通常／大容量の担当・境界・時間上限、`MultipleInstances=IgnoreNew`必須、チェックポイントでの再開、
+  `cleanup_temp_uploads.bat`がOCRチェックポイントも掃除すること）。動作の変更なし。
+- 変更していない点：`.bat`は常に`exit /b 0`（失敗は`LastTaskResult`に出ずログで見る。既存方針）。
